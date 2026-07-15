@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+:root{
+  --bg:#FAF9F7;--surface:#ffffff;--surface-2:#F5F3F0;--surface-3:#EDEAE5;
+  --border:#EBE8E3;--border-strong:#DAD5CE;
+  --text:#211F1C;--text-2:#6B6763;--text-3:#9C978F;
+  --accent:#E0693F;--accent-2:#C4552E;--accent-soft:#FBEADF;
+  --shadow:0 1px 2px rgba(40,30,20,.04),0 6px 16px rgba(40,30,20,.05);
+  --st-open-bg:#EFEDEA;--st-open-fg:#6B6763;--st-open-dot:#A29D96;
+  --st-proposed-bg:#E7F0FB;--st-proposed-fg:#2E6BC4;--st-proposed-dot:#3B82F6;
+  --st-locked-bg:#EEE9FB;--st-locked-fg:#6D4BC4;--st-locked-dot:#8B5CF6;
+  --st-live-bg:#DEF2EE;--st-live-fg:#1C8577;--st-live-dot:#14A08C;
+  --st-testing-bg:#FBF0DA;--st-testing-fg:#A9720F;--st-testing-dot:#E0A22B;
+  --st-verified-bg:#E1F2E3;--st-verified-fg:#2C8A3D;--st-verified-dot:#33A852;
+  --st-stuck-bg:#FBE7E3;--st-stuck-fg:#BF4638;--st-stuck-dot:#DE5B4A;
+  --role-backend:#5468C9;--role-frontend:#C0568C;--role-mobile:#3F9E8C;--role-system:#8A857F;
+}
+[data-theme="dark"]{
+  --bg:#161514;--surface:#201E1D;--surface-2:#282624;--surface-3:#312E2B;
+  --border:#332F2C;--border-strong:#443F3A;
+  --text:#F3F1EE;--text-2:#A7A29C;--text-3:#726D68;
+  --accent:#F0845C;--accent-2:#F59A77;--accent-soft:#38271F;
+  --shadow:0 1px 2px rgba(0,0,0,.24),0 6px 18px rgba(0,0,0,.30);
+  --st-open-bg:#2A2826;--st-open-fg:#A7A29C;--st-open-dot:#726D68;
+  --st-proposed-bg:#1B2838;--st-proposed-fg:#82B2F0;--st-proposed-dot:#4B90ED;
+  --st-locked-bg:#251F36;--st-locked-fg:#B79EF2;--st-locked-dot:#9B72F0;
+  --st-live-bg:#152C28;--st-live-fg:#6BCCBE;--st-live-dot:#2FB3A0;
+  --st-testing-bg:#2F2712;--st-testing-fg:#E6B95F;--st-testing-dot:#D9A032;
+  --st-verified-bg:#182C1C;--st-verified-fg:#74CB82;--st-verified-dot:#3FB457;
+  --st-stuck-bg:#301C19;--st-stuck-fg:#F08876;--st-stuck-dot:#DA6152;
+  --role-backend:#7E8FE0;--role-frontend:#DB7CAC;--role-mobile:#5FBDAA;--role-system:#9A948D;
+}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--accent-2)}
+@keyframes cfall{0%{transform:translateY(-4px) rotate(0);opacity:0}12%{opacity:1}100%{transform:translateY(30px) rotate(240deg);opacity:0}}
+@keyframes pulsedot{0%,100%{opacity:.45;transform:scale(1)}50%{opacity:1;transform:scale(1.15)}}
+@keyframes ring{0%{transform:scale(1);opacity:.5}100%{transform:scale(2.1);opacity:0}}
+</style>
+</helmet>
+<div ref="{{wrapRef}}" data-theme="{{theme}}" style="min-height:100vh;background:var(--bg);color:var(--text);font-family:'Geist',-apple-system,system-ui,sans-serif;-webkit-font-smoothing:antialiased">
+
+  <div style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:14px;padding:11px 20px;background:var(--surface);border-bottom:1px solid var(--border)">
+    <div onClick="{{goHome}}" style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;flex:none">
+      <div style="display:flex;align-items:center;gap:3px">
+        <span style="width:9px;height:9px;border-radius:50%;background:var(--accent);display:inline-block"></span>
+        <span style="width:14px;height:2px;border-radius:2px;background:var(--border-strong);display:inline-block"></span>
+        <span style="width:9px;height:9px;border-radius:50%;background:var(--role-backend);display:inline-block"></span>
+      </div>
+      <span style="font-weight:700;font-size:16px;letter-spacing:-.02em;color:var(--text)">sys<span style="color:var(--text-3);font-weight:400">-</span>buddy</span>
+    </div>
+
+    <div style="position:relative;flex:none">
+      <button onClick="{{toggleSwitcher}}" style="display:flex;align-items:center;gap:8px;padding:6px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:500;color:var(--text);max-width:220px" style-hover="border-color:var(--border-strong)">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{switcherLabel}}</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <sc-if value="{{switcherOpen}}" hint-placeholder-val="{{false}}">
+        <div style="position:absolute;top:calc(100% + 6px);left:0;width:280px;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:6px;z-index:50">
+          <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);padding:6px 9px 4px">Switch task</div>
+          <sc-for list="{{switcherTasks}}" as="st" hint-placeholder-count="4">
+            <button onClick="{{st.open}}" style="{{st.rowStyle}}" style-hover="background:var(--surface-2)">
+              <span style="width:8px;height:8px;border-radius:50%;background:{{st.chip.dot}};flex:none"></span>
+              <span style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{st.title}}</span>
+              <span style="font-size:11px;color:{{st.chip.fg}};font-weight:600">{{st.chip.label}}</span>
+            </button>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+
+    <div style="flex:1"></div>
+
+    <sc-if value="{{isBuddy}}" hint-placeholder-val="{{false}}">
+      <div style="display:flex;align-items:center;gap:7px;padding:5px 11px;background:var(--accent-soft);border:1px solid var(--accent);border-radius:999px;font-size:12px;font-weight:500;color:var(--accent-2)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+        viewing as buddy · task: signin
+      </div>
+    </sc-if>
+
+    <div style="display:flex;align-items:center;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;padding:3px;flex:none">
+      <button onClick="{{setHost}}" style="{{segHost}}">Host</button>
+      <button onClick="{{setBuddy}}" style="{{segBuddy}}">Buddy</button>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:7px;flex:none">
+      <span style="width:7px;height:7px;border-radius:50%;background:var(--st-verified-dot);animation:pulsedot 2.4s ease-in-out infinite"></span>
+      <span style="font-size:12px;color:var(--text-2);white-space:nowrap">Last refreshed just now</span>
+    </div>
+
+    <button onClick="{{toggleTheme}}" title="Toggle theme" style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;color:var(--text-2);flex:none" style-hover="border-color:var(--border-strong);color:var(--text)">
+      <sc-if value="{{isDark}}" hint-placeholder-val="{{false}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></svg>
+      </sc-if>
+      <sc-if value="{{isLight}}" hint-placeholder-val="{{true}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
+      </sc-if>
+    </button>
+  </div>
+
+  <sc-if value="{{showList}}" hint-placeholder-val="{{true}}">
+    <div style="max-width:1040px;margin:0 auto;padding:30px 20px 70px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+        <h1 style="font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;color:var(--text)">Tasks</h1>
+        <span style="font-size:13px;color:var(--text-2)">{{listCount}} in flight</span>
+      </div>
+      <p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">Two buddies, one task. Watch their agents negotiate a contract, build, and ship — you're just here to observe.</p>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <sc-for list="{{listTasks}}" as="task" hint-placeholder-count="5">
+          <div onClick="{{task.open}}" style="display:flex;align-items:center;gap:16px;padding:15px 18px;background:var(--surface);border:1px solid var(--border);border-radius:14px;cursor:pointer;transition:border-color .15s,box-shadow .15s" style-hover="border-color:var(--border-strong);box-shadow:var(--shadow)">
+            <span style="width:10px;height:10px;border-radius:50%;background:{{task.chip.dot}};flex:none"></span>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <span style="font-size:15px;font-weight:600;color:var(--text)">{{task.title}}</span>
+                <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:600;background:{{task.chip.bg}};color:{{task.chip.fg}}">
+                  <span style="width:6px;height:6px;border-radius:50%;background:{{task.chip.dot}}"></span>{{task.chip.label}}
+                </span>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;margin-top:9px">
+                <sc-for list="{{task.roles}}" as="r" hint-placeholder-count="2">
+                  <span title="{{r.label}}" style="width:22px;height:22px;border-radius:7px;background:{{r.c}};color:#fff;font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">{{r.i}}</span>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:7px;flex:none">
+              <span style="font-size:12.5px;color:var(--text-2);white-space:nowrap">{{task.last}}</span>
+              <sc-if value="{{task.hasStrikes}}" hint-placeholder-val="{{false}}">
+                <span style="display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;background:var(--st-stuck-bg);color:var(--st-stuck-fg)"><span style="width:5px;height:5px;border-radius:50%;background:var(--st-stuck-dot)"></span>{{task.strikeText}}</span>
+              </sc-if>
+            </div>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" stroke-width="2" style="flex:none"><path d="M9 6l6 6-6 6"/></svg>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{showTask}}" hint-placeholder-val="{{false}}">
+    <div style="max-width:1200px;margin:0 auto;padding:20px 20px 80px">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px">
+        <button onClick="{{goHome}}" style="display:inline-flex;align-items:center;gap:6px;padding:6px 11px;background:var(--surface);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-family:inherit;font-size:13px;color:var(--text-2)" style-hover="border-color:var(--border-strong);color:var(--text)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 6l-6 6 6 6"/></svg>Tasks
+        </button>
+        <h1 style="font-size:20px;font-weight:700;margin:0;color:var(--text);letter-spacing:-.02em">{{t.title}}</h1>
+        <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:{{t.stateChip.bg}};color:{{t.stateChip.fg}}">
+          <span style="width:6px;height:6px;border-radius:50%;background:{{t.stateChip.dot}}"></span>{{t.stateChip.label}}
+        </span>
+        <div style="flex:1"></div>
+        <sc-if value="{{showEventLogBtn}}" hint-placeholder-val="{{true}}">
+          <button onClick="{{toggleEventLog}}" style="{{eventBtnStyle}}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Event log
+          </button>
+        </sc-if>
+      </div>
+
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:20px 22px;margin-bottom:16px;overflow-x:auto">
+        <sc-if value="{{t.stuck}}" hint-placeholder-val="{{false}}">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;padding:9px 13px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:11px;font-size:13px;color:var(--st-stuck-fg);font-weight:500">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9l-8 14A2 2 0 004 21h16a2 2 0 001.7-3l-8-14a2 2 0 00-3.4 0z"/></svg>
+            {{t.stuckNote}}
+          </div>
+        </sc-if>
+        <div style="display:flex;align-items:flex-start;min-width:660px">
+          <sc-for list="{{t.steps}}" as="s" hint-placeholder-count="6">
+            <div style="display:flex;flex-direction:column;align-items:center;flex:1;position:relative;padding-top:4px">
+              <div style="position:absolute;top:18px;left:0;width:50%;height:2px;background:{{s.leftColor}}"></div>
+              <div style="position:absolute;top:18px;right:0;width:50%;height:2px;background:{{s.rightColor}}"></div>
+              <div style="{{s.nodeStyle}}">
+                <sc-if value="{{s.done}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2"><path d="M20 6L9 17l-5-5"/></svg></sc-if>
+                <sc-if value="{{s.current}}" hint-placeholder-val="{{false}}"><span style="width:8px;height:8px;border-radius:50%;background:#fff"></span><span style="position:absolute;inset:0;border-radius:50%;border:2px solid var(--accent);animation:ring 1.6s ease-out infinite"></span></sc-if>
+                <sc-if value="{{s.stuck}}" hint-placeholder-val="{{false}}"><span style="color:#fff;font-weight:700;font-size:14px">!</span></sc-if>
+                <sc-if value="{{s.upcoming}}" hint-placeholder-val="{{true}}"><span style="width:6px;height:6px;border-radius:50%;background:var(--border-strong)"></span></sc-if>
+              </div>
+              <span style="margin-top:10px;font-size:11.5px;font-weight:600;text-align:center;color:{{s.labelColor}};line-height:1.3;padding:0 4px">{{s.label}}</span>
+              <span style="margin-top:4px;font-size:10.5px;font-family:'Geist Mono',monospace;color:var(--text-3);height:13px">{{s.time}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <sc-if value="{{isMobile}}" hint-placeholder-val="{{false}}">
+        <div style="display:flex;background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:16px">
+          <button onClick="{{setThread}}" style="{{tabThread}}">Thread</button>
+          <button onClick="{{setContract}}" style="{{tabContract}}">Contract</button>
+          <button onClick="{{setLog}}" style="{{tabLog}}">Log</button>
+        </div>
+      </sc-if>
+
+      <div style="{{rowStyle}}">
+
+        <div style="{{threadWrapStyle}}">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">
+            <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+              <span style="font-weight:600;font-size:14px;color:var(--text)">Message thread</span>
+              <div style="display:flex;gap:4px">
+                <sc-for list="{{t.roles}}" as="r" hint-placeholder-count="2">
+                  <span title="{{r.label}}" style="width:22px;height:22px;border-radius:7px;background:{{r.c}};color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">{{r.i}}</span>
+                </sc-for>
+              </div>
+            </div>
+            <div style="padding:20px 18px;display:flex;flex-direction:column;gap:17px;max-height:640px;overflow-y:auto">
+              <sc-if value="{{t.hasMessages}}" hint-placeholder-val="{{true}}">
+                <sc-for list="{{t.messages}}" as="m" hint-placeholder-count="6">
+                  <sc-if value="{{m.sysNormal}}" hint-placeholder-val="{{false}}">
+                    <div style="display:flex;align-items:center;gap:12px;padding:1px 0">
+                      <div style="flex:1;height:1px;background:var(--border)"></div>
+                      <div style="display:flex;align-items:center;gap:7px;white-space:nowrap">
+                        <span style="color:{{m.iconColor}};display:flex">{{m.sysIcon}}</span>
+                        <span style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--text-3)">{{m.time}}</span>
+                        <span style="color:var(--text-3)">·</span>
+                        <span style="font-size:12px;color:var(--text-2);font-weight:500">{{m.sysText}}</span>
+                      </div>
+                      <div style="flex:1;height:1px;background:var(--border)"></div>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{m.sysStuck}}" hint-placeholder-val="{{false}}">
+                    <div style="display:flex;justify-content:center;padding:2px 0">
+                      <div style="display:flex;align-items:center;gap:9px;background:var(--st-stuck-bg);color:var(--st-stuck-fg);border:1px solid var(--st-stuck-dot);padding:8px 15px;border-radius:999px;font-size:12.5px;font-weight:600;text-align:center">
+                        <span style="font-family:'Geist Mono',monospace;font-size:11px;opacity:.8">{{m.time}}</span>{{m.sysText}}
+                      </div>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{m.isAgent}}" hint-placeholder-val="{{true}}">
+                    <div style="display:flex;gap:11px;align-items:flex-start">
+                      <span style="width:30px;height:30px;border-radius:9px;background:{{m.avC}};color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">{{m.avI}}</span>
+                      <div style="flex:1;min-width:0">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+                          <span style="font-size:13px;font-weight:600;color:var(--text)">{{m.roleLabel}}</span>
+                          <span style="background:{{m.typeBg}};color:{{m.typeFg}};padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:600">{{m.typeLabel}}</span>
+                          <span style="font-size:11px;color:var(--text-3);font-family:'Geist Mono',monospace">{{m.time}}</span>
+                        </div>
+                        <div style="{{m.bubbleStyle}}">
+                          <span>{{m.body}}</span>
+                          <sc-if value="{{m.hasCode}}" hint-placeholder-val="{{false}}">
+                            <pre style="margin:11px 0 2px;background:var(--surface-3);border:1px solid var(--border);border-radius:9px;padding:11px 13px;font-family:'Geist Mono',monospace;font-size:11.5px;line-height:1.55;color:var(--text-2);overflow-x:auto;white-space:pre">{{m.code}}</pre>
+                          </sc-if>
+                          <sc-if value="{{m.hasStrike}}" hint-placeholder-val="{{false}}">
+                            <div style="margin-top:10px;display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border-radius:999px;background:var(--surface);border:1px solid var(--st-stuck-dot);font-size:11.5px;font-weight:600;color:var(--st-stuck-fg)">
+                              <span style="display:flex;gap:3px">{{m.strikeDots}}</span>{{m.strikeText}}
+                            </div>
+                          </sc-if>
+                        </div>
+                        <sc-if value="{{m.isVerified}}" hint-placeholder-val="{{false}}">
+                          <div style="position:relative;height:0;overflow:visible">
+                            <div style="position:absolute;left:6px;top:4px;display:flex;gap:7px">
+                              <span style="width:7px;height:9px;border-radius:2px;background:var(--accent);animation:cfall 1.2s ease-in 0s forwards"></span>
+                              <span style="width:7px;height:9px;border-radius:2px;background:var(--st-verified-dot);animation:cfall 1.2s ease-in .1s forwards"></span>
+                              <span style="width:7px;height:9px;border-radius:2px;background:var(--role-backend);animation:cfall 1.2s ease-in .05s forwards"></span>
+                              <span style="width:7px;height:9px;border-radius:2px;background:var(--st-testing-dot);animation:cfall 1.2s ease-in .18s forwards"></span>
+                              <span style="width:7px;height:9px;border-radius:2px;background:var(--role-frontend);animation:cfall 1.2s ease-in .12s forwards"></span>
+                              <span style="width:7px;height:9px;border-radius:2px;background:var(--role-mobile);animation:cfall 1.2s ease-in .22s forwards"></span>
+                              <span style="width:7px;height:9px;border-radius:2px;background:var(--accent);animation:cfall 1.2s ease-in .3s forwards"></span>
+                            </div>
+                          </div>
+                        </sc-if>
+                      </div>
+                    </div>
+                  </sc-if>
+                </sc-for>
+              </sc-if>
+              <sc-if value="{{t.noMessages}}" hint-placeholder-val="{{false}}">
+                <div style="text-align:center;padding:50px 20px">
+                  <div style="display:inline-flex;align-items:center;gap:9px;margin-bottom:16px">
+                    <span style="width:34px;height:34px;border-radius:10px;background:var(--surface-2);border:1px dashed var(--border-strong);display:flex;align-items:center;justify-content:center;color:var(--text-3);font-weight:700;font-size:13px">B</span>
+                    <span style="display:flex;gap:3px"><span style="width:4px;height:4px;border-radius:50%;background:var(--text-3)"></span><span style="width:4px;height:4px;border-radius:50%;background:var(--text-3)"></span><span style="width:4px;height:4px;border-radius:50%;background:var(--text-3)"></span></span>
+                    <span style="width:34px;height:34px;border-radius:10px;background:var(--surface-2);border:1px dashed var(--border-strong);display:flex;align-items:center;justify-content:center;color:var(--text-3);font-weight:700;font-size:13px">F</span>
+                  </div>
+                  <p style="font-weight:600;font-size:15px;color:var(--text);margin:0 0 5px">No messages yet</p>
+                  <p style="font-size:13.5px;color:var(--text-2);margin:0">Your buddies haven't started talking.</p>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+        </div>
+
+        <div style="{{contractWrapStyle}}">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">
+            <div style="padding:14px 16px;border-bottom:1px solid var(--border)">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+                <span style="font-weight:600;font-size:14px;color:var(--text)">API contract</span>
+                <sc-if value="{{t.contractExists}}" hint-placeholder-val="{{true}}">
+                  <div style="display:flex;gap:3px;background:var(--surface-2);padding:3px;border-radius:9px">
+                    <sc-for list="{{t.versions}}" as="v" hint-placeholder-count="2">
+                      <button onClick="{{v.select}}" style="{{v.btnStyle}}">
+                        <sc-if value="{{v.locked}}" hint-placeholder-val="{{false}}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg></sc-if>
+                        {{v.id}}
+                      </button>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </div>
+              <sc-if value="{{t.draft}}" hint-placeholder-val="{{false}}">
+                <div style="margin-top:11px;display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px dashed var(--border-strong);border-radius:10px;font-size:12px;color:var(--text-2)">
+                  <span style="width:8px;height:8px;border-radius:50%;border:1.5px dashed var(--text-3)"></span>Draft — awaiting signatures
+                </div>
+              </sc-if>
+              <sc-if value="{{t.hasSigned}}" hint-placeholder-val="{{false}}">
+                <div style="margin-top:11px">
+                  <div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--st-verified-fg)" stroke-width="2"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg>Locked · signed by all parties
+                  </div>
+                  <div style="display:flex;flex-wrap:wrap;gap:6px">
+                    <sc-for list="{{t.signed}}" as="sg" hint-placeholder-count="2">
+                      <span style="display:inline-flex;align-items:center;gap:6px;background:var(--st-verified-bg);border-radius:999px;padding:3px 10px 3px 3px;font-size:11px;color:var(--st-verified-fg);font-weight:600">
+                        <span style="width:18px;height:18px;border-radius:6px;background:{{sg.c}};color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center">{{sg.i}}</span>{{sg.role}}<span style="font-family:'Geist Mono',monospace;opacity:.75">{{sg.time}}</span>
+                      </span>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-if>
+            </div>
+            <sc-if value="{{t.contractExists}}" hint-placeholder-val="{{true}}">
+              <div style="padding:6px">
+                <sc-for list="{{t.endpoints}}" as="e" hint-placeholder-count="3">
+                  <div style="border:1px solid var(--border);border-radius:11px;margin:6px;overflow:hidden">
+                    <button onClick="{{e.toggle}}" style="width:100%;display:flex;align-items:center;gap:9px;padding:10px 11px;background:transparent;border:none;cursor:pointer;text-align:left;font-family:inherit" style-hover="background:var(--surface-2)">
+                      <span style="background:{{e.methodBg}};color:{{e.methodFg}};font-family:'Geist Mono',monospace;font-size:10px;font-weight:700;padding:3px 7px;border-radius:6px;letter-spacing:.03em;flex:none">{{e.method}}</span>
+                      <span style="font-family:'Geist Mono',monospace;font-size:12.5px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">{{e.path}}</span>
+                      <span style="{{e.chevStyle}}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 6l6 6-6 6"/></svg></span>
+                    </button>
+                    <sc-if value="{{e.expanded}}" hint-placeholder-val="{{false}}">
+                      <div style="padding:0 13px 14px;border-top:1px solid var(--border)">
+                        <p style="font-size:12.5px;color:var(--text-2);margin:11px 0 13px;line-height:1.5">{{e.summary}}</p>
+                        <sc-if value="{{e.hasReq}}" hint-placeholder-val="{{true}}">
+                          <div style="margin-bottom:13px">
+                            <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin-bottom:7px">Request</div>
+                            <div style="border:1px solid var(--border);border-radius:9px;overflow:hidden">
+                              <sc-for list="{{e.request}}" as="f" hint-placeholder-count="2">
+                                <div style="display:flex;gap:10px;padding:7px 11px;align-items:baseline;border-bottom:1px solid var(--border)">
+                                  <span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--text);font-weight:500">{{f.n}}<sc-if value="{{f.req}}" hint-placeholder-val="{{false}}"><span style="color:var(--accent)">*</span></sc-if></span>
+                                  <span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:var(--role-backend)">{{f.t}}</span>
+                                  <span style="font-size:11px;color:var(--text-3);margin-left:auto;text-align:right">{{f.note}}</span>
+                                </div>
+                              </sc-for>
+                            </div>
+                          </div>
+                        </sc-if>
+                        <sc-if value="{{e.hasRes}}" hint-placeholder-val="{{true}}">
+                          <div style="margin-bottom:13px">
+                            <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin-bottom:7px;display:flex;justify-content:space-between"><span>Response</span><span style="color:var(--st-verified-fg);font-family:'Geist Mono',monospace;text-transform:none;letter-spacing:0">{{e.resStatus}}</span></div>
+                            <div style="border:1px solid var(--border);border-radius:9px;overflow:hidden">
+                              <sc-for list="{{e.response}}" as="f" hint-placeholder-count="2">
+                                <div style="display:flex;gap:10px;padding:7px 11px;align-items:baseline;border-bottom:1px solid var(--border)">
+                                  <span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--text);font-weight:500">{{f.n}}</span>
+                                  <span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:var(--role-backend)">{{f.t}}</span>
+                                  <span style="font-size:11px;color:var(--text-3);margin-left:auto;text-align:right">{{f.note}}</span>
+                                </div>
+                              </sc-for>
+                            </div>
+                          </div>
+                        </sc-if>
+                        <sc-if value="{{e.hasErr}}" hint-placeholder-val="{{true}}">
+                          <div>
+                            <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin-bottom:7px">Errors</div>
+                            <div style="display:flex;flex-direction:column;gap:6px">
+                              <sc-for list="{{e.errors}}" as="er" hint-placeholder-count="2">
+                                <div style="display:flex;gap:9px;align-items:baseline">
+                                  <span style="font-family:'Geist Mono',monospace;font-size:10.5px;font-weight:700;color:var(--st-stuck-fg);background:var(--st-stuck-bg);padding:2px 6px;border-radius:5px;flex:none">{{er.code}}</span>
+                                  <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--text);flex:none">{{er.name}}</span>
+                                  <span style="font-size:11px;color:var(--text-3);margin-left:auto;text-align:right">{{er.note}}</span>
+                                </div>
+                              </sc-for>
+                            </div>
+                          </div>
+                        </sc-if>
+                      </div>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{t.noContract}}" hint-placeholder-val="{{false}}">
+              <div style="text-align:center;padding:40px 22px">
+                <div style="width:38px;height:38px;border-radius:11px;background:var(--surface-2);border:1px dashed var(--border-strong);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;color:var(--text-3)">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
+                </div>
+                <p style="font-weight:600;font-size:14px;color:var(--text);margin:0 0 4px">No contract yet</p>
+                <p style="font-size:13px;color:var(--text-2);margin:0">Waiting on the first proposal from a buddy.</p>
+              </div>
+            </sc-if>
+          </div>
+        </div>
+
+      </div>
+
+      <div style="{{logWrapStyle}}">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-top:16px">
+          <div style="padding:13px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <span style="font-weight:600;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--text-2)" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Event log
+            </span>
+            <div style="flex:1"></div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <sc-for list="{{t.eventFilters}}" as="ef" hint-placeholder-count="5">
+                <button onClick="{{ef.select}}" style="{{ef.style}}">{{ef.label}}</button>
+              </sc-for>
+            </div>
+          </div>
+          <div style="max-height:320px;overflow-y:auto">
+            <sc-if value="{{t.hasEvents}}" hint-placeholder-val="{{true}}">
+              <sc-for list="{{t.events}}" as="ev" hint-placeholder-count="6">
+                <div style="display:flex;align-items:center;gap:14px;padding:9px 16px;border-bottom:1px solid var(--border)">
+                  <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--text-3);width:48px;flex:none">{{ev.time}}</span>
+                  <span style="display:inline-flex;align-items:center;gap:7px;width:112px;flex:none;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--text-2)"><span style="width:7px;height:7px;border-radius:2px;background:{{ev.color}};flex:none"></span>{{ev.kindLabel}}</span>
+                  <span style="font-size:12.5px;color:var(--text);font-family:'Geist Mono',monospace;min-width:0;overflow:hidden;text-overflow:ellipsis">{{ev.detail}}</span>
+                </div>
+              </sc-for>
+            </sc-if>
+            <sc-if value="{{t.noEvents}}" hint-placeholder-val="{{false}}">
+              <div style="text-align:center;padding:34px 20px;font-size:13px;color:var(--text-2)">Nothing logged for this filter.</div>
+            </sc-if>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:&quot;100%&quot;,&quot;height&quot;:900},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;default&quot;:&quot;light&quot;,&quot;tsType&quot;:&quot;'light'|'dark'&quot;,&quot;section&quot;:&quot;Display&quot;},&quot;startView&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;list&quot;,&quot;task&quot;],&quot;default&quot;:&quot;list&quot;,&quot;tsType&quot;:&quot;'list'|'task'&quot;,&quot;section&quot;:&quot;Display&quot;},&quot;viewerMode&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;host&quot;,&quot;buddy&quot;],&quot;default&quot;:&quot;host&quot;,&quot;tsType&quot;:&quot;'host'|'buddy'&quot;,&quot;section&quot;:&quot;Display&quot;},&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#E0693F&quot;,&quot;options&quot;:[&quot;#E0693F&quot;,&quot;#E8843F&quot;,&quot;#D9544A&quot;,&quot;#E0A22B&quot;],&quot;section&quot;:&quot;Theme&quot;}}">
+class Component extends DCLogic {
+  SK = {open:'open',contract_proposed:'proposed',contract_locked:'locked',backend_live:'live',testing:'testing',verified:'verified',stuck:'stuck'};
+  SLAB = {open:'open',contract_proposed:'contract proposed',contract_locked:'contract locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
+  ORDER = {open:0,contract_proposed:1,contract_locked:2,backend_live:3,testing:4,verified:5};
+  RL = {backend:{i:'B',c:'var(--role-backend)',label:'backend'},frontend:{i:'F',c:'var(--role-frontend)',label:'frontend'},mobile:{i:'M',c:'var(--role-mobile)',label:'mobile'}};
+  STEPS = [['open','open'],['contract_proposed','proposed'],['contract_locked','locked'],['backend_live','backend live'],['testing','testing'],['verified','verified']];
+
+  constructor(props){
+    super(props);
+    this.state = {
+      theme: props.defaultTheme || 'light',
+      viewerMode: props.viewerMode || 'host',
+      view: props.startView || 'list',
+      taskId: 'signin',
+      switcherOpen: false,
+      eventLogOpen: true,
+      mobileTab: 'thread',
+      isMobile: false,
+      version: {},
+      expanded: {},
+      eventFilter: 'all'
+    };
+    this.buildData();
+  }
+
+  componentDidMount(){
+    this._onResize = () => {
+      const m = window.innerWidth < 900;
+      if (m !== this.state.isMobile) this.setState({isMobile:m});
+    };
+    this._onResize();
+    window.addEventListener('resize', this._onResize);
+    this.applyAccent();
+  }
+  componentDidUpdate(){ this.applyAccent(); }
+  componentWillUnmount(){ window.removeEventListener('resize', this._onResize); }
+  applyAccent(){
+    if (this._wrap && this.props.accent){
+      this._wrap.style.setProperty('--accent', this.props.accent);
+      this._wrap.style.setProperty('--accent-2', this.props.accent);
+    }
+  }
+
+  av(role){ return this.RL[role] || {i:'?',c:'var(--role-system)',label:role}; }
+  stateChip(s){ const k=this.SK[s]; return {label:this.SLAB[s], bg:`var(--st-${k}-bg)`, fg:`var(--st-${k}-fg)`, dot:`var(--st-${k}-dot)`}; }
+  methodChip(m){ const k={GET:'proposed',POST:'live',PUT:'locked',PATCH:'testing',DELETE:'stuck'}[m]||'open'; return {bg:`var(--st-${k}-bg)`, fg:`var(--st-${k}-fg)`}; }
+  typeChip(type,pass){
+    const map={question:['question','open'],answer:['answer','proposed'],contract_proposal:['contract proposal','locked'],deploy_confirmed:['deploy confirmed','live'],verified:['verified','verified'],stuck:['stuck','stuck']};
+    let label,key;
+    if(type==='test_result'){ label=pass?'test · pass':'test · fail'; key=pass?'verified':'stuck'; }
+    else { const e=map[type]||['message','open']; label=e[0]; key=e[1]; }
+    return {label, bg:`var(--st-${key}-bg)`, fg:`var(--st-${key}-fg)`};
+  }
+
+  icon(kind){
+    const R=React.createElement;
+    const svg=(w,children)=>R('svg',{width:13,height:13,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:w},children);
+    if(kind==='lock') return svg(2,[R('rect',{key:1,x:5,y:11,width:14,height:9,rx:2}),R('path',{key:2,d:'M8 11V8a4 4 0 018 0v3'})]);
+    if(kind==='flow') return svg(2.5,R('path',{d:'M5 12h14M13 6l6 6-6 6'}));
+    if(kind==='verified') return svg(3,R('path',{d:'M20 6L9 17l-5-5'}));
+    if(kind==='task') return svg(2,[R('path',{key:1,d:'M12 3v3M12 18v3M3 12h3M18 12h3'}),R('circle',{key:2,cx:12,cy:12,r:3})]);
+    return svg(2,R('circle',{cx:12,cy:12,r:8}));
+  }
+  iconColor(kind){ return {lock:'var(--st-locked-dot)',flow:'var(--st-proposed-dot)',verified:'var(--st-verified-dot)',task:'var(--text-3)'}[kind]||'var(--text-3)'; }
+
+  A(role,type,time,body,opts){
+    opts=opts||{};
+    const av=this.av(role); const chip=this.typeChip(type,opts.pass);
+    const isVerified = type==='verified';
+    const bubble = {background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:'12px',borderTopLeftRadius:'4px',padding:'11px 13px',fontSize:'13.5px',lineHeight:'1.55',color:'var(--text)'};
+    if(isVerified){ bubble.background='var(--st-verified-bg)'; bubble.border='1px solid var(--st-verified-dot)'; }
+    if(type==='test_result' && opts.pass===false){ bubble.border='1px solid var(--st-stuck-dot)'; }
+    let strikeDots=null, strikeText='';
+    if(opts.strike){
+      const n=opts.strike[0], of=opts.strike[1];
+      strikeText=`strike ${n} of ${of}`;
+      const dots=[];
+      for(let i=1;i<=of;i++){ dots.push(React.createElement('span',{key:i,style:{width:'6px',height:'6px',borderRadius:'50%',background: i<=n?'var(--st-stuck-dot)':'var(--border-strong)'}})); }
+      strikeDots=React.createElement(React.Fragment,null,dots);
+    }
+    return {isAgent:true, sysNormal:false, sysStuck:false, avI:av.i, avC:av.c, roleLabel:av.label, typeLabel:chip.label, typeBg:chip.bg, typeFg:chip.fg, time, body, hasCode:!!opts.code, code:opts.code||'', hasStrike:!!opts.strike, strikeText, strikeDots, isVerified, bubbleStyle:bubble};
+  }
+  S(time,text,kind){
+    const stuck = kind==='stuck';
+    return {isAgent:false, sysNormal:!stuck, sysStuck:stuck, time, sysText:text, sysIcon:this.icon(kind), iconColor:this.iconColor(kind)};
+  }
+
+  ep(method,path,summary,request,resStatus,response,errors){ return {method,path,summary,request,resStatus,response,errors}; }
+
+  buildData(){
+    this.TASKS = [
+      {id:'signin', title:'Sign-in & session API', state:'verified', roles:['backend','frontend','mobile'], last:'11m ago', strikes:0},
+      {id:'checkout', title:'Checkout payments API', state:'stuck', roles:['backend','frontend'], last:'3m ago', strikes:3},
+      {id:'search', title:'Search indexing service', state:'testing', roles:['backend','mobile'], last:'just now', strikes:1},
+      {id:'profile', title:'User profile & avatars', state:'backend_live', roles:['backend','frontend','mobile'], last:'26m ago', strikes:0},
+      {id:'notify', title:'Notifications fan-out', state:'contract_locked', roles:['backend','mobile'], last:'1h ago', strikes:0},
+      {id:'ratelimit', title:'Rate limiter middleware', state:'contract_proposed', roles:['backend','frontend'], last:'2h ago', strikes:0},
+      {id:'audit', title:'Audit log pipeline', state:'open', roles:['backend'], last:'4h ago', strikes:0}
+    ];
+
+    const sEps = (withUser) => {
+      const loginRes = [
+        {n:'accessToken',t:'string',note:'JWT · 15m TTL'},
+        {n:'refreshToken',t:'string',note:'30d TTL'},
+        {n:'expiresIn',t:'number',note:'Seconds to expiry'}
+      ];
+      if(withUser) loginRes.push({n:'user',t:'object',note:'Inline profile · added v2'});
+      return [
+        this.ep('POST','/auth/login','Exchange credentials for access + refresh tokens.',
+          [{n:'email',t:'string',req:true,note:'User email'},{n:'password',t:'string',req:true,note:'Plaintext over TLS'}],
+          '200 OK', loginRes,
+          [{code:'401',name:'invalid_credentials',note:'Email / password mismatch'},{code:'429',name:'too_many_attempts',note:'Rate limited · retry 60s'}]),
+        this.ep('GET','/auth/session','Validate the current access token.',
+          [{n:'Authorization',t:'header',req:true,note:'Bearer <accessToken>'}],
+          '200 OK', [{n:'user',t:'object',note:'Current profile'},{n:'expiresIn',t:'number',note:'Seconds remaining'}],
+          [{code:'401',name:'token_expired',note:'Refresh required'}]),
+        this.ep('POST','/auth/logout','Revoke a refresh token.',
+          [{n:'refreshToken',t:'string',req:true,note:'Token to revoke'}],
+          '204 No Content', [],
+          [{code:'400',name:'invalid_token',note:'Unknown or already revoked'}])
+      ];
+    };
+    const cEps = () => ([
+      this.ep('POST','/payments/intent','Create a payment intent.',
+        [{n:'amount',t:'number',req:true,note:'Minor units'},{n:'currency',t:'string',req:true,note:'ISO-4217'}],
+        '200 OK', [{n:'intentId',t:'string',note:''},{n:'clientSecret',t:'string',note:'For client SDK'},{n:'status',t:'string',note:'requires_action | ok'}],
+        [{code:'400',name:'invalid_amount',note:'Amount must be > 0'},{code:'409',name:'currency_unsupported',note:'Not enabled'}]),
+      this.ep('POST','/payments/refund','Refund a captured payment.',
+        [{n:'intentId',t:'string',req:true,note:''},{n:'amount',t:'number',req:false,note:'Omit for full refund'}],
+        '200 OK', [{n:'refundId',t:'string',note:''},{n:'status',t:'string',note:''}],
+        [{code:'404',name:'intent_not_found',note:'Unknown intent'},{code:'422',name:'not_captured',note:'Nothing to refund'}]),
+      this.ep('GET','/payments/{id}','Fetch a payment status.',
+        [{n:'id',t:'string',req:true,note:'Path param'}],
+        '200 OK', [{n:'intentId',t:'string',note:''},{n:'status',t:'string',note:''},{n:'amount',t:'number',note:''}],
+        [{code:'404',name:'intent_not_found',note:'Unknown intent'}])
+    ]);
+
+    const signinJsonV1 = '{\n  "version": "v1",\n  "POST /auth/login": {\n    "request":  { "email": "string", "password": "string" },\n    "response": { "accessToken": "string", "refreshToken": "string", "expiresIn": 900 }\n  }\n}';
+    const signinJsonV2 = '{\n  "version": "v2",\n  "POST /auth/login \u2192 200": {\n    "accessToken":  "string",\n    "refreshToken": "string",\n    "expiresIn":    900,\n    "user": { "id": "string", "email": "string", "name": "string" }\n  }\n}';
+    const checkoutJson = '{\n  "version": "v1",\n  "POST /payments/intent": {\n    "request":  { "amount": "number", "currency": "string" },\n    "response": { "intentId": "string", "clientSecret": "string", "status": "string" }\n  }\n}';
+
+    this.DETAIL = {
+      signin: {
+        times: {open:'09:02',contract_proposed:'09:11',contract_locked:'09:23',backend_live:'09:41',testing:'09:50',verified:'10:11'},
+        messages: [
+          this.S('09:02','Task created · signin','task'),
+          this.A('backend','question','09:04','What auth flow are we targeting — session cookie or JWT?'),
+          this.A('frontend','answer','09:05','JWT — access + refresh. Mobile needs long-lived refresh tokens.'),
+          this.A('mobile','answer','09:06','Confirmed. Refresh 30d, access 15m works for us.'),
+          this.A('backend','contract_proposal','09:11','Proposing v1 of the auth contract.', {code:signinJsonV1}),
+          this.S('09:11','open \u2192 contract_proposed','flow'),
+          this.A('frontend','question','09:14','Can /auth/login return the user profile inline? Saves a round-trip on boot.'),
+          this.A('backend','answer','09:19','Good call — added a `user` object to the 200 response in v2.'),
+          this.A('mobile','contract_proposal','09:22','v2 covers the mobile cases. Approving. \u2705', {code:signinJsonV2}),
+          this.S('09:23','Contract v2 locked · signed by backend, frontend, mobile','lock'),
+          this.A('backend','deploy_confirmed','09:41','Backend deployed to staging — /auth/* is live.'),
+          this.S('09:41','contract_locked \u2192 backend_live','flow'),
+          this.S('09:50','backend_live \u2192 testing','flow'),
+          this.A('frontend','test_result','10:02','UI integration suite green — 12 / 12 passing.', {pass:true}),
+          this.A('mobile','test_result','10:09','Mobile e2e passing on iOS + Android.', {pass:true}),
+          this.A('backend','verified','10:11','All parties green. Shipping it! \ud83c\udf89', {}),
+          this.S('10:11','testing \u2192 verified · Slack #signin-buddies notified','verified')
+        ],
+        events: [
+          ['09:02','task','Task created: signin'],
+          ['09:11','transition','open \u2192 contract_proposed'],
+          ['09:22','token','Refresh policy set · access 15m / refresh 30d'],
+          ['09:23','lock','Contract v2 locked (backend, frontend, mobile)'],
+          ['09:41','deploy','backend deployed /auth/* \u2192 staging'],
+          ['09:41','transition','contract_locked \u2192 backend_live'],
+          ['09:50','transition','backend_live \u2192 testing'],
+          ['10:02','test','frontend suite passed · 12/12'],
+          ['10:09','test','mobile e2e passed'],
+          ['10:11','transition','testing \u2192 verified'],
+          ['10:11','slack','#signin-buddies notified: verified']
+        ],
+        contract: {
+          exists:true, default:'v2',
+          versions:[{id:'v1',locked:false},{id:'v2',locked:true}],
+          data:{
+            v1:{locked:false, signed:[], endpoints:sEps(false)},
+            v2:{locked:true, signed:[{role:'backend',time:'09:23'},{role:'frontend',time:'09:23'},{role:'mobile',time:'09:23'}], endpoints:sEps(true)}
+          }
+        }
+      },
+      checkout: {
+        times: {open:'14:20',contract_proposed:'14:26',contract_locked:'14:32',backend_live:'14:48',testing:'14:55'},
+        messages: [
+          this.S('14:20','Task created · checkout','task'),
+          this.A('backend','contract_proposal','14:26','Proposing v1 of the payments contract.', {code:checkoutJson}),
+          this.S('14:26','open \u2192 contract_proposed','flow'),
+          this.A('frontend','answer','14:31','Works for the web checkout. Approving v1.'),
+          this.S('14:32','Contract v1 locked · signed by backend, frontend','lock'),
+          this.A('backend','deploy_confirmed','14:48','Payments service deployed to staging.'),
+          this.S('14:48','contract_locked \u2192 backend_live','flow'),
+          this.S('14:55','backend_live \u2192 testing','flow'),
+          this.A('frontend','test_result','15:03','Payment intent returns 500 on zero-amount carts.', {pass:false, strike:[1,3]}),
+          this.A('backend','answer','15:12','Patched — guarding against zero amounts. Re-deploy is up.'),
+          this.A('frontend','test_result','15:24','Still red — currency rounding mismatch on JPY (zero-decimal).', {pass:false, strike:[2,3]}),
+          this.A('backend','answer','15:38','Fixed rounding for zero-decimal currencies. Try again?'),
+          this.A('frontend','test_result','15:52','Refund webhook signature is invalid — can\u2019t verify payloads.', {pass:false, strike:[3,3]}),
+          this.S('15:52','3 fix cycles reached — humans notified \ud83d\udce3 · Slack #checkout-buddies','stuck')
+        ],
+        events: [
+          ['14:20','task','Task created: checkout'],
+          ['14:26','transition','open \u2192 contract_proposed'],
+          ['14:32','lock','Contract v1 locked (backend, frontend)'],
+          ['14:48','deploy','backend deployed /payments/* \u2192 staging'],
+          ['14:48','transition','contract_locked \u2192 backend_live'],
+          ['14:55','transition','backend_live \u2192 testing'],
+          ['15:03','test','frontend test failed · strike 1/3'],
+          ['15:24','test','frontend test failed · strike 2/3'],
+          ['15:52','test','frontend test failed · strike 3/3'],
+          ['15:52','slack','#checkout-buddies notified: stuck']
+        ],
+        contract: {
+          exists:true, default:'v1',
+          versions:[{id:'v1',locked:true}],
+          data:{ v1:{locked:true, signed:[{role:'backend',time:'14:32'},{role:'frontend',time:'14:32'}], endpoints:cEps()} }
+        }
+      },
+      audit: {
+        times: {open:'10:40'},
+        messages: [],
+        events: [['10:40','task','Task created: audit']],
+        contract: {exists:false}
+      }
+    };
+  }
+
+  genTimes(){ return {}; }
+  genMessages(t){
+    const {id,state,roles,strikes}=t; const o=this.ORDER[state]??0; const M=[];
+    const T=['08:05','08:12','08:20','08:34','08:41','08:55','09:03']; let ti=0; const nx=()=>T[ti++]||'';
+    const jsn = '{\n  "version": "v1",\n  "POST /'+id+'/create": {\n    "request":  { "payload": "object" },\n    "response": { "id": "string", "status": "string" }\n  }\n}';
+    M.push(this.S(nx(),'Task created · '+id,'task'));
+    if(o>=1){ M.push(this.A(roles[0],'contract_proposal',nx(),'Proposing v1 of the '+id+' contract.',{code:jsn})); M.push(this.S(nx(),'open \u2192 contract_proposed','flow')); }
+    if(o>=2){ M.push(this.A(roles[1]||roles[0],'answer',nx(),'Looks good on my end — approving v1.')); M.push(this.S(nx(),'Contract v1 locked · signed by '+roles.join(', '),'lock')); }
+    if(o>=3){ M.push(this.A(roles[0],'deploy_confirmed',nx(),'Deployed to staging — endpoints are live.')); M.push(this.S(nx(),'contract_locked \u2192 backend_live','flow')); }
+    if(o>=4){ M.push(this.S(nx(),'backend_live \u2192 testing','flow'));
+      if(strikes>0) M.push(this.A(roles[1]||roles[0],'test_result',nx(),'A check is failing — pushing a fix.',{pass:false,strike:[strikes,3]}));
+      else M.push(this.A(roles[1]||roles[0],'test_result',nx(),'Integration suite is green.',{pass:true}));
+    }
+    return M;
+  }
+  genContract(t){
+    const o=this.ORDER[t.state]??0; if(o<1) return {exists:false};
+    const locked=o>=2;
+    const eps=[
+      this.ep('POST','/'+t.id+'/create','Create a '+t.id+' record.',
+        [{n:'payload',t:'object',req:true,note:'Request body'}],
+        '201 Created', [{n:'id',t:'string',note:'New record id'},{n:'status',t:'string',note:'Lifecycle state'}],
+        [{code:'400',name:'invalid_request',note:'Malformed payload'}]),
+      this.ep('GET','/'+t.id+'/{id}','Fetch a '+t.id+' record.',
+        [{n:'id',t:'string',req:true,note:'Path param'}],
+        '200 OK', [{n:'id',t:'string',note:'Record id'},{n:'status',t:'string',note:'Lifecycle state'}],
+        [{code:'404',name:'not_found',note:'Unknown id'}])
+    ];
+    return {exists:true, default:'v1', versions:[{id:'v1',locked}], data:{v1:{locked, signed: locked? t.roles.map(r=>({role:r,time:t.last})):[], endpoints:eps}}};
+  }
+  genEvents(t){
+    const o=this.ORDER[t.state]??0; const E=[['—','task','Task created: '+t.id]];
+    if(o>=1)E.push(['—','transition','open \u2192 contract_proposed']);
+    if(o>=2)E.push(['—','lock','Contract v1 locked ('+t.roles.join(', ')+')']);
+    if(o>=3){E.push(['—','deploy','backend deployed \u2192 staging']);E.push(['—','transition','contract_locked \u2192 backend_live']);}
+    if(o>=4)E.push(['—','transition','backend_live \u2192 testing']);
+    if(t.strikes>0)E.push(['—','test','test failed · strike '+t.strikes+'/3']);
+    return E;
+  }
+
+  genSteps(state, times){
+    const isStuck = state==='stuck';
+    const o = isStuck ? 4 : (this.ORDER[state]??0);
+    const last = this.STEPS.length-1;
+    return this.STEPS.map((s,i)=>{
+      const key=s[0];
+      const stuckStep = isStuck && i===4;
+      const done = i<o || (state==='verified' && i===o);
+      const current = i===o && !isStuck && state!=='verified';
+      const upcoming = i>o;
+      const node = {width:'36px',height:'36px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',position:'relative',zIndex:2};
+      if(stuckStep){ node.background='var(--st-stuck-dot)'; }
+      else if(done){ node.background='var(--st-verified-dot)'; }
+      else if(current){ node.background='var(--accent)'; }
+      else { node.background='var(--surface)'; node.border='2px solid var(--border-strong)'; }
+      const leftColor = i===0 ? 'transparent' : (i<=o || (isStuck&&i<=4) ? 'var(--st-verified-dot)' : 'var(--border-strong)');
+      const rightColor = i===last ? 'transparent' : ((i<o) ? 'var(--st-verified-dot)' : 'var(--border-strong)');
+      const labelColor = (done||current) ? 'var(--text)' : stuckStep ? 'var(--st-stuck-fg)' : 'var(--text-3)';
+      return {label:s[1], time:(done||current||stuckStep)?(times[key]||''):'', done, current, stuck:stuckStep, upcoming, nodeStyle:node, leftColor, rightColor, labelColor};
+    });
+  }
+
+  eventColor(kind){ return {transition:'var(--st-proposed-dot)',lock:'var(--st-locked-dot)',deploy:'var(--st-live-dot)',test:'var(--st-testing-dot)',slack:'var(--accent)',token:'var(--st-open-dot)',task:'var(--st-open-dot)'}[kind]||'var(--st-open-dot)'; }
+
+  segStyle(active){ return {padding:'5px 13px',fontSize:'12.5px',fontWeight:600,borderRadius:'7px',cursor:'pointer',border:'none',fontFamily:'inherit',background:active?'var(--surface)':'transparent',color:active?'var(--text)':'var(--text-2)',boxShadow:active?'var(--shadow)':'none'}; }
+  tabStyle(active){ return {flex:1,padding:'10px 0',fontSize:'13px',fontWeight:600,border:'none',background:'transparent',cursor:'pointer',fontFamily:'inherit',color:active?'var(--accent)':'var(--text-2)',borderBottom:active?'2px solid var(--accent)':'2px solid transparent'}; }
+  filterStyle(active){ return {padding:'3px 10px',borderRadius:'7px',border:'1px solid '+(active?'var(--accent)':'var(--border)'),background:active?'var(--accent-soft)':'transparent',color:active?'var(--accent-2)':'var(--text-2)',fontSize:'11px',fontWeight:600,cursor:'pointer',fontFamily:"'Geist Mono',monospace"}; }
+  vBtnStyle(active,locked){ return {padding:'4px 10px',borderRadius:'7px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:600,fontFamily:"'Geist Mono',monospace",display:'flex',alignItems:'center',gap:'4px',background:active?'var(--surface)':'transparent',color:active?'var(--text)':'var(--text-2)',boxShadow:active?'var(--shadow)':'none'}; }
+
+  getTask(id, S){
+    const t = this.TASKS.find(x=>x.id===id) || this.TASKS[0];
+    const d = this.DETAIL[id];
+    const messages = d ? d.messages : this.genMessages(t);
+    const contract = d ? d.contract : this.genContract(t);
+    const eventsRaw = d ? d.events : this.genEvents(t);
+    const times = d ? d.times : {};
+    const steps = this.genSteps(t.state, times || {});
+    const stuck = t.state==='stuck';
+
+    let contractExists = !!(contract && contract.exists);
+    let versions=[], draft=false, signed=[], endpoints=[];
+    if(contractExists){
+      const selId = S.version[id] || contract.default;
+      versions = contract.versions.map(v=>({id:v.id, locked:v.locked, btnStyle:this.vBtnStyle(v.id===selId, v.locked), select:()=>this.setState(st=>({version:{...st.version,[id]:v.id}}))}));
+      const data = contract.data[selId];
+      draft = !data.locked;
+      signed = (data.signed||[]).map(s=>{ const av=this.av(s.role); return {role:s.role, i:av.i, c:av.c, time:s.time}; });
+      endpoints = data.endpoints.map((e,i)=>{
+        const key = id+':'+selId+':'+i;
+        const expanded = !!S.expanded[key];
+        const mc = this.methodChip(e.method);
+        return {
+          method:e.method, methodBg:mc.bg, methodFg:mc.fg, path:e.path, summary:e.summary,
+          expanded, chevStyle:{display:'inline-flex',transition:'transform .15s',transform:expanded?'rotate(90deg)':'rotate(0)',color:'var(--text-3)'},
+          toggle:()=>this.setState(st=>({expanded:{...st.expanded,[key]:!st.expanded[key]}})),
+          request:(e.request||[]).map(f=>({n:f.n,t:f.t,note:f.note||'',req:!!f.req})), hasReq:(e.request||[]).length>0,
+          resStatus:e.resStatus||'200 OK',
+          response:(e.response||[]).map(f=>({n:f.n,t:f.t,note:f.note||''})), hasRes:(e.response||[]).length>0,
+          errors:(e.errors||[]).map(er=>({code:er.code,name:er.name,note:er.note||''})), hasErr:(e.errors||[]).length>0
+        };
+      });
+    }
+
+    const filter = S.eventFilter || 'all';
+    const events = eventsRaw.map(e=>({time:e[0], kind:e[1], kindLabel:e[1].toUpperCase(), color:this.eventColor(e[1]), detail:e[2]})).filter(e=>filter==='all'||e.kind===filter);
+    const FILTERS=['all','transition','lock','deploy','test','slack','token'];
+    const eventFilters = FILTERS.map(f=>({key:f, label:f, style:this.filterStyle(filter===f), select:()=>this.setState({eventFilter:f})}));
+
+    return {
+      id:t.id, title:t.title, stateChip:this.stateChip(t.state),
+      steps, stuck, stuckNote:'3 fix cycles reached — humans notified 📣',
+      messages, hasMessages:messages.length>0, noMessages:messages.length===0,
+      contractExists, noContract:!contractExists, versions, draft, signed, hasSigned:signed.length>0, endpoints,
+      events, hasEvents:events.length>0, noEvents:events.length===0, eventFilters,
+      roles:t.roles.map(r=>this.av(r))
+    };
+  }
+
+  listRow(t){
+    return {
+      id:t.id, title:t.title, chip:this.stateChip(t.state), roles:t.roles.map(r=>this.av(r)),
+      last:t.last, hasStrikes:t.strikes>0, strikeText:`strike ${t.strikes} of 3`,
+      open:()=>this.setState({view:'task', taskId:t.id})
+    };
+  }
+
+  renderVals(){
+    const S=this.state;
+    const isDark = S.theme==='dark';
+    const isBuddy = S.viewerMode==='buddy';
+    let listTasks = this.TASKS.map(t=>this.listRow(t));
+    if(isBuddy) listTasks = listTasks.filter(t=>t.id==='signin');
+    const cur = this.getTask(S.taskId, S);
+    const m = S.isMobile;
+
+    const switcherSrc = isBuddy ? this.TASKS.filter(t=>t.id==='signin') : this.TASKS;
+    const switcherTasks = switcherSrc.map(t=>({
+      id:t.id, title:t.title, active:t.id===S.taskId, chip:this.stateChip(t.state),
+      rowStyle:{display:'flex',alignItems:'center',gap:'9px',width:'100%',padding:'8px 9px',border:'none',borderRadius:'8px',cursor:'pointer',fontFamily:'inherit',fontSize:'13px',color:'var(--text)',background:t.id===S.taskId?'var(--surface-2)':'transparent'},
+      open:()=>this.setState({view:'task', taskId:t.id, switcherOpen:false})
+    }));
+
+    const eventBtnStyle = {display:'inline-flex',alignItems:'center',gap:'7px',padding:'6px 11px',borderRadius:'9px',border:'1px solid '+(S.eventLogOpen?'var(--accent)':'var(--border)'),background:S.eventLogOpen?'var(--accent-soft)':'var(--surface)',color:S.eventLogOpen?'var(--accent-2)':'var(--text-2)',cursor:'pointer',fontFamily:'inherit',fontSize:'13px',fontWeight:500};
+
+    return {
+      wrapRef:(el)=>{ this._wrap=el; if(el&&this.props.accent){ el.style.setProperty('--accent',this.props.accent); el.style.setProperty('--accent-2',this.props.accent); } },
+      theme:S.theme, isDark, isLight:!isDark, isBuddy,
+      showList:S.view==='list', showTask:S.view==='task',
+      listTasks, listCount:this.TASKS.length,
+      toggleTheme:()=>this.setState({theme:isDark?'light':'dark'}),
+      setHost:()=>this.setState({viewerMode:'host', view:'list'}),
+      setBuddy:()=>this.setState({viewerMode:'buddy', view:'list', taskId:'signin'}),
+      segHost:this.segStyle(!isBuddy), segBuddy:this.segStyle(isBuddy),
+      switcherOpen:S.switcherOpen, toggleSwitcher:()=>this.setState(s=>({switcherOpen:!s.switcherOpen})),
+      switcherTasks, switcherLabel: S.view==='task' ? cur.title : 'All tasks',
+      goHome:()=>this.setState({view:'list', switcherOpen:false}),
+      t:cur,
+      rowStyle: m ? {display:'block'} : {display:'grid',gridTemplateColumns:'minmax(0,1fr) 372px',gap:'16px',alignItems:'start'},
+      threadWrapStyle: {display: m ? (S.mobileTab==='thread'?'block':'none') : 'block'},
+      contractWrapStyle: {display: m ? (S.mobileTab==='contract'?'block':'none') : 'block'},
+      logWrapStyle: {display: m ? (S.mobileTab==='log'?'block':'none') : (S.eventLogOpen?'block':'none')},
+      isMobile:m, showEventLogBtn:!m, eventBtnStyle,
+      mobileTab:S.mobileTab,
+      setThread:()=>this.setState({mobileTab:'thread'}), setContract:()=>this.setState({mobileTab:'contract'}), setLog:()=>this.setState({mobileTab:'log'}),
+      tabThread:this.tabStyle(S.mobileTab==='thread'), tabContract:this.tabStyle(S.mobileTab==='contract'), tabLog:this.tabStyle(S.mobileTab==='log'),
+      eventLogOpen:S.eventLogOpen, toggleEventLog:()=>this.setState(s=>({eventLogOpen:!s.eventLogOpen}))
+    };
+  }
+}
+</script>
+</body>
+</html>
