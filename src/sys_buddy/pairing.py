@@ -85,16 +85,27 @@ def redeem_invite(
     viewer_token = new_viewer_token()
 
     try:
+        # The closed-task check above is a fast-path message, but it is a read that
+        # races close_task (a concurrent close could commit between it and this
+        # write). Make the INSERT itself conditional on the task still being open, in
+        # one statement: SQLite serializes writers, so either close_task committed
+        # first (0 rows insert here → we abort) or we commit first (close_task's sweep
+        # then revokes this row). No live agent can survive on a closed task.
         cur = conn.execute(
             "INSERT INTO agents (task_id, name, role, token_hash, pubkey, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (task_id, agent_name, role, sha256_hex(agent_token), pubkey, now),
+            "SELECT ?,?,?,?,?,? WHERE EXISTS "
+            "(SELECT 1 FROM tasks WHERE id = ? AND closed_at IS NULL)",
+            (task_id, agent_name, role, sha256_hex(agent_token), pubkey, now, task_id),
         )
     except sqlite3.IntegrityError as e:
         # The partial unique index (one LIVE agent per role) — safety net against a
         # race between the pre-check and the INSERT. Revoked rows no longer collide,
         # so a re-pair after revocation succeeds.
         raise ValueError(f"role '{role}' on task '{task_id}' is already taken") from e
+    if cur.rowcount != 1:
+        # Task was closed between the pre-check and this write — close_task won.
+        conn.rollback()
+        raise ValueError(f"task '{task_id}' is closed")
     agent_id = cur.lastrowid
 
     conn.execute(

@@ -70,13 +70,38 @@ def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
 # lifecycle event that never happened. They go through report_status only.
 RESERVED_TYPES = frozenset({"deploy_confirmed", "test_result", "verified", "stuck"})
 
+# The conversational types an agent may send via send_message. A positive
+# allow-list (not just blocking RESERVED_TYPES) also stops an agent forging
+# broker-authoritative chips like 'contract_lock' in the human dashboard thread.
+ALLOWED_SEND_TYPES = frozenset({"question", "answer", "status_update", "contract_proposal"})
+
+# An unbounded body is a DoS AND a prompt-injection amplifier: it is persisted and
+# redelivered to the peer on every poll until acked, stuffing the peer LLM's context
+# and token budget (SPEC §7). Cap all agent-supplied content at the broker.
+MAX_CONTENT_BYTES = 64 * 1024
+
+
+def assert_content_size(text: str, label: str = "message") -> None:
+    """Reject agent-supplied content larger than MAX_CONTENT_BYTES."""
+    if text is not None and len(str(text).encode("utf-8")) > MAX_CONTENT_BYTES:
+        raise ValueError(
+            f"{label} exceeds the {MAX_CONTENT_BYTES // 1024} KB limit — shorten it "
+            f"or split it across messages"
+        )
+
 
 def assert_sendable(mtype: str) -> None:
-    """Reject a reserved lifecycle type on the send_message path (SPEC §7/§8)."""
+    """Gate the send_message path: only conversational types, never lifecycle ones
+    or forged broker chips (SPEC §7/§8)."""
     if mtype in RESERVED_TYPES:
         raise ValueError(
             f"'{mtype}' is a lifecycle event — report it via report_status(...), "
             f"not send_message"
+        )
+    if mtype not in ALLOWED_SEND_TYPES:
+        raise ValueError(
+            f"'{mtype}' is not a valid message type; use one of "
+            f"{sorted(ALLOWED_SEND_TYPES)}"
         )
 
 
@@ -100,6 +125,7 @@ def post_message(conn, identity: Identity, mtype: str, body: str) -> dict:
         raise ValueError(f"unknown task '{identity.task_id}'")
     if task["closed_at"] is not None:
         raise ValueError(f"task '{identity.task_id}' is closed")
+    assert_content_size(body, "message body")
     state_at_send = task["state"]
     now = time.time()
     cur = conn.execute(

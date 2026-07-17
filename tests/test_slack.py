@@ -53,8 +53,10 @@ def test_lock_and_verified_each_write_a_slack_event(conn):
     ag = _drive_to_live(conn)
     assert _slack_events(conn) == 1  # the lock fired one
 
+    # verified is only reachable from 'testing' (SPEC §5) — a test result first.
+    state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, "12/12")
     state.report_status(conn, ag["frontend"], state.STATUS_VERIFIED, "all green")
-    assert _slack_events(conn) == 2  # verified fired another
+    assert _slack_events(conn) == 2  # verified fired another (test_passed writes none)
 
 
 def test_third_strike_writes_a_stuck_slack_event(conn):

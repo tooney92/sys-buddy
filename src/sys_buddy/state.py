@@ -22,6 +22,7 @@ States (SPEC §5):
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 
 from . import contracts, service, slack
@@ -154,17 +155,29 @@ def propose_contract(conn, identity: Identity, spec: dict) -> dict:
     current = _state(conn, identity.task_id)
     _reject_if_terminal(current)
 
-    row = conn.execute(
-        "SELECT COALESCE(MAX(version), 0) AS v FROM contracts WHERE task_id = ?",
-        (identity.task_id,),
-    ).fetchone()
-    version = row["v"] + 1
+    spec_json = json.dumps(spec)
+    service.assert_content_size(spec_json, "contract spec")
 
-    conn.execute(
-        "INSERT INTO contracts (task_id, version, spec_json, status, proposed_by, created_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (identity.task_id, version, json.dumps(spec), "draft", identity.agent_id, _now()),
-    )
+    # Version is MAX+1; two concurrent proposals can compute the same value and
+    # collide on UNIQUE(task_id, version). Retry on that collision (re-reading MAX)
+    # so a racing proposer gets a clean higher version instead of an uncaught 500.
+    for _attempt in range(6):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) AS v FROM contracts WHERE task_id = ?",
+            (identity.task_id,),
+        ).fetchone()
+        version = row["v"] + 1
+        try:
+            conn.execute(
+                "INSERT INTO contracts (task_id, version, spec_json, status, proposed_by, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (identity.task_id, version, spec_json, "draft", identity.agent_id, _now()),
+            )
+            break
+        except sqlite3.IntegrityError:
+            conn.rollback()
+    else:
+        raise ValueError("could not allocate a contract version — please retry")
     state = _transition(conn, identity.task_id, CONTRACT_PROPOSED)
     conn.commit()
     return {"version": version, "state": state}
@@ -223,11 +236,18 @@ def lock_contract(conn, identity: Identity, version: int) -> dict:
             "remaining": remaining,
         }
 
-    # All roles have signed → the contract locks and the task advances.
-    conn.execute(
-        "UPDATE contracts SET status = 'locked', locked_at = ? WHERE id = ?",
+    # All roles have signed → the contract locks and the task advances. The UPDATE
+    # is conditional on status='draft' so that if two roles sign the final signature
+    # concurrently and both observe "all signed", exactly one wins the lock — the
+    # loser's rowcount is 0 and it returns the locked result WITHOUT a duplicate lock
+    # event or a second human Slack ping.
+    cur = conn.execute(
+        "UPDATE contracts SET status = 'locked', locked_at = ? WHERE id = ? AND status = 'draft'",
         (_now(), contract["id"]),
     )
+    if cur.rowcount != 1:
+        conn.commit()
+        return {"locked": True, "version": version, "signed": sorted(signed_set)}
     state = _transition(conn, identity.task_id, CONTRACT_LOCKED)
     _event(conn, identity.task_id, "lock", {"version": version, "signed": sorted(signed_set)})
     _slack(
@@ -274,6 +294,7 @@ def report_status(conn, identity: Identity, status: str, detail: str) -> dict:
       * ``verified``      — → terminal verified
       * ``stuck``         — → terminal stuck
     """
+    service.assert_content_size(detail, "status detail")
     if status == STATUS_DEPLOYED:
         return _report_deployed(conn, identity, detail)
     if status in TEST_STATUSES:
@@ -394,13 +415,18 @@ def _report_test(conn, identity: Identity, status: str, detail: str) -> dict:
 
 
 def _report_verified(conn, identity: Identity, detail: str) -> dict:
-    """The feature is confirmed end-to-end → terminal ``verified``. Allowed once the
-    backend is live (backend_live or testing); a human owns any reopening after."""
+    """The feature is confirmed end-to-end → terminal ``verified``. Per SPEC §5
+    (state table): ``verified`` transitions from ``testing`` ONLY — a client must
+    have reported at least one test result first (that is what moves the task
+    backend_live → testing), so the terminal state can never be reached with zero
+    tests run. Role is unrestricted (any party may confirm); a human owns any
+    reopening after."""
     state = _state(conn, identity.task_id)
     _reject_if_terminal(state)
-    if state not in (BACKEND_LIVE, TESTING):
+    if state != TESTING:
         raise ValueError(
-            f"cannot report 'verified' before the backend is live (task is '{state}')"
+            f"cannot report 'verified' before tests have run (task is '{state}', "
+            f"need '{TESTING}'); a client must report a test result first"
         )
     state = _transition(conn, identity.task_id, VERIFIED)
     service.post_message(conn, identity, "verified", detail)

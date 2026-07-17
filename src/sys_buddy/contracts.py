@@ -21,6 +21,10 @@ from urllib.parse import urlparse
 # The HTTP verbs a contract endpoint may declare (SPEC §6).
 VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 
+# Upper bound on endpoints in one contract — a sane API surface, and a guard against
+# a proposal with thousands of endpoints bloating the dashboard payload / DB row.
+MAX_ENDPOINTS = 100
+
 
 def validate_spec(spec: dict) -> list[str]:
     """Return a list of human-fixable error strings; empty list means valid.
@@ -41,6 +45,8 @@ def validate_spec(spec: dict) -> list[str]:
         errors.append("'endpoints' must be a list")
     elif not spec["endpoints"]:
         errors.append("'endpoints' must contain at least one endpoint")
+    elif len(spec["endpoints"]) > MAX_ENDPOINTS:
+        errors.append(f"too many endpoints (max {MAX_ENDPOINTS})")
     else:
         for i, endpoint in enumerate(spec["endpoints"]):
             errors.extend(_validate_endpoint(i, endpoint))
