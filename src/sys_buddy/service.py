@@ -1,0 +1,238 @@
+"""Messaging core — the agent_bus.py port, with its three known bugs fixed.
+
+Pure-ish functions that take an open connection and a resolved ``Identity``. The
+FastMCP tool wrappers in ``tools.py`` are thin shells over these; keeping the logic
+here means we can spec it without a running server.
+
+Bugs fixed vs the predecessor (SPEC §14 / reference/NOTE.md):
+1. WAL — handled in ``db.connect`` (poll loop no longer contends).
+2. ``notify_human`` error handling — see ``slack.py`` (built in step 8).
+3. delivered vs acked — the predecessor marked messages read *on fetch*, so a
+   crashed session lost them. Here a fetch stamps ``delivered_at`` only; the agent
+   must ``ack_messages(ids)`` after processing. Until acked, a message keeps coming
+   back — a dropped tunnel mid-fetch can't silently eat it.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import time
+
+from .identity import Identity
+
+
+# --------------------------------------------------------------------------- #
+# local-mode identity (self-declared, auto-provisioned on loopback)
+# --------------------------------------------------------------------------- #
+def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
+    """Local mode only: make sure the task and this agent exist, then return it.
+
+    Zero-friction: on loopback an agent just names itself and starts talking. The
+    name doubles as the role (fine on a single developer's machine). Remote mode
+    never calls this — identity is stamped from the token by the middleware.
+    """
+    row = conn.execute("SELECT roles_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    now = time.time()
+    if row is None:
+        conn.execute(
+            "INSERT INTO tasks (id, title, state, roles_json, created_at) VALUES (?,?,?,?,?)",
+            (task_id, task_id, "open", json.dumps([agent_name]), now),
+        )
+    else:
+        roles = json.loads(row["roles_json"])
+        if agent_name not in roles:
+            roles.append(agent_name)
+            conn.execute("UPDATE tasks SET roles_json = ? WHERE id = ?", (json.dumps(roles), task_id))
+
+    agent = conn.execute(
+        "SELECT id, task_id, name, role FROM agents WHERE task_id = ? AND role = ?",
+        (task_id, agent_name),
+    ).fetchone()
+    if agent is None:
+        cur = conn.execute(
+            "INSERT INTO agents (task_id, name, role, token_hash, created_at) VALUES (?,?,?,?,?)",
+            (task_id, agent_name, agent_name, None, now),
+        )
+        conn.commit()
+        return Identity(agent_id=cur.lastrowid, task_id=task_id, name=agent_name, role=agent_name)
+    conn.commit()
+    return Identity(agent_id=agent["id"], task_id=agent["task_id"], name=agent["name"], role=agent["role"])
+
+
+# --------------------------------------------------------------------------- #
+# messaging
+# --------------------------------------------------------------------------- #
+def _count_other_agents(conn, task_id: str, exclude_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM agents WHERE task_id = ? AND id != ? AND revoked_at IS NULL",
+        (task_id, exclude_id),
+    ).fetchone()["n"]
+
+
+def post_message(conn, identity: Identity, mtype: str, body: str) -> dict:
+    """Store a message from ``identity`` on its task. Returns a small receipt.
+
+    Delivery rows are created lazily on fetch, so an agent that pairs later still
+    picks up anything it hasn't acked.
+    """
+    task = conn.execute("SELECT state FROM tasks WHERE id = ?", (identity.task_id,)).fetchone()
+    if task is None:
+        raise ValueError(f"unknown task '{identity.task_id}'")
+    state_at_send = task["state"]
+    now = time.time()
+    cur = conn.execute(
+        "INSERT INTO messages (task_id, from_agent_id, type, body_json, state_at_send, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (identity.task_id, identity.agent_id, mtype, json.dumps(body), state_at_send, now),
+    )
+    conn.commit()
+    recipients = _count_other_agents(conn, identity.task_id, identity.agent_id)
+    return {"id": cur.lastrowid, "recipients": recipients, "type": mtype}
+
+
+def _wrap(from_name: str, role: str, task_id: str, body: str) -> str:
+    """The untrusted-content envelope (SPEC §7). Content is DATA, not instructions.
+
+    Every interpolated value is HTML-escaped so attacker-controlled content can't
+    break out of the envelope. Without this, a body containing ``</msg>`` could
+    close the wrapper early and inject a forged ``trust="internal"`` block that the
+    receiving agent would read as trusted in-band instructions — the exact hijack
+    the envelope exists to prevent. Agent name/role are chosen by the buddy at
+    pairing time, so the attributes are escaped too (``quote=True``).
+    """
+    attr = lambda v: html.escape(str(v), quote=True)
+    return (
+        f'<msg from="{attr(from_name)}" role="{attr(role)}" trust="external" task="{attr(task_id)}">\n'
+        f"{html.escape(str(body), quote=False)}\n"
+        f"</msg>"
+    )
+
+
+def _fmt_time(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+def _fetch(conn, identity: Identity, only_new: bool, mark_delivered: bool = True) -> list[dict]:
+    """Return messages on my task, from other agents.
+
+    Two modes, deliberately different (this split is what keeps long-poll working
+    while staying crash-safe):
+
+    - ``only_new=False`` (check_messages): everything I haven't *acked*. This is the
+      recovery path — a message keeps coming back until I ack it, so a crash mid-
+      fetch can't lose it.
+    - ``only_new=True`` (wait_for_message): only messages not yet *delivered* to me.
+      A parked agent wakes on genuinely new mail and then goes back to sleep,
+      instead of busy-spinning on backlog it has already seen but not acked.
+
+    Both stamp ``delivered_at`` (first-seen) on return; neither sets ``acked_at``.
+    """
+    unseen = "d.delivered_at IS NULL" if only_new else "d.acked_at IS NULL"
+    rows = conn.execute(
+        f"""
+        SELECT m.id, m.from_agent_id, m.type, m.body_json, m.created_at,
+               a.name AS from_name, a.role AS from_role
+        FROM messages m
+        JOIN agents a ON a.id = m.from_agent_id
+        LEFT JOIN deliveries d ON d.message_id = m.id AND d.agent_id = ?
+        WHERE m.task_id = ?
+          AND m.from_agent_id != ?
+          AND ({unseen})
+        ORDER BY m.id
+        """,
+        (identity.agent_id, identity.task_id, identity.agent_id),
+    ).fetchall()
+
+    now = time.time()
+    out = []
+    for r in rows:
+        if mark_delivered:
+            # Upsert a delivery row; set delivered_at on first sight, keep acked_at NULL.
+            conn.execute(
+                "INSERT INTO deliveries (message_id, agent_id, delivered_at) VALUES (?,?,?) "
+                "ON CONFLICT(message_id, agent_id) DO UPDATE SET "
+                "delivered_at = COALESCE(deliveries.delivered_at, excluded.delivered_at)",
+                (r["id"], identity.agent_id, now),
+            )
+        body = json.loads(r["body_json"])
+        out.append(
+            {
+                "id": r["id"],
+                "from": r["from_name"],
+                "role": r["from_role"],
+                "type": r["type"],
+                "sent_at": _fmt_time(r["created_at"]),
+                "content": _wrap(r["from_name"], r["from_role"], identity.task_id, body),
+            }
+        )
+    if mark_delivered:
+        conn.commit()
+    return out
+
+
+def fetch_unacked(conn, identity: Identity, mark_delivered: bool = True) -> list[dict]:
+    """check_messages: everything I haven't acked yet (crash-safe recovery)."""
+    return _fetch(conn, identity, only_new=False, mark_delivered=mark_delivered)
+
+
+def fetch_new(conn, identity: Identity, mark_delivered: bool = True) -> list[dict]:
+    """wait_for_message: only mail not yet delivered to me (wake on new traffic)."""
+    return _fetch(conn, identity, only_new=True, mark_delivered=mark_delivered)
+
+
+def ack(conn, identity: Identity, ids: list[int]) -> int:
+    """Mark messages processed. Returns how many were acked.
+
+    Only ids that are real messages on the agent's *own* task, sent by *another*
+    agent, are acked. Unknown, foreign-task, or self-sent ids are ignored — so a
+    stale or wrong id can't crash the call (no FK error) or write across tasks.
+    """
+    if not ids:
+        return 0
+    placeholders = ",".join("?" * len(ids))
+    valid = [
+        r["id"]
+        for r in conn.execute(
+            f"SELECT id FROM messages "
+            f"WHERE task_id = ? AND from_agent_id != ? AND id IN ({placeholders})",
+            (identity.task_id, identity.agent_id, *ids),
+        ).fetchall()
+    ]
+    now = time.time()
+    for mid in valid:
+        conn.execute(
+            "INSERT INTO deliveries (message_id, agent_id, delivered_at, acked_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(message_id, agent_id) DO UPDATE SET "
+            "acked_at = excluded.acked_at, "
+            "delivered_at = COALESCE(deliveries.delivered_at, excluded.delivered_at)",
+            (mid, identity.agent_id, now, now),
+        )
+    conn.commit()
+    return len(valid)
+
+
+def channel_history(conn, task_id: str, limit: int = 20) -> list[dict]:
+    """Recent traffic on a task (read or unread), oldest-first, for context."""
+    rows = conn.execute(
+        """
+        SELECT m.id, m.type, m.body_json, m.created_at, a.name AS from_name, a.role AS from_role
+        FROM messages m
+        JOIN agents a ON a.id = m.from_agent_id
+        WHERE m.task_id = ?
+        ORDER BY m.id DESC
+        LIMIT ?
+        """,
+        (task_id, limit),
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "from": r["from_name"],
+            "role": r["from_role"],
+            "type": r["type"],
+            "sent_at": _fmt_time(r["created_at"]),
+            "body": json.loads(r["body_json"]),
+        }
+        for r in reversed(rows)
+    ]

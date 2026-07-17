@@ -19,3 +19,15 @@ Thumbs.db
 node_modules/
 dist/
 build/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# sys-buddy runtime database
+*.db
+*.db-wal
+*.db-shm

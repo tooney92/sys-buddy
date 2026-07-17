@@ -1,0 +1,24 @@
+[project]
+name = "sys-buddy"
+version = "0.1.0"
+description = "An authenticated, contract-enforcing message broker that lets two developers' AI coding agents collaborate across the internet."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.0",
+]
+
+[project.scripts]
+sys-buddy = "sys_buddy.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sys_buddy"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
