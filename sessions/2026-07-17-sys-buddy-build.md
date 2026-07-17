@@ -1,63 +1,50 @@
 # Session handoff — sys-buddy build
 
-**Date:** 2026-07-17
-**Task:** Build sys-buddy from `SPEC.md` / `KICKOFF.md` (backend first, UI last).
-**Supersedes:** 2026-07-16-sys-buddy-build.md
+**Date:** 2026-07-17 (updated after all 9 steps)
+**Task:** Build sys-buddy from `SPEC.md` / `KICKOFF.md`. **Backend is complete.**
 
 ---
 
 ## Working agreement (important)
-- **Not vibe coding.** Build ONE step, then explain with concrete examples, then STOP and wait for the user's approval before the next step.
-- Say **"go auto mode"** to lift gating. Say **"ccw"** to refresh this file.
-- Commit to git **per approved step**. Pushing to `main` is fine (solo repo; user asks explicitly).
+- **Not vibe coding.** Build one step, explain with concrete examples, STOP and wait for approval. Say **"go auto mode"** to lift gating, **"ccw"** to refresh this file.
+- Commit **per approved step**; pushing to `main` is fine (solo repo, user asks explicitly).
+
+## STATUS: all 9 build steps DONE, committed, pushed to `main`
+Commits: `a4acbe5` (spec/design) → `df5d385` (steps 1-3) → `5694aa5` (steps 4-6 + review fixes) → `78f462e` (steps 7-9).
+- 1 schema+WAL+init · 2 auth middleware · 3 messaging tools · 4 state machine+strikes · 5 pairing · 6 dashboard API · 7 dashboard UI · 8 Slack · 9 docs — ALL ✅.
+- **115 pytest specs green.** Live remote e2e passing. UI verified structurally.
+
+## ⏭️ WHAT'S PENDING (resume here)
+1. **Visual UI verification via Playwright MCP** — just registered `playwright` MCP (local scope, `npx @playwright/mcp@latest`). It needs a **session restart** to load its browser tools. AFTER RESTART, do this:
+   - Boot a seeded broker and drive the dashboard in a browser, screenshot each screen (task list, task view w/ stepper+thread+contract, **light + dark**, **mobile** breakpoint), compare to `design/project/Sys-Buddy Dashboard.dc.html`, fix any drift.
+   - Seed script for rich content already exists: `scratchpad/ui_verify.py` (seeds signin task through propose→lock→deploy→test_pass→verified + issues a host viewer token). The scratchpad dir: `/private/tmp/claude-501/-Users-anthonynta-dev-sys-buddy/1efa790f-ab5f-47d6-9c1b-523c696d6e58/scratchpad/`.
+   - Quick manual view: `uv run sys-buddy local &` then `uv run sys-buddy host-viewer` → open the printed `/ui?v=...`.
+2. **Final pre-ship code review** — NOT yet run. Must cover the 6 fixes to steps 4-6 AND all of steps 7-9 (esp. the agent-written `ui.html`). Prior reviews: `/code-review` skill → `Workflow({name:"code-review", args:"high"})`.
+3. **Full two-session dogfood** (SPEC §16 definition of done) — register sys-buddy in two real Claude Code sessions, ship a feature through it.
 
 ## Environment
-- `uv` at `~/.local/bin` → `export PATH="$HOME/.local/bin:$PATH"`.
-- venv `.venv/`, Python 3.13, FastMCP 3.4.4, pytest 9.1.1 (dev group).
-- Run CLI: `.venv/bin/sys-buddy ...`. Run tests: `.venv/bin/python -m pytest -q`.
+- `uv` at `~/.local/bin` → `export PATH="$HOME/.local/bin:$PATH"`. venv `.venv/`, Python 3.13, FastMCP 3.4.4, pytest 9.1.1.
+- Run: `uv run sys-buddy ...` or `.venv/bin/sys-buddy ...`. Tests: `.venv/bin/python -m pytest -q`.
 - `ngrok` installed. `gh` authed as `tooney92`. Repo github.com/tooney92/sys-buddy (private).
-- Default db is now **absolute**: `~/.sys-buddy/sys_buddy.db` (override `--db` / `$SYS_BUDDY_DB`).
-- `$SYS_BUDDY_DEBUG=1` makes the CLI re-raise (traceback) instead of a clean error line.
+- Default db: `~/.sys-buddy/sys_buddy.db` (absolute; override `--db`/`$SYS_BUDDY_DB`). `$SYS_BUDDY_DEBUG=1` → CLI shows tracebacks.
+- `SLACK_WEBHOOK_URL` env enables Slack in `serve` mode.
+- Playwright MCP: local scope; remove with `claude mcp remove playwright -s local`.
 
-## Build order (SPEC §14) & status
-1. Schema + WAL + `sys-buddy init` — ✅ committed
-2. Auth middleware (token→identity; no-op local; revocation) — ✅ committed
-3. MCP messaging tools (agent_bus port + 3 bug fixes) — ✅ committed
-4. **State machine (transitions, rejections, events rows, strikes) + contract/status tools** — ⬅ NEXT
-5. Pairing (/pair, invite/join/revoke CLI, token issuance) — ⬜
-6. API (/api/tasks, /api/task/{id}, server-side viewer scoping) — ⬜
-7. UI (single-file vanilla HTML/JS, rebuild design pixel-for-pixel) — ⬜
-8. Slack (webhook on contract_locked/verified/stuck; error-wrapped) — ⬜
-9. Docs (README: 60s local quickstart first, remote second) — ⬜
+## Module map (`src/sys_buddy/`)
+config · db (schema/WAL) · identity + middleware (auth) · service (messaging) · contracts + state (enforced workflow, strikes, Slack triggers) · pairing + admin (invites/tokens/host ops) · slack (error-wrapped webhook) · api (dashboard JSON, viewer scoping) · server (assembly: init_db+middleware+tools+routes) · tools (10 MCP tools, remote/local) · cli (argparse) · ui.html (single-file dashboard).
+Tests: test_identity, test_messaging, test_contracts, test_state, test_pairing, test_api, test_server, test_slack.
 
-## Git
-- Latest commit `df5d385` "Backend foundation: schema, auth, messaging tools" pushed to `main`.
-- Initial commit `a4acbe5` (spec/design/reference).
+## Invariants NOT to break (learned via reviews)
+- **`service._wrap` stays HTML-escaped** — else prompt-injection breakout.
+- **wait_for_message = `fetch_new` (undelivered); check_messages = `fetch_unacked` (crash recovery)** — keep separate.
+- **`ack` only own-task, other-sender** ids.
+- **Remote tool signatures NEVER take sender/agent** — identity from token.
+- **Fixed cast = partial unique index** (`WHERE revoked_at IS NULL`); don't restore blanket UNIQUE.
+- **Lifecycle types (deploy_confirmed/test_result/verified/stuck) are report_status-only**; `send_message` rejects them (keeps strike count in sync).
+- **`close_task` burns outstanding invites; closed tasks reject pairing + messaging.**
+- **A task must include a `backend` role** (deployer) — enforced in `admin.create_task`.
+- Decisions D1-D10 documented in `DECISIONS.md`.
 
-## Files written
-- `pyproject.toml` — pkg `sys-buddy`, script `sys-buddy = sys_buddy.cli:main`, dep `fastmcp>=2.0`, dev `pytest`.
-- `src/sys_buddy/config.py` — `Config` (mode/db/host/port/slack/public_url) + get/set singleton. Absolute default db path.
-- `src/sys_buddy/db.py` — schema, WAL (set in init only), `connect()` (foreign_keys+busy_timeout), `init_db()`.
-- `src/sys_buddy/identity.py` — sha256, token gen (`sbk_`/`sbv_`/invite), `Identity`/`ViewerIdentity`, contextvar, `resolve_agent_token`/`resolve_viewer_token` (revocation-aware).
-- `src/sys_buddy/middleware.py` — `AuthMiddleware.on_call_tool`: remote resolves bearer→identity (rejects bad/revoked); local no-op.
-- `src/sys_buddy/service.py` — messaging core: `ensure_local_identity`, `post_message`, `_fetch`/`fetch_unacked`/`fetch_new`, `ack` (task-scoped), `channel_history`, `_wrap` (HTML-escaped envelope).
-- `src/sys_buddy/tools.py` — `register_tools(mcp,cfg)`; shared `_op_*` helpers; remote (no sender param) + local (task/agent) registrations.
-- `src/sys_buddy/cli.py` — full argparse; `init` implemented; other cmds lazy-import not-yet-built modules (`admin`, `pairing`, `server`).
-- `src/sys_buddy/ui.html` — placeholder (real UI step 7).
-- `tests/conftest.py` + `test_identity.py` + `test_messaging.py` — **25 specs, all green**.
-- `DECISIONS.md` — D1 (per-recipient deliveries table).
-
-## Key behaviors to preserve (learned the hard way)
-- **Envelope must stay escaped** (`service._wrap`): raw interpolation = prompt-injection breakout. Critical.
-- **wait_for_message = `fetch_new`** (undelivered only); **check_messages = `fetch_unacked`** (crash-safe recovery). Don't merge them.
-- **`ack` only touches own-task, other-sender messages** — ignores unknown/foreign/self ids.
-- Remote tool signatures **never** take a sender/agent param — identity from token only.
-
-## Code-review note
-High-effort review flagged missing `server.py`/`admin.py`/`pairing.py` and `connect()` self-init. These are **future steps (5, 8)**, not bugs — do NOT build ahead of the gate. `connect()` self-init will be covered by server startup calling `init_db()` in step 5.
-
-## Next actions (Step 4 — state machine)
-- `contracts.py`: validate structured contract JSON (SPEC §6) — required keys, HTTP verbs, https `staging_url`, field types; return actionable errors.
-- `state.py`: state constants + allowed transitions (SPEC §5), `apply_action`, rejection reasons, write `events` rows, **broker-counted strikes** (test_result fail → +1; >=3 → force `stuck`; new deploy+new contract version resets to 0). Terminal `verified`/`stuck`.
-- Contract/status MCP tools: `propose_contract`, `lock_contract` (all roles must sign), `get_contract`, `report_status`. Wire role-scoped permissions (only backend → deploy_confirmed; non-backend → test_result). staging_url read from locked contract, never chat.
-- Add specs for: transition rejections, all-roles-must-sign lock, deploy-requires-locked-contract, test-before-live rejected, 3-strikes→stuck, strike reset on new version.
+## Scratchpad artifacts (handy for resume)
+- `scratchpad/e2e.py` — live remote dogfood (invite→join→scoped api→authed tool→forged-token reject).
+- `scratchpad/ui_verify.py` — seed lifecycle + boot + structural UI checks.

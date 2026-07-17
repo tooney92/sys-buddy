@@ -20,6 +20,9 @@ node_modules/
 dist/
 build/
 
+# Claude Code — local per-user settings (approvals, allowlist). .mcp.json IS tracked.
+.claude/settings.local.json
+
 # Python
 .venv/
 __pycache__/
