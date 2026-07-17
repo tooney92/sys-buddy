@@ -192,7 +192,7 @@ function genSteps(stateName, times){
     var stuckStep = isStuck && i===4;
     var done = i<o || (stateName==='verified' && i===o);
     var current = i===o && !isStuck && stateName!=='verified';
-    var node='width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;position:relative;z-index:2;';
+    var node='width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;position:relative;z-index:2;';
     if(stuckStep) node+='background:var(--st-stuck-dot);';
     else if(done) node+='background:var(--st-verified-dot);';
     else if(current) node+='background:var(--accent);';
@@ -218,6 +218,7 @@ function avatarChip(role, size, fs){
 /* ---------- header ---------- */
 function headerHTML(){
   var dark=state.theme==='dark';
+  var m=state.isMobile;
   var switcherLabel = (state.view==='task' && state.detail) ? state.detail.title : (state.view==='task'?(state.taskId||'Task'):'All tasks');
   var buddy = state.viewer && state.viewer.mode==='buddy';
 
@@ -246,9 +247,11 @@ function headerHTML(){
   }
   /* while viewer unknown (first paint / error) keep the slot but empty */
   if(!state.viewer) scopeBadge='';
+  /* mobile: header would overflow — drop the scope badge (list/subtitle already convey it) */
+  if(m) scopeBadge='';
 
   var refreshDot = 'var(--st-verified-dot)';
-  return '<div style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:14px;padding:11px 20px;background:var(--surface);border-bottom:1px solid var(--border)">'+
+  return '<div style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:'+(m?'10px':'14px')+';padding:11px '+(m?'14px':'20px')+';background:var(--surface);border-bottom:1px solid var(--border)">'+
     '<div data-home="1" style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;flex:none">'+
       '<div style="display:flex;align-items:center;gap:3px">'+
         '<span style="width:9px;height:9px;border-radius:50%;background:var(--accent);display:inline-block"></span>'+
@@ -258,14 +261,14 @@ function headerHTML(){
       '<span style="font-weight:700;font-size:16px;letter-spacing:-.02em;color:var(--text)">sys<span style="color:var(--text-3);font-weight:400">-</span>buddy</span>'+
     '</div>'+
     '<div style="position:relative;flex:none">'+
-      '<button data-switcher="1" style="display:flex;align-items:center;gap:8px;padding:6px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text);max-width:220px">'+
+      '<button data-switcher="1" style="display:flex;align-items:center;gap:8px;padding:6px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text);max-width:'+(m?'150px':'220px')+'">'+
         '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(switcherLabel)+'</span>'+IC.caret+'</button>'+switcherMenu+
     '</div>'+
     '<div style="flex:1"></div>'+
     scopeBadge+
-    '<div style="display:flex;align-items:center;gap:7px;flex:none">'+
+    '<div style="display:flex;align-items:center;gap:7px;flex:none" title="'+esc(refreshText())+'">'+
       '<span id="sb-refresh-dot" style="width:7px;height:7px;border-radius:50%;background:'+refreshDot+';animation:pulsedot 2.4s ease-in-out infinite"></span>'+
-      '<span id="sb-refresh-text" style="font-size:12px;color:var(--text-2);white-space:nowrap">'+refreshText()+'</span>'+
+      (m?'':'<span id="sb-refresh-text" style="font-size:12px;color:var(--text-2);white-space:nowrap">'+refreshText()+'</span>')+
     '</div>'+
     '<button data-theme-toggle="1" title="Toggle theme" style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;color:var(--text-2);flex:none">'+(dark?IC.sun:IC.moon)+'</button>'+
   '</div>';
@@ -523,12 +526,12 @@ function taskHTML(){
       '<div style="position:absolute;top:18px;left:0;width:50%;height:2px;background:'+s.leftColor+'"></div>'+
       '<div style="position:absolute;top:18px;right:0;width:50%;height:2px;background:'+s.rightColor+'"></div>'+
       '<div style="'+s.nodeStyle+'">'+s.inner+'</div>'+
-      '<span style="margin-top:10px;font-size:11.5px;font-weight:600;text-align:center;color:'+s.labelColor+';line-height:1.3;padding:0 4px">'+esc(s.label)+'</span>'+
-      '<span style="margin-top:4px;font-size:10.5px;font-family:'+MONO+';color:var(--text-3);height:13px">'+esc(s.time)+'</span></div>';
+      '<span style="margin-top:7px;font-size:11px;font-weight:600;text-align:center;color:'+s.labelColor+';line-height:1.3;padding:0 4px">'+esc(s.label)+'</span>'+
+      '<span style="margin-top:3px;font-size:10px;font-family:'+MONO+';color:var(--text-3);height:12px">'+esc(s.time)+'</span></div>';
   }).join('');
   var stuckBanner = stuck ? '<div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;padding:9px 13px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:11px;font-size:13px;color:var(--st-stuck-fg);font-weight:500"><span style="display:flex">'+IC.warn+'</span>3 fix cycles reached — humans notified 📣</div>' : '';
 
-  var stepper='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:20px 22px;margin-bottom:16px;overflow-x:auto">'+stuckBanner+'<div style="display:flex;align-items:flex-start;min-width:660px">'+stepsHTML+'</div></div>';
+  var stepper='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:15px 20px;margin-bottom:16px;overflow-x:auto">'+stuckBanner+'<div style="display:flex;align-items:flex-start;min-width:560px">'+stepsHTML+'</div></div>';
 
   var mobileTabs = m ? '<div style="display:flex;background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:16px">'+
     '<button data-tab="thread" style="'+tabStyle(state.mobileTab==='thread')+'">Thread</button>'+
@@ -551,7 +554,7 @@ function taskHTML(){
     stepper+mobileTabs+
     '<div style="'+rowStyle+'">'+
       '<div style="display:'+threadDisp+'">'+threadHTML(d)+'</div>'+
-      '<div style="display:'+contractDisp+'">'+contractHTML(d)+'</div>'+
+      '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+contractHTML(d)+'</div>'+
     '</div>'+
     '<div style="display:'+logDisp+'">'+eventLogHTML(d)+'</div>'+
   '</div>';
