@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from sys_buddy import service
 from tests.conftest import seed_agent, seed_task
 
@@ -181,3 +185,23 @@ def test_local_identity_is_stable_across_calls(conn):
     a = service.ensure_local_identity(conn, "t", "backend")
     b = service.ensure_local_identity(conn, "t", "backend")
     assert a.agent_id == b.agent_id  # same row, not a duplicate
+
+
+# --- closed tasks & reserved types (review #1, #6) --------------------------
+def test_cannot_message_a_closed_task(conn):
+    ag = _mk(conn, roles=("backend", "frontend"))
+    conn.execute("UPDATE tasks SET closed_at = ? WHERE id = 'signin'", (time.time(),))
+    conn.commit()
+    with pytest.raises(ValueError, match="closed"):
+        service.post_message(conn, ag["backend"], "question", "anyone home?")
+
+
+def test_send_path_rejects_lifecycle_types(conn):
+    """Lifecycle types must go through report_status, never send_message, so the
+    broker stays the single source of the strike count (regression: review #6)."""
+    for reserved in ("deploy_confirmed", "test_result", "verified", "stuck"):
+        with pytest.raises(ValueError, match="report_status"):
+            service.assert_sendable(reserved)
+    # conversational types are fine
+    for ok in ("question", "answer", "status_update", "contract_proposal"):
+        service.assert_sendable(ok)  # does not raise

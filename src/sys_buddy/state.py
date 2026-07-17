@@ -1,0 +1,402 @@
+"""The enforced state machine, contract lifecycle, and broker-counted strikes.
+
+SPEC §5 (states), §6 (contract lock), §8 (strikes). This module is where the
+guiding principle lives: **the broker enforces, agents request.** Every workflow
+rule here is code or a DB fact, never a prompt. An agent asks to deploy; the
+broker decides whether a locked contract exists and whether the caller is the
+backend. An agent reports a failing test; the broker — not the agent — increments
+a database column and pulls the stuck cord at three.
+
+Enforcement runs in BOTH modes. SPEC §3 calls the local state machine "advisory",
+but we enforce there too: a second, laxer code path is a second place for bugs and
+security gaps to hide, and enforcement never *hurts* a well-behaved local agent. So
+these functions are mode-agnostic — there is exactly one path, and it enforces.
+
+States (SPEC §5):
+    open → contract_proposed → contract_locked → backend_live → testing → verified
+                                                       ↑             │
+                                                       └── retry ─────┘ (or → stuck)
+``verified`` and ``stuck`` are terminal: reopening requires a human.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+
+from . import contracts, service
+from .identity import Identity
+
+# --- states -----------------------------------------------------------------
+OPEN = "open"
+CONTRACT_PROPOSED = "contract_proposed"
+CONTRACT_LOCKED = "contract_locked"
+BACKEND_LIVE = "backend_live"
+TESTING = "testing"
+VERIFIED = "verified"
+STUCK = "stuck"
+
+TERMINAL_STATES = frozenset({VERIFIED, STUCK})
+
+# --- report_status vocabulary -----------------------------------------------
+# The status strings an agent may pass to report_status. Named for what the agent
+# is asserting happened, so the broker can map each to a transition + typed message.
+STATUS_DEPLOYED = "deployed"       # backend: the API is live on staging
+STATUS_TEST_PASSED = "test_passed"  # client role: e2e suite went green
+STATUS_TEST_FAILED = "test_failed"  # client role: e2e suite went red (a strike)
+STATUS_VERIFIED = "verified"        # feature confirmed end-to-end (terminal)
+STATUS_STUCK = "stuck"              # give up; humans needed (terminal)
+
+TEST_STATUSES = frozenset({STATUS_TEST_PASSED, STATUS_TEST_FAILED})
+
+MAX_STRIKES = 3  # SPEC §8: at 3 the broker force-transitions to stuck.
+
+# The role that owns deploys. Only this role may report `deployed`; only NON-this
+# roles may report test results (SPEC §7 role-scoped permissions).
+BACKEND_ROLE = "backend"
+
+
+# --------------------------------------------------------------------------- #
+# low-level helpers — the event-log convention (see step-4 brief) lives here
+# --------------------------------------------------------------------------- #
+def _now() -> float:
+    return time.time()
+
+
+def _state(conn, task_id: str) -> str:
+    row = conn.execute("SELECT state FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"unknown task '{task_id}'")
+    return row["state"]
+
+
+def _event(conn, task_id: str, kind: str, detail: object) -> None:
+    """Append an events row. ``detail`` is any JSON value; the API layer depends on
+    the exact shapes documented in the step-4 brief (transition/lock/deploy/test)."""
+    conn.execute(
+        "INSERT INTO events (task_id, kind, detail_json, created_at) VALUES (?,?,?,?)",
+        (task_id, kind, json.dumps(detail), _now()),
+    )
+
+
+def _transition(conn, task_id: str, to_state: str) -> str:
+    """Move the task to ``to_state``, writing a ``transition`` event iff the state
+    actually changes. Returns the resulting state. The transition event's
+    ``created_at`` is what the API reads as ``times[to_state]`` — so we only emit
+    one when there is a genuine change, never a no-op self-transition."""
+    current = _state(conn, task_id)
+    if current == to_state:
+        return current
+    conn.execute("UPDATE tasks SET state = ? WHERE id = ?", (to_state, task_id))
+    _event(conn, task_id, "transition", {"from": current, "to": to_state})
+    return to_state
+
+
+def _reject_if_terminal(state: str) -> None:
+    if state in TERMINAL_STATES:
+        raise ValueError(
+            f"task is in terminal state '{state}'; reopening requires a human"
+        )
+
+
+def _roles(conn, task_id: str) -> list[str]:
+    row = conn.execute("SELECT roles_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return json.loads(row["roles_json"])
+
+
+def _current_locked(conn, task_id: str) -> dict | None:
+    """The highest-version locked contract for the task, or None.
+
+    'Current' is the *newest* locked version: a v2 renegotiation supersedes v1
+    the moment v2 locks, even though v1's row stays 'locked' for the audit trail.
+    """
+    row = conn.execute(
+        "SELECT id, version, spec_json, locked_at FROM contracts "
+        "WHERE task_id = ? AND status = 'locked' ORDER BY version DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "version": row["version"],
+        "spec": json.loads(row["spec_json"]),
+        "locked_at": row["locked_at"],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# contract lifecycle
+# --------------------------------------------------------------------------- #
+def propose_contract(conn, identity: Identity, spec: dict) -> dict:
+    """Validate and record a contract proposal, (re)opening negotiation.
+
+    A proposal is valid from ``open`` or any later non-terminal state — a v2+
+    proposal from, say, ``backend_live`` reopens negotiation and drops the task
+    back to ``contract_proposed`` (SPEC §5 rule 1). Terminal tasks cannot be
+    reopened without a human.
+    """
+    errors = contracts.validate_spec(spec)
+    if errors:
+        # Raise with joined errors so the agent gets every fix in one shot.
+        raise ValueError("invalid contract:\n- " + "\n- ".join(errors))
+
+    current = _state(conn, identity.task_id)
+    _reject_if_terminal(current)
+
+    row = conn.execute(
+        "SELECT COALESCE(MAX(version), 0) AS v FROM contracts WHERE task_id = ?",
+        (identity.task_id,),
+    ).fetchone()
+    version = row["v"] + 1
+
+    conn.execute(
+        "INSERT INTO contracts (task_id, version, spec_json, status, proposed_by, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (identity.task_id, version, json.dumps(spec), "draft", identity.agent_id, _now()),
+    )
+    state = _transition(conn, identity.task_id, CONTRACT_PROPOSED)
+    conn.commit()
+    return {"version": version, "state": state}
+
+
+def lock_contract(conn, identity: Identity, version: int) -> dict:
+    """Record this agent's signature on a contract version; lock only when ALL
+    declared roles have signed (SPEC §5 rule 2, §6).
+
+    Not two signatures — *all of them*, per ``tasks.roles_json``. A locked contract
+    is immutable (rule 6): re-signing or re-locking it is rejected, and changes must
+    go through a fresh version → all roles re-sign.
+    """
+    _reject_if_terminal(_state(conn, identity.task_id))
+
+    contract = conn.execute(
+        "SELECT id, status FROM contracts WHERE task_id = ? AND version = ?",
+        (identity.task_id, version),
+    ).fetchone()
+    if contract is None:
+        raise ValueError(
+            f"no contract version {version} on task '{identity.task_id}'"
+        )
+    if contract["status"] == "locked":
+        raise ValueError(
+            f"contract version {version} is already locked and immutable; "
+            f"propose a new version to change it"
+        )
+
+    # Record this signature (idempotent — signing twice is a no-op, not an error).
+    conn.execute(
+        "INSERT OR IGNORE INTO contract_signatures (contract_id, agent_id, signed_at) "
+        "VALUES (?,?,?)",
+        (contract["id"], identity.agent_id, _now()),
+    )
+
+    required = _roles(conn, identity.task_id)
+    signed = [
+        r["role"]
+        for r in conn.execute(
+            "SELECT a.role FROM contract_signatures s "
+            "JOIN agents a ON a.id = s.agent_id WHERE s.contract_id = ?",
+            (contract["id"],),
+        ).fetchall()
+    ]
+    signed_set = set(signed)
+    remaining = [r for r in required if r not in signed_set]
+
+    if remaining:
+        # Partial signature is a normal, expected outcome — not an error.
+        conn.commit()
+        return {
+            "locked": False,
+            "version": version,
+            "signed": sorted(signed_set),
+            "remaining": remaining,
+        }
+
+    # All roles have signed → the contract locks and the task advances.
+    conn.execute(
+        "UPDATE contracts SET status = 'locked', locked_at = ? WHERE id = ?",
+        (_now(), contract["id"]),
+    )
+    state = _transition(conn, identity.task_id, CONTRACT_LOCKED)
+    _event(conn, identity.task_id, "lock", {"version": version, "signed": sorted(signed_set)})
+    conn.commit()
+    return {"locked": True, "version": version, "signed": sorted(signed_set), "state": state}
+
+
+def get_contract(conn, task_id: str) -> dict:
+    """Return the current locked contract, including ``staging_url`` read from the
+    stored ``spec_json`` — NEVER from a chat message (SPEC §5 rule 5, §9).
+
+    This is the single trusted source of the staging URL for a test-runner agent:
+    an injected "test against evil.com" message has no path into this value.
+    """
+    contract = _current_locked(conn, task_id)
+    if contract is None:
+        return {"exists": False}
+    spec = contract["spec"]
+    return {
+        "exists": True,
+        "version": contract["version"],
+        "status": "locked",
+        "staging_url": spec.get("staging_url"),
+        "spec": spec,
+        "locked_at": contract["locked_at"],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# status reporting — the transitions, the strikes, the typed messages
+# --------------------------------------------------------------------------- #
+def report_status(conn, identity: Identity, status: str, detail: str) -> dict:
+    """Drive a state transition AND post the corresponding typed message so the
+    dashboard thread reflects it. Rejects (raises ``ValueError``) with a clear,
+    agent-readable reason on any workflow or permission violation.
+
+    Role-scoped permissions and state gates are enforced here, in code:
+      * ``deployed``      — backend role only; needs a locked contract; → backend_live
+      * ``test_passed/failed`` — non-backend roles only; only after backend_live
+      * ``verified``      — → terminal verified
+      * ``stuck``         — → terminal stuck
+    """
+    if status == STATUS_DEPLOYED:
+        return _report_deployed(conn, identity, detail)
+    if status in TEST_STATUSES:
+        return _report_test(conn, identity, status, detail)
+    if status == STATUS_VERIFIED:
+        return _report_verified(conn, identity, detail)
+    if status == STATUS_STUCK:
+        return _report_stuck(conn, identity, detail)
+    raise ValueError(
+        f"unknown status {status!r}; expected one of: "
+        f"{STATUS_DEPLOYED}, {STATUS_TEST_PASSED}, {STATUS_TEST_FAILED}, "
+        f"{STATUS_VERIFIED}, {STATUS_STUCK}"
+    )
+
+
+def _report_deployed(conn, identity: Identity, detail: str) -> dict:
+    """Backend announces the API is live. Gated on: caller is backend, task not
+    terminal, and a locked contract exists (SPEC §5 rule 3 — no contract, no
+    deploy). Resets strikes when this deploy carries a *newer* locked contract
+    version than the last one (SPEC §8 — a genuine new attempt, not the same loop).
+    """
+    if identity.role != BACKEND_ROLE:
+        raise ValueError(
+            f"only the '{BACKEND_ROLE}' role may report 'deployed' (you are '{identity.role}')"
+        )
+    state = _state(conn, identity.task_id)
+    _reject_if_terminal(state)
+
+    # A proposal in flight means an unsigned newer version exists. Deploying now
+    # would advance the task on a contract that hasn't been re-signed by all roles
+    # (SPEC §5 rule 6). Even though an older version is still 'locked', refuse until
+    # the pending proposal is locked.
+    if state == CONTRACT_PROPOSED:
+        raise ValueError(
+            "cannot deploy while a contract proposal is awaiting signatures; "
+            "lock the current version first"
+        )
+
+    contract = _current_locked(conn, identity.task_id)
+    if contract is None:
+        raise ValueError("cannot deploy: no locked contract exists yet")
+
+    # Strike reset: if the current locked contract was locked *after* the previous
+    # deploy, the backend is deploying a renegotiated version — a fresh attempt, so
+    # the ping-pong counter starts over. Same contract redeployed = same loop, keep
+    # the count. This needs no extra column: locked_at vs the last deploy event time.
+    last_deploy = conn.execute(
+        "SELECT created_at FROM events WHERE task_id = ? AND kind = 'deploy' "
+        "ORDER BY id DESC LIMIT 1",
+        (identity.task_id,),
+    ).fetchone()
+    if (
+        last_deploy is not None
+        and contract["locked_at"] is not None
+        and contract["locked_at"] > last_deploy["created_at"]
+    ):
+        conn.execute("UPDATE tasks SET strikes = 0 WHERE id = ?", (identity.task_id,))
+
+    state = _transition(conn, identity.task_id, BACKEND_LIVE)
+    _event(conn, identity.task_id, "deploy", {"text": detail})
+    service.post_message(conn, identity, "deploy_confirmed", detail)
+    conn.commit()
+    strikes = conn.execute(
+        "SELECT strikes FROM tasks WHERE id = ?", (identity.task_id,)
+    ).fetchone()["strikes"]
+    return {"status": STATUS_DEPLOYED, "state": state, "strikes": strikes}
+
+
+def _report_test(conn, identity: Identity, status: str, detail: str) -> dict:
+    """A client role reports an e2e result. Gated on: caller is NOT backend, and
+    the backend is already live (SPEC §5 rule 4 — no tests before backend_live).
+    A failure is a broker-counted strike; the third one pulls the stuck cord.
+    """
+    if identity.role == BACKEND_ROLE:
+        raise ValueError(
+            f"the '{BACKEND_ROLE}' role may not report test results; "
+            f"tests are run by client roles"
+        )
+    state = _state(conn, identity.task_id)
+    _reject_if_terminal(state)
+    if state not in (BACKEND_LIVE, TESTING):
+        raise ValueError(
+            f"cannot run tests before the backend is live "
+            f"(task is '{state}', need '{BACKEND_LIVE}')"
+        )
+
+    # First test after a deploy advances the task into the testing phase.
+    if state == BACKEND_LIVE:
+        state = _transition(conn, identity.task_id, TESTING)
+
+    if status == STATUS_TEST_PASSED:
+        _event(conn, identity.task_id, "test", {"pass": True, "strike": None})
+        service.post_message(conn, identity, "test_result", detail)
+        conn.commit()
+        return {"status": status, "state": state, "strikes": _strikes(conn, identity.task_id)}
+
+    # test_failed → the broker (not the agent) counts the strike.
+    conn.execute("UPDATE tasks SET strikes = strikes + 1 WHERE id = ?", (identity.task_id,))
+    strikes = _strikes(conn, identity.task_id)
+    _event(conn, identity.task_id, "test", {"pass": False, "strike": strikes})
+    service.post_message(conn, identity, "test_result", detail)
+
+    if strikes >= MAX_STRIKES:
+        # Three strikes: force stuck, refuse further cycles. The counter is a DB
+        # column — an agent cannot talk it out of this (SPEC §8).
+        state = _transition(conn, identity.task_id, STUCK)
+        service.post_message(
+            conn, identity, "stuck",
+            f"{MAX_STRIKES} fix cycles reached — humans needed. Last failure: {detail}",
+        )
+    conn.commit()
+    return {"status": status, "state": state, "strikes": strikes}
+
+
+def _report_verified(conn, identity: Identity, detail: str) -> dict:
+    """The feature is confirmed end-to-end → terminal ``verified``. Allowed once the
+    backend is live (backend_live or testing); a human owns any reopening after."""
+    state = _state(conn, identity.task_id)
+    _reject_if_terminal(state)
+    if state not in (BACKEND_LIVE, TESTING):
+        raise ValueError(
+            f"cannot report 'verified' before the backend is live (task is '{state}')"
+        )
+    state = _transition(conn, identity.task_id, VERIFIED)
+    service.post_message(conn, identity, "verified", detail)
+    conn.commit()
+    return {"status": STATUS_VERIFIED, "state": state}
+
+
+def _report_stuck(conn, identity: Identity, detail: str) -> dict:
+    """Give up and pull in the humans → terminal ``stuck``. Valid from any
+    non-terminal state (SPEC §7)."""
+    _reject_if_terminal(_state(conn, identity.task_id))
+    state = _transition(conn, identity.task_id, STUCK)
+    service.post_message(conn, identity, "stuck", detail)
+    conn.commit()
+    return {"status": STATUS_STUCK, "state": state}
+
+
+def _strikes(conn, task_id: str) -> int:
+    return conn.execute("SELECT strikes FROM tasks WHERE id = ?", (task_id,)).fetchone()["strikes"]

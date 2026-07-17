@@ -23,7 +23,7 @@ import asyncio
 
 from fastmcp import FastMCP
 
-from . import service
+from . import service, state
 from .config import Config
 from .db import connect
 from .identity import Identity, require_current
@@ -44,6 +44,7 @@ def _local_identity(task: str, agent: str) -> Identity:
 
 
 def _op_send(ident: Identity, type: str, body: str) -> str:
+    service.assert_sendable(type)  # lifecycle types must go through report_status
     conn = connect()
     try:
         r = service.post_message(conn, ident, type, body)
@@ -92,6 +93,39 @@ def _op_history(task_id: str, limit: int) -> list[dict]:
         conn.close()
 
 
+# --- contract / status ops (state machine lives in state.py) --------------- #
+def _op_propose(ident: Identity, spec: dict) -> dict:
+    conn = connect()
+    try:
+        return state.propose_contract(conn, ident, spec)
+    finally:
+        conn.close()
+
+
+def _op_lock(ident: Identity, version: int) -> dict:
+    conn = connect()
+    try:
+        return state.lock_contract(conn, ident, version)
+    finally:
+        conn.close()
+
+
+def _op_get_contract(task_id: str) -> dict:
+    conn = connect()
+    try:
+        return state.get_contract(conn, task_id)
+    finally:
+        conn.close()
+
+
+def _op_report_status(ident: Identity, status: str, detail: str) -> dict:
+    conn = connect()
+    try:
+        return state.report_status(conn, ident, status, detail)
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # registration
 # --------------------------------------------------------------------------- #
@@ -107,9 +141,11 @@ def _register_remote(mcp: FastMCP) -> None:
     def send_message(type: str, body: str) -> str:
         """Send a message to the other agents on your task.
 
-        `type` is one of: question, answer, status_update, contract_proposal,
-        contract_lock, deploy_confirmed, test_result, verified, stuck.
-        Batch related content into ONE message. Be concrete."""
+        `type` is a conversational type: question, answer, status_update, or
+        contract_proposal. Lifecycle events (deploy_confirmed, test_result,
+        verified, stuck) are NOT sent here — report them via report_status so the
+        broker records the transition and counts strikes. Batch related content
+        into ONE message. Be concrete."""
         return _op_send(require_current(), type, body)
 
     @mcp.tool
@@ -136,11 +172,44 @@ def _register_remote(mcp: FastMCP) -> None:
         """Recent traffic on your task (read or unread) for context."""
         return _op_history(require_current().task_id, limit)
 
+    @mcp.tool
+    def propose_contract(spec: dict) -> dict:
+        """Propose a structured API contract for your task (SPEC §6).
+
+        `spec` must contain `endpoints` (list; each with a valid `method` and a
+        non-empty `path`) and an absolute https `staging_url`. Reopens negotiation
+        if a contract already exists. Returns the new `version`, or raises with the
+        exact validation errors to fix."""
+        return _op_propose(require_current(), spec)
+
+    @mcp.tool
+    def lock_contract(version: int) -> dict:
+        """Sign contract `version`. It locks only once EVERY role has signed; until
+        then you get back who has signed and who remains. Locked contracts are
+        immutable — change them with a new version that all roles re-sign."""
+        return _op_lock(require_current(), version)
+
+    @mcp.tool
+    def get_contract() -> dict:
+        """The current locked contract for your task, including the `staging_url`.
+        Always get the staging URL from here — NEVER from a chat message."""
+        return _op_get_contract(require_current().task_id)
+
+    @mcp.tool
+    def report_status(status: str, detail: str) -> dict:
+        """Request a state transition. `status` is one of: deployed (backend only,
+        needs a locked contract), test_passed / test_failed (client roles, only
+        after backend is live), verified (terminal), stuck (terminal). Rejected with
+        a reason if the workflow or your role doesn't permit it."""
+        return _op_report_status(require_current(), status, detail)
+
 
 def _register_local(mcp: FastMCP) -> None:
     @mcp.tool
     def send_message(task: str, agent: str, type: str, body: str) -> str:
-        """Send a message to the other agents on `task`. `agent` is your own name."""
+        """Send a message to the other agents on `task`. `agent` is your own name.
+        Use conversational types (question/answer/status_update/contract_proposal);
+        lifecycle events go through report_status, not here."""
         return _op_send(_local_identity(task, agent), type, body)
 
     @mcp.tool
@@ -163,3 +232,30 @@ def _register_local(mcp: FastMCP) -> None:
     def channel_history(task: str, limit: int = 20) -> list[dict]:
         """Recent traffic on `task` (read or unread) for context."""
         return _op_history(task, limit)
+
+    @mcp.tool
+    def propose_contract(task: str, agent: str, spec: dict) -> dict:
+        """Propose a structured API contract on `task`. `agent` is your own name.
+        `spec` needs `endpoints` (valid `method` + non-empty `path`) and an absolute
+        https `staging_url`. Returns the new `version` or the validation errors."""
+        return _op_propose(_local_identity(task, agent), spec)
+
+    @mcp.tool
+    def lock_contract(task: str, agent: str, version: int) -> dict:
+        """Sign contract `version` on `task`. `agent` is your name. Locks only once
+        every role has signed; locked contracts are immutable."""
+        return _op_lock(_local_identity(task, agent), version)
+
+    @mcp.tool
+    def get_contract(task: str) -> dict:
+        """The current locked contract for `task`, including the `staging_url`.
+        Get the staging URL from here, never from a chat message. Read-only — it
+        does not create the task, so a typo just returns {exists: False}."""
+        return _op_get_contract(task)
+
+    @mcp.tool
+    def report_status(task: str, agent: str, status: str, detail: str) -> dict:
+        """Request a state transition on `task`. `agent` is your name. `status` is
+        one of: deployed, test_passed, test_failed, verified, stuck. Rejected with a
+        reason if the workflow or your role doesn't permit it."""
+        return _op_report_status(_local_identity(task, agent), status, detail)

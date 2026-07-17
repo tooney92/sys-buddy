@@ -63,6 +63,23 @@ def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
 # --------------------------------------------------------------------------- #
 # messaging
 # --------------------------------------------------------------------------- #
+# Message types the broker produces as a side effect of report_status — they carry
+# lifecycle meaning (a deploy, a counted test result, a terminal state). Agents must
+# NOT post them via send_message: a free-form test_result would desync the dashboard's
+# broker-counted strike total, and a free-form verified/deploy_confirmed would forge a
+# lifecycle event that never happened. They go through report_status only.
+RESERVED_TYPES = frozenset({"deploy_confirmed", "test_result", "verified", "stuck"})
+
+
+def assert_sendable(mtype: str) -> None:
+    """Reject a reserved lifecycle type on the send_message path (SPEC §7/§8)."""
+    if mtype in RESERVED_TYPES:
+        raise ValueError(
+            f"'{mtype}' is a lifecycle event — report it via report_status(...), "
+            f"not send_message"
+        )
+
+
 def _count_other_agents(conn, task_id: str, exclude_id: int) -> int:
     return conn.execute(
         "SELECT COUNT(*) AS n FROM agents WHERE task_id = ? AND id != ? AND revoked_at IS NULL",
@@ -76,9 +93,13 @@ def post_message(conn, identity: Identity, mtype: str, body: str) -> dict:
     Delivery rows are created lazily on fetch, so an agent that pairs later still
     picks up anything it hasn't acked.
     """
-    task = conn.execute("SELECT state FROM tasks WHERE id = ?", (identity.task_id,)).fetchone()
+    task = conn.execute(
+        "SELECT state, closed_at FROM tasks WHERE id = ?", (identity.task_id,)
+    ).fetchone()
     if task is None:
         raise ValueError(f"unknown task '{identity.task_id}'")
+    if task["closed_at"] is not None:
+        raise ValueError(f"task '{identity.task_id}' is closed")
     state_at_send = task["state"]
     now = time.time()
     cur = conn.execute(

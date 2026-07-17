@@ -17,12 +17,20 @@ from .config import DEFAULT_DB_PATH, DEFAULT_PORT, Config, set_config
 
 
 def _cfg_from_args(args: argparse.Namespace, mode: str = "local") -> Config:
-    return set_config(
+    from .db import init_db
+
+    cfg = set_config(
         Config(
             mode=mode,
             db_path=Path(getattr(args, "db", None) or DEFAULT_DB_PATH),
         )
     )
+    # Ensure the schema exists once per invocation (idempotent, cheap) so host-side
+    # commands "just work" on a fresh machine without a separate `init` — matching
+    # the predecessor's zero-setup behaviour, but without per-connection overhead.
+    # (cmd_join never calls this; it's a network client with no local db.)
+    init_db(cfg.db_path)
+    return cfg
 
 
 # --------------------------------------------------------------------------- #

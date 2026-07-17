@@ -61,9 +61,16 @@ CREATE TABLE IF NOT EXISTS agents (
     token_hash  TEXT,                     -- sha256; NULL for implicit local identities
     pubkey      TEXT,
     created_at  REAL NOT NULL,
-    revoked_at  REAL,
-    UNIQUE(task_id, role)                 -- fixed cast: one agent per role
+    revoked_at  REAL
 );
+
+-- Fixed cast: at most one *live* agent per role. A partial index (not a plain
+-- UNIQUE(task_id, role)) so that revoking an agent leaves its historical row in
+-- place — keeping message provenance intact — while freeing the seat to be
+-- re-paired. A blanket UNIQUE counted revoked rows and permanently bricked a role
+-- once its agent was revoked.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_live_role
+    ON agents(task_id, role) WHERE revoked_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS viewers (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
