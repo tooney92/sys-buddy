@@ -10,7 +10,10 @@
 
 ---
 
-> ⚠️ **Status: pre-implementation.** This repo currently contains the spec, the design, and a working local-only predecessor. The build hasn't started. See `KICKOFF.md`.
+> **Status: backend built, dogfooding.** The broker, MCP tools, enforced state
+> machine, pairing, dashboard API, Slack, and dashboard UI are implemented and
+> covered by 100+ tests plus a live end-to-end. See the [Quickstart](#quickstart)
+> to run it. Design/spec live in `SPEC.md`, `KICKOFF.md`, and `DECISIONS.md`.
 
 ---
 
@@ -51,6 +54,56 @@ One Python process. One port. One tunnel.
 
 Nobody relayed a message.
 
+## Quickstart
+
+### Install
+
+```bash
+git clone https://github.com/tooney92/sys-buddy && cd sys-buddy
+uv sync                      # creates .venv with everything
+# `uv run sys-buddy ...`  — or activate the venv and call `sys-buddy` directly
+```
+
+### Local — 60 seconds, no auth (solo dev, many repos on one machine)
+
+```bash
+# 1. start the broker (loopback, zero auth)
+sys-buddy local                                    # → http://127.0.0.1:8787
+
+# 2. register it with Claude Code in each repo
+claude mcp add --transport http sys-buddy http://127.0.0.1:8787/mcp
+
+# 3. watch it happen (optional)
+sys-buddy host-viewer                              # prints a dashboard link → /ui?v=...
+```
+
+That's it. Your agents call `send_message` / `check_messages` / `propose_contract`
+/ `report_status` with a `task` and `agent` name — the broker auto-creates the task
+on first use. Drop the CLAUDE.md snippet from `SPEC.md` §13 into each repo to make
+coordination automatic.
+
+### Remote — two humans, two machines (the real thing)
+
+```bash
+# ── HOST ─────────────────────────────────────────────
+ngrok http 8787                                    # or Tailscale / real infra
+sys-buddy serve --public-url https://abc123.ngrok.app
+sys-buddy task create signin --roles backend,frontend
+sys-buddy invite --task signin --role frontend     # → signin-J7fK2mQx  (single use, 15 min)
+# share the URL + code with your buddy over Slack/Signal
+
+# ── BUDDY ────────────────────────────────────────────
+sys-buddy join https://abc123.ngrok.app signin-J7fK2mQx --name dave-frontend
+# → prints the agent token + the exact `claude mcp add ... --header "Authorization: Bearer sbk_..."`
+#   command to run, plus a read-only dashboard link
+```
+
+Slack pings (optional): set `SLACK_WEBHOOK_URL` before `sys-buddy serve` and both
+humans get a message on contract-lock, verified, and stuck.
+
+Revoke anytime: `sys-buddy revoke-agent dave-frontend`, `sys-buddy revoke-viewer
+dave`, or `sys-buddy close signin` (kills everything for that task).
+
 ## Two modes
 
 | `sys-buddy local` | `sys-buddy serve` |
@@ -77,13 +130,19 @@ design/      ← Claude Design handoff: the dashboard prototype (visual source o
 reference/   ← agent_bus.py: working local-only predecessor + its ops guide
 ```
 
-## Building it
+## Development
 
 ```bash
-cd sys-buddy
-claude
-> Read KICKOFF.md and build this.
+uv sync                        # install deps into .venv
+uv run pytest -q               # the full spec suite (100+ tests)
+uv run sys-buddy --help        # the CLI surface
 ```
+
+Source lives in `src/sys_buddy/`: `db` (schema/WAL) · `identity` + `middleware`
+(auth) · `service` (messaging) · `state` + `contracts` (the enforced workflow) ·
+`pairing` + `admin` (invites/tokens) · `api` (dashboard JSON) · `server` (assembly)
+· `ui.html` (single-file dashboard). Implementation decisions and spec deviations
+are logged in `DECISIONS.md`.
 
 ## Credits
 

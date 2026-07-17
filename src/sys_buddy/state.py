@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import time
 
-from . import contracts, service
+from . import contracts, service, slack
 from .identity import Identity
 
 # --- states -----------------------------------------------------------------
@@ -90,6 +90,16 @@ def _transition(conn, task_id: str, to_state: str) -> str:
     conn.execute("UPDATE tasks SET state = ? WHERE id = ?", (to_state, task_id))
     _event(conn, task_id, "transition", {"from": current, "to": to_state})
     return to_state
+
+
+def _slack(conn, task_id: str, text: str) -> None:
+    """Fire a best-effort Slack ping and record a ``slack`` event either way.
+
+    The event is written regardless of whether a webhook is configured or the send
+    succeeds, so the dashboard's event log shows that a human notification was
+    triggered at this point. ``slack.notify`` never raises (SPEC §14)."""
+    slack.notify(text)
+    _event(conn, task_id, "slack", {"text": text})
 
 
 def _reject_if_terminal(state: str) -> None:
@@ -220,6 +230,11 @@ def lock_contract(conn, identity: Identity, version: int) -> dict:
     )
     state = _transition(conn, identity.task_id, CONTRACT_LOCKED)
     _event(conn, identity.task_id, "lock", {"version": version, "signed": sorted(signed_set)})
+    _slack(
+        conn,
+        identity.task_id,
+        f"[{identity.task_id}] Contract v{version} locked — signed by {', '.join(sorted(signed_set))}",
+    )
     conn.commit()
     return {"locked": True, "version": version, "signed": sorted(signed_set), "state": state}
 
@@ -369,6 +384,11 @@ def _report_test(conn, identity: Identity, status: str, detail: str) -> dict:
             conn, identity, "stuck",
             f"{MAX_STRIKES} fix cycles reached — humans needed. Last failure: {detail}",
         )
+        _slack(
+            conn, identity.task_id,
+            f"[{identity.task_id}] STUCK: {MAX_STRIKES} fix cycles reached — humans needed. "
+            f"Last failure: {detail}",
+        )
     conn.commit()
     return {"status": status, "state": state, "strikes": strikes}
 
@@ -384,6 +404,7 @@ def _report_verified(conn, identity: Identity, detail: str) -> dict:
         )
     state = _transition(conn, identity.task_id, VERIFIED)
     service.post_message(conn, identity, "verified", detail)
+    _slack(conn, identity.task_id, f"[{identity.name}] VERIFIED: {detail}")
     conn.commit()
     return {"status": STATUS_VERIFIED, "state": state}
 
@@ -394,6 +415,7 @@ def _report_stuck(conn, identity: Identity, detail: str) -> dict:
     _reject_if_terminal(_state(conn, identity.task_id))
     state = _transition(conn, identity.task_id, STUCK)
     service.post_message(conn, identity, "stuck", detail)
+    _slack(conn, identity.task_id, f"[{identity.task_id}] STUCK: {detail}")
     conn.commit()
     return {"status": STATUS_STUCK, "state": state}
 

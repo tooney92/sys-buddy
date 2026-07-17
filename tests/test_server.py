@@ -17,7 +17,7 @@ from sys_buddy.server import build_server
 EXPECTED_TOOLS = {
     "send_message", "check_messages", "wait_for_message", "ack_messages",
     "channel_history", "propose_contract", "lock_contract", "get_contract",
-    "report_status",
+    "report_status", "notify_human",
 }
 EXPECTED_ROUTES = {"/pair", "/api/tasks", "/api/task/{id}", "/api/task/{id}/events", "/ui"}
 

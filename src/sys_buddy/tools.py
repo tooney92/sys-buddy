@@ -23,7 +23,7 @@ import asyncio
 
 from fastmcp import FastMCP
 
-from . import service, state
+from . import service, slack, state
 from .config import Config
 from .db import connect
 from .identity import Identity, require_current
@@ -126,6 +126,11 @@ def _op_report_status(ident: Identity, status: str, detail: str) -> dict:
         conn.close()
 
 
+def _op_notify(ident: Identity, message: str) -> str:
+    # Attributed to the caller so both humans see who escalated. Never raises.
+    return slack.notify(f"[{ident.name}] {message}")
+
+
 # --------------------------------------------------------------------------- #
 # registration
 # --------------------------------------------------------------------------- #
@@ -203,6 +208,13 @@ def _register_remote(mcp: FastMCP) -> None:
         a reason if the workflow or your role doesn't permit it."""
         return _op_report_status(require_current(), status, detail)
 
+    @mcp.tool
+    def notify_human(message: str) -> str:
+        """Ping the human owners on Slack. Use ONLY for terminal events — the
+        feature is verified, or you're stuck and need help. Not for routine
+        progress. Best-effort: if Slack isn't configured it says so."""
+        return _op_notify(require_current(), message)
+
 
 def _register_local(mcp: FastMCP) -> None:
     @mcp.tool
@@ -259,3 +271,9 @@ def _register_local(mcp: FastMCP) -> None:
         one of: deployed, test_passed, test_failed, verified, stuck. Rejected with a
         reason if the workflow or your role doesn't permit it."""
         return _op_report_status(_local_identity(task, agent), status, detail)
+
+    @mcp.tool
+    def notify_human(task: str, agent: str, message: str) -> str:
+        """Ping the human owners on Slack. Use ONLY for terminal events (verified,
+        or stuck and need help). Best-effort — never fails your turn."""
+        return _op_notify(_local_identity(task, agent), message)
