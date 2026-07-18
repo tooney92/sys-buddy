@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sys-buddy</title>
+<!-- sys-buddy desktop app shell (pywebview MVP). Single-page app: Home / Host /
+     Buddy / Done views toggled by a tiny client-side router. Self-contained:
+     inline CSS/JS, no external libs except the Geist webfont. Same design
+     language / palette as gui_home.html + ui.html. Replaces gui_home.html.
+     M2 = the Buddy join flow (pywebview.api.join_flow); Host is an M3 stub. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+:root{
+  --bg:#161514;
+  --surface:#201E1D;
+  --surface-2:#282624;
+  --border:#332F2C;
+  --border-strong:#443F3A;
+  --text:#F3F1EE;
+  --text-2:#A7A29C;
+  --text-3:#726D68;
+  --accent:#E0693F;
+  --accent-2:#F0845C;
+  --role-backend:#5468C9;
+  --role-frontend:#C0568C;
+  --ok:#33A852;
+  --err:#DE5B4A;
+  --amber:#E0A83F;
+}
+html,body{height:100%}
+body{
+  min-height:100vh;
+  background:
+    radial-gradient(1100px 640px at 82% -12%, rgba(224,105,63,.10), transparent 60%),
+    radial-gradient(900px 560px at 8% 118%, rgba(84,104,201,.08), transparent 60%),
+    var(--bg);
+  color:var(--text);
+  font-family:'Geist',-apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',sans-serif;
+  -webkit-font-smoothing:antialiased;
+  display:flex;
+  flex-direction:column;
+  overflow-x:hidden;
+}
+.wrap{
+  width:100%;
+  max-width:920px;
+  margin:0 auto;
+  padding:clamp(28px,6vh,72px) clamp(20px,5vw,48px);
+  flex:1 0 auto;
+  display:flex;
+  flex-direction:column;
+}
+
+/* ---------- wordmark ---------- */
+.brand{display:flex;align-items:center;gap:12px}
+.mark{display:inline-flex;align-items:center}
+.mark .dot{width:11px;height:11px;border-radius:50%}
+.mark .dot.a{background:var(--accent)}
+.mark .dot.b{background:var(--role-backend)}
+.mark .line{width:22px;height:2px;border-radius:2px;
+  background:linear-gradient(90deg,var(--accent),var(--role-backend))}
+.wordmark{font-size:1.35rem;font-weight:600;letter-spacing:-.01em}
+.wordmark .mid{color:var(--accent);font-weight:700;padding:0 1px}
+
+/* ---------- view routing ---------- */
+.view{display:none;flex-direction:column;flex:1 0 auto}
+.view.active{display:flex}
+
+/* ---------- hero ---------- */
+.hero{margin-top:clamp(36px,9vh,88px)}
+.hero h1{
+  margin:0;
+  font-size:clamp(1.9rem,5.2vw,3rem);
+  font-weight:600;
+  letter-spacing:-.02em;
+  line-height:1.05;
+}
+.hero .tagline{
+  margin:14px 0 0;
+  font-size:clamp(1rem,2.4vw,1.2rem);
+  color:var(--text-2);
+  font-weight:400;
+}
+.hero .tagline .em{color:var(--text)}
+
+/* ---------- choice cards ---------- */
+.cards{
+  margin-top:clamp(28px,5vh,44px);
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:18px;
+}
+@media (max-width:640px){.cards{grid-template-columns:1fr}}
+.card{
+  appearance:none;
+  text-align:left;
+  cursor:pointer;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:22px 22px 20px;
+  color:var(--text);
+  font-family:inherit;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  transition:border-color .16s ease,transform .16s ease,box-shadow .16s ease,background .16s ease;
+}
+.card:hover{transform:translateY(-2px);background:var(--surface-2);border-color:var(--border-strong)}
+.card:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.card .role-dot{width:12px;height:12px;border-radius:50%}
+.card.host .role-dot{background:var(--accent)}
+.card.buddy .role-dot{background:var(--role-frontend)}
+.card .top{display:flex;align-items:center;gap:10px}
+.card .kicker{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);font-weight:600}
+.card h2{margin:0;font-size:1.28rem;font-weight:600;letter-spacing:-.01em}
+.card p{margin:0;color:var(--text-2);font-size:.92rem;line-height:1.45}
+.card .go{margin-top:6px;font-size:.9rem;font-weight:500;color:var(--accent-2);display:inline-flex;align-items:center;gap:6px}
+
+/* ---------- back link ---------- */
+.back{
+  appearance:none;
+  cursor:pointer;
+  font-family:inherit;
+  font-size:.9rem;
+  font-weight:500;
+  color:var(--text-2);
+  background:transparent;
+  border:none;
+  padding:6px 4px;
+  margin-left:-4px;
+  align-self:flex-start;
+  transition:color .16s ease;
+}
+.back:hover{color:var(--text)}
+.back:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+
+/* ---------- flow heading ---------- */
+.flow-head{margin-top:clamp(24px,5vh,44px)}
+.flow-head h1{
+  margin:0;
+  font-size:clamp(1.6rem,4.4vw,2.4rem);
+  font-weight:600;
+  letter-spacing:-.02em;
+  line-height:1.1;
+}
+.flow-head p{margin:12px 0 0;color:var(--text-2);font-size:1rem;line-height:1.5}
+
+/* ---------- forms ---------- */
+.form{margin-top:clamp(22px,4vh,34px);max-width:560px;display:flex;flex-direction:column;gap:18px}
+.field{display:flex;flex-direction:column;gap:7px}
+.field label{font-size:.82rem;font-weight:600;color:var(--text-2);letter-spacing:.01em}
+.input{
+  font-family:inherit;
+  font-size:.98rem;
+  color:var(--text);
+  background:var(--surface);
+  border:1px solid var(--border-strong);
+  border-radius:11px;
+  padding:12px 14px;
+  width:100%;
+  transition:border-color .16s ease,background .16s ease;
+}
+.input::placeholder{color:var(--text-3)}
+.input:hover{border-color:var(--accent)}
+.input:focus{outline:none;border-color:var(--accent);background:var(--surface-2)}
+.input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* ---------- buttons ---------- */
+.btn{
+  appearance:none;
+  cursor:pointer;
+  font-family:inherit;
+  font-size:.95rem;
+  font-weight:600;
+  border-radius:11px;
+  padding:12px 20px;
+  transition:transform .12s ease,box-shadow .16s ease,background .16s ease,border-color .16s ease,opacity .16s ease;
+}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.btn.primary{
+  color:#1a1512;
+  background:var(--accent);
+  border:1px solid var(--accent);
+  align-self:flex-start;
+}
+.btn.primary:hover:not(:disabled){background:var(--accent-2);transform:translateY(-1px)}
+.btn.primary:disabled{opacity:.6;cursor:progress}
+.btn.ghost{
+  color:var(--text);
+  background:var(--surface-2);
+  border:1px solid var(--border-strong);
+}
+.btn.ghost:hover{border-color:var(--accent);background:var(--surface)}
+.btn.copy{
+  font-size:.82rem;
+  font-weight:500;
+  padding:7px 13px;
+  color:var(--text);
+  background:var(--surface-2);
+  border:1px solid var(--border-strong);
+  border-radius:9px;
+}
+.btn.copy:hover{border-color:var(--accent);background:var(--surface)}
+.btn.copy.done{border-color:var(--ok);color:var(--ok)}
+
+/* ---------- inline notes / status ---------- */
+.hint{font-size:.84rem;color:var(--text-3);margin:2px 0 0}
+.pairing{
+  display:none;
+  align-items:center;
+  gap:9px;
+  font-size:.9rem;
+  color:var(--text-2);
+  margin-top:2px;
+}
+.pairing.show{display:inline-flex}
+.spinner{
+  width:14px;height:14px;flex:none;
+  border:2px solid var(--border-strong);
+  border-top-color:var(--accent);
+  border-radius:50%;
+  animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.alert{
+  display:none;
+  margin-top:4px;
+  padding:12px 14px;
+  border-radius:11px;
+  font-size:.9rem;
+  line-height:1.5;
+  border:1px solid;
+}
+.alert.show{display:block}
+.alert.err{color:#f4b3aa;background:rgba(222,91,74,.10);border-color:rgba(222,91,74,.45)}
+.alert.amber{color:#f0d29a;background:rgba(224,168,63,.09);border-color:rgba(224,168,63,.42)}
+.alert strong{color:inherit;font-weight:600}
+
+/* ---------- result panel ---------- */
+.result{display:none;margin-top:clamp(22px,4vh,32px);flex-direction:column;gap:20px;max-width:640px}
+.result.show{display:flex}
+.result .paired{
+  font-size:1.15rem;
+  font-weight:600;
+  letter-spacing:-.01em;
+}
+.result .paired .role{font-weight:700}
+.result .paired .tid{color:var(--text);font-weight:600}
+.blk{display:flex;flex-direction:column;gap:9px}
+.blk .lbl{font-size:.9rem;font-weight:500;color:var(--text-2)}
+.cfg-ok{display:inline-flex;align-items:center;gap:9px;font-size:.92rem;color:var(--text)}
+.cfg-ok .pip{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}
+pre.code{
+  margin:0;
+  font-family:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.85rem;
+  color:var(--text);
+  background:var(--bg);
+  border:1px solid var(--border-strong);
+  border-radius:10px;
+  padding:12px 14px;
+  overflow-x:auto;
+  white-space:pre;
+}
+textarea.prompt{
+  font-family:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.85rem;
+  line-height:1.55;
+  color:var(--text);
+  background:var(--bg);
+  border:1px solid var(--border-strong);
+  border-radius:10px;
+  padding:12px 14px;
+  width:100%;
+  resize:vertical;
+  min-height:210px;
+}
+textarea.prompt:focus{outline:none;border-color:var(--accent)}
+textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.copy-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+
+/* ---------- done view ---------- */
+.done-hero{margin-top:clamp(48px,12vh,120px);display:flex;flex-direction:column;gap:18px;align-items:flex-start}
+.done-hero h1{margin:0;font-size:clamp(1.8rem,5vw,2.7rem);font-weight:600;letter-spacing:-.02em}
+.done-hero p{margin:0;color:var(--text-2);font-size:1.05rem}
+.done-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px}
+.link-btn{
+  display:inline-flex;align-items:center;gap:8px;
+  text-decoration:none;
+  font-size:.95rem;font-weight:600;
+  color:#1a1512;background:var(--accent);
+  border-radius:11px;padding:12px 20px;
+  transition:background .16s ease,transform .12s ease;
+}
+.link-btn:hover{background:var(--accent-2);transform:translateY(-1px)}
+.link-btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+/* ---------- footer bridge check ---------- */
+.foot{
+  margin-top:auto;
+  padding-top:clamp(28px,6vh,56px);
+  display:flex;
+  align-items:center;
+  gap:12px;
+  flex-wrap:wrap;
+}
+.check{
+  appearance:none;
+  cursor:pointer;
+  font-family:inherit;
+  font-size:.82rem;
+  font-weight:500;
+  color:var(--text-2);
+  background:transparent;
+  border:1px solid var(--border);
+  border-radius:9px;
+  padding:6px 12px;
+  transition:border-color .16s ease,color .16s ease;
+}
+.check:hover{border-color:var(--accent);color:var(--text)}
+.check:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.status{display:inline-flex;align-items:center;gap:8px;font-size:.82rem;color:var(--text-3)}
+.status .pip{width:8px;height:8px;border-radius:50%;background:var(--text-3);flex:none}
+.status.ok .pip{background:var(--ok)}
+.status.ok{color:var(--text-2)}
+.status.err .pip{background:var(--err)}
+.status.err{color:var(--err)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header class="brand">
+    <span class="mark" aria-hidden="true">
+      <span class="dot a"></span><span class="line"></span><span class="dot b"></span>
+    </span>
+    <span class="wordmark">sys<span class="mid">·</span>buddy</span>
+  </header>
+
+  <!-- ============ HOME ============ -->
+  <section class="view active" id="view-home" aria-label="Home">
+    <div class="hero">
+      <h1>Two agents. One contract. Shipped.</h1>
+      <p class="tagline">Pick a side to get started — <span class="em">the broker enforces, your agents request.</span></p>
+
+      <div class="cards">
+        <button type="button" class="card host" id="card-host">
+          <span class="top"><span class="role-dot"></span><span class="kicker">Start a task</span></span>
+          <h2>I'm the Host</h2>
+          <p>Spin up a task, define the roles, and hand your buddy an invite link.</p>
+          <span class="go" aria-hidden="true">Set up a task →</span>
+        </button>
+
+        <button type="button" class="card buddy" id="card-buddy">
+          <span class="top"><span class="role-dot"></span><span class="kicker">Join a task</span></span>
+          <h2>I'm the Buddy</h2>
+          <p>Paste an invite link, pair your agent, and wire Claude to the broker.</p>
+          <span class="go" aria-hidden="true">Join with a link →</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ HOST (M3 stub) ============ -->
+  <section class="view" id="view-host" aria-label="Host setup">
+    <button type="button" class="back" data-nav="home">← Back</button>
+    <div class="flow-head">
+      <h1>Host setup (coming next)</h1>
+      <p>The host flow — create a task, define roles, and generate an invite link — lands in the next milestone.</p>
+    </div>
+  </section>
+
+  <!-- ============ BUDDY (M2) ============ -->
+  <section class="view" id="view-buddy" aria-label="Join a task">
+    <button type="button" class="back" data-nav="home">← Back</button>
+    <div class="flow-head">
+      <h1>Join a task</h1>
+      <p>Paste the invite link your host gave you, name your agent, and we'll pair you and wire up Claude Code.</p>
+    </div>
+
+    <div class="form" id="buddy-form">
+      <div class="field">
+        <label for="in-link">Invite link</label>
+        <input class="input" type="text" id="in-link" autocomplete="off" spellcheck="false"
+               placeholder="Paste your invite link (sb1_…)">
+      </div>
+      <div class="field">
+        <label for="in-name">Your agent name</label>
+        <input class="input" type="text" id="in-name" autocomplete="off" spellcheck="false" value="buddy">
+      </div>
+
+      <button type="button" class="btn primary" id="btn-join">Join</button>
+      <p class="hint" id="join-note" hidden></p>
+
+      <div class="pairing" id="pairing" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>Pairing…</span>
+      </div>
+
+      <div class="alert err" id="join-error" role="alert" aria-live="assertive"></div>
+    </div>
+
+    <!-- result -->
+    <div class="result" id="buddy-result" aria-live="polite">
+      <p class="paired" id="paired-line"></p>
+
+      <div class="blk" id="cfg-block">
+        <!-- config status is injected here -->
+      </div>
+
+      <div class="blk">
+        <span class="lbl">Now brief your agent — paste this into your Claude session:</span>
+        <textarea class="prompt" id="prompt-text" readonly rows="10" aria-label="Agent briefing prompt"></textarea>
+        <div class="copy-row">
+          <button type="button" class="btn copy" data-copy="prompt-text">Copy prompt</button>
+        </div>
+      </div>
+
+      <button type="button" class="btn primary" id="btn-briefed">✓ I've briefed my agent</button>
+    </div>
+  </section>
+
+  <!-- ============ DONE (M4 placeholder) ============ -->
+  <section class="view" id="view-done" aria-label="You're in">
+    <div class="done-hero">
+      <h1>🎉 You're in. Watching the task…</h1>
+      <p>Your agent is paired and briefed. Live task view arrives soon — for now, follow along on the dashboard.</p>
+      <div class="done-actions">
+        <a class="link-btn" id="dash-link" href="#" target="_blank" rel="noopener" hidden>Open dashboard ↗</a>
+        <button type="button" class="btn ghost" data-nav="home">← Home</button>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <button type="button" class="check" id="check-btn">Connection check</button>
+    <span class="status" id="check-status" role="status" aria-live="polite">
+      <span class="pip" aria-hidden="true"></span>
+      <span id="check-text">Bridge not checked.</span>
+    </span>
+  </footer>
+</main>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---- module state ----------------------------------------------------
+  var dashboardUrl = null;   // stashed from a successful join_flow result
+
+  // ---- tiny router -----------------------------------------------------
+  var views = {
+    home:  document.getElementById('view-home'),
+    host:  document.getElementById('view-host'),
+    buddy: document.getElementById('view-buddy'),
+    done:  document.getElementById('view-done')
+  };
+
+  function showView(name){
+    Object.keys(views).forEach(function(k){
+      views[k].classList.toggle('active', k === name);
+    });
+    // reset scroll + focus the first meaningful control for a11y
+    window.scrollTo(0, 0);
+    var v = views[name];
+    var focusable = v.querySelector('.back, .btn, .card, input, a[href]');
+    if (focusable) { try { focusable.focus(); } catch(e){} }
+  }
+
+  // card + back-link + nav wiring
+  document.getElementById('card-host').addEventListener('click', function(){ showView('host'); });
+  document.getElementById('card-buddy').addEventListener('click', function(){ showView('buddy'); });
+  Array.prototype.forEach.call(document.querySelectorAll('[data-nav]'), function(el){
+    el.addEventListener('click', function(){ showView(el.getAttribute('data-nav')); });
+  });
+
+  // ---- copy-to-clipboard helper ---------------------------------------
+  Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function(btn){
+    btn.addEventListener('click', function(){
+      var target = document.getElementById(btn.getAttribute('data-copy'));
+      var text = target ? (target.value !== undefined ? target.value : target.textContent) : '';
+      copyText(text, btn);
+    });
+  });
+
+  function copyText(text, btn){
+    var label = btn.textContent;
+    var confirm = function(){
+      btn.textContent = 'Copied!';
+      btn.classList.add('done');
+      setTimeout(function(){ btn.textContent = label; btn.classList.remove('done'); }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(confirm).catch(function(){ fallbackCopy(text, confirm); });
+    } else {
+      fallbackCopy(text, confirm);
+    }
+  }
+  function fallbackCopy(text, done){
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      done();
+    } catch(e){ /* clipboard unavailable — no-op */ }
+  }
+
+  // ---- buddy join flow -------------------------------------------------
+  var linkEl    = document.getElementById('in-link');
+  var nameEl    = document.getElementById('in-name');
+  var joinBtn   = document.getElementById('btn-join');
+  var joinNote  = document.getElementById('join-note');
+  var pairing   = document.getElementById('pairing');
+  var joinErr   = document.getElementById('join-error');
+  var result    = document.getElementById('buddy-result');
+  var pairedLn  = document.getElementById('paired-line');
+  var cfgBlock  = document.getElementById('cfg-block');
+  var promptTa  = document.getElementById('prompt-text');
+  var briefed   = document.getElementById('btn-briefed');
+  var dashLink  = document.getElementById('dash-link');
+
+  var ROLE_COLORS = { backend: 'var(--role-backend)', frontend: 'var(--role-frontend)' };
+
+  function roleColor(role){
+    return ROLE_COLORS[(role || '').toLowerCase()] || 'var(--accent)';
+  }
+  function esc(s){
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
+  }
+
+  joinBtn.addEventListener('click', function(){
+    // reset transient UI
+    joinErr.classList.remove('show'); joinErr.textContent = '';
+    joinNote.hidden = true;
+
+    var api = window.pywebview && window.pywebview.api;
+    if (!api || typeof api.join_flow !== 'function') {
+      joinNote.hidden = false;
+      joinNote.textContent = 'Bridge unavailable — run inside the app to join.';
+      return;
+    }
+
+    var link = (linkEl.value || '').trim();
+    var name = (nameEl.value || '').trim() || 'buddy';
+    if (!link) {
+      joinErr.textContent = 'Paste your invite link first.';
+      joinErr.classList.add('show');
+      linkEl.focus();
+      return;
+    }
+
+    // pairing state
+    joinBtn.disabled = true;
+    pairing.classList.add('show');
+
+    Promise.resolve(api.join_flow(link, name)).then(function(res){
+      pairing.classList.remove('show');
+      joinBtn.disabled = false;
+      handleResult(res || {});
+    }).catch(function(err){
+      pairing.classList.remove('show');
+      joinBtn.disabled = false;
+      joinErr.textContent = 'Pairing failed: ' + (err && err.message ? err.message : String(err));
+      joinErr.classList.add('show');
+    });
+  });
+
+  function handleResult(res){
+    if (res.error || !res.ok) {
+      joinErr.textContent = res.error || 'Pairing failed. Check your invite link and try again.';
+      joinErr.classList.add('show');
+      return;
+    }
+
+    // stash dashboard url for the done view
+    dashboardUrl = res.dashboard_url || null;
+
+    // paired line — colour the role with its hint colour
+    var col = roleColor(res.role);
+    pairedLn.innerHTML =
+      '✓ Paired as <span class="role" style="color:' + col + '">' + esc(res.role) + '</span>' +
+      ' on task “<span class="tid">' + esc(res.task_id) + '</span>”';
+
+    // config status
+    cfgBlock.innerHTML = '';
+    if (res.config_ok) {
+      cfgBlock.innerHTML =
+        '<span class="cfg-ok"><span class="pip" aria-hidden="true"></span>' +
+        '✓ Claude Code configured — MCP registered.</span>';
+    } else {
+      var wrap = document.createElement('div');
+      wrap.className = 'alert amber show';
+      wrap.setAttribute('role', 'status');
+      wrap.innerHTML =
+        '<strong>Couldn’t auto-configure Claude.</strong> Run this yourself:' +
+        '<div class="copy-row" style="margin-top:10px">' +
+          '<pre class="code" id="cfg-cmd">' + esc(res.config_command) + '</pre>' +
+        '</div>' +
+        '<div class="copy-row" style="margin-top:8px">' +
+          '<button type="button" class="btn copy" id="cfg-copy">Copy command</button>' +
+        '</div>' +
+        (res.config_detail ? '<p class="hint" style="margin-top:8px">' + esc(res.config_detail) + '</p>' : '');
+      cfgBlock.appendChild(wrap);
+      var cmdBtn = wrap.querySelector('#cfg-copy');
+      cmdBtn.addEventListener('click', function(){ copyText(res.config_command || '', cmdBtn); });
+    }
+
+    // briefing prompt
+    promptTa.value = res.prompt || '';
+
+    // reveal result, hide the error slot
+    result.classList.add('show');
+    joinErr.classList.remove('show');
+    briefed.focus();
+  }
+
+  briefed.addEventListener('click', function(){
+    // wire dashboard link on the done view (if any) before showing it
+    if (dashboardUrl) {
+      dashLink.href = dashboardUrl;
+      dashLink.hidden = false;
+    } else {
+      dashLink.hidden = true;
+    }
+    showView('done');
+  });
+
+  // ---- footer bridge probe (guarded for plain-browser use) -------------
+  var statusEl = document.getElementById('check-status');
+  var textEl   = document.getElementById('check-text');
+  function setStatus(kind, msg){
+    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+    textEl.textContent = msg;
+  }
+  document.getElementById('check-btn').addEventListener('click', function(){
+    var api = window.pywebview && window.pywebview.api;
+    if (!api || typeof api.ping !== 'function') {
+      setStatus('err', 'No native bridge — running outside the app.');
+      return;
+    }
+    setStatus('', 'Checking…');
+    Promise.resolve(api.ping()).then(function(res){
+      if (res === 'pong') setStatus('ok', 'Bridge live — Python answered “pong”.');
+      else setStatus('err', 'Unexpected reply: ' + String(res));
+    }).catch(function(err){
+      setStatus('err', 'Bridge error: ' + (err && err.message ? err.message : String(err)));
+    });
+  });
+
+})();
+</script>
+</body>
+</html>

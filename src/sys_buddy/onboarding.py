@@ -169,6 +169,31 @@ def pair(link: str, agent_name: str) -> dict:
     return res
 
 
+def join_flow(link: str, agent_name: str, mcp_name: str = "sys-buddy") -> dict:
+    """One-call buddy onboarding: pair via the invite link, then register the MCP with
+    Claude Code. NEVER raises — returns a result dict the UI renders."""
+    try:
+        try:
+            res = pair(link, agent_name)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        cfg = configure_claude(res["mcp_url"], res["agent_token"], mcp_name)
+        return {
+            "ok": True,
+            "task_id": res["task_id"],
+            "role": res["role"],
+            "prompt": role_prompt(res["role"], res["task_id"]),
+            "dashboard_url": res.get("dashboard_url"),
+            "mcp_url": res["mcp_url"],
+            "config_ok": cfg["ok"],
+            "config_detail": cfg["detail"],
+            "config_command": cfg["command"],
+            "rules": res.get("rules"),
+        }
+    except Exception as e:  # noqa: BLE001 — onboarding must never crash the UI
+        return {"ok": False, "error": str(e)}
+
+
 def host_create_task(task_id: str, roles: list[str], title: str | None = None) -> dict:
     """Host-side: create a task (title defaults to the id). Thin over ``admin``."""
     return admin.create_task(task_id, title=title or task_id, roles=roles)

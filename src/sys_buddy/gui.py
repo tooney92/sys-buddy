@@ -18,7 +18,7 @@ WHY this exists:
       and we run trusted Python (the ``onboarding`` engine) on this side, so
       secrets and local config writes never leave the machine or ride over HTTP.
     * Reuse of our existing HTML/CSS design language — the page is just another
-      self-contained file (``gui_home.html``), same fonts and palette as ``ui.html``.
+      self-contained single-page app (``gui_app.html``), same fonts/palette as ``ui.html``.
 
   This module is the SKELETON (milestones M0/M1): it opens the home screen and
   proves the bridge is live. The full Host/Buddy flows are layered on later by
@@ -68,6 +68,13 @@ class GuiApi:
         except Exception as exc:
             return {"error": str(exc)}
 
+    def join_flow(self, link: str, name: str) -> dict:
+        """One-call Buddy onboarding: pair via ``link`` then wire Claude to the broker."""
+        try:
+            return onboarding.join_flow(link, name)
+        except Exception as exc:  # never raise across the bridge
+            return {"error": str(exc)}
+
     def create_task(self, task_id: str, roles: list, title: str = "") -> dict:
         """Create a host-side task with the given ``roles`` (Host flow)."""
         try:
@@ -85,7 +92,7 @@ class GuiApi:
 
 def _home_path() -> str:
     """Absolute path to the bundled home screen, resolved next to this file."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_home.html")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_app.html")
 
 
 def run_gui() -> None:

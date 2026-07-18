@@ -157,3 +157,72 @@ def test_host_create_task_and_invite_link(conn):
     base_url, code = onboarding.parse_invite_link(link)
     assert base_url == "http://127.0.0.1:8787"
     assert code  # a non-empty invite code
+
+
+# --- join_flow --------------------------------------------------------------
+def _fake_join():
+    """A representative successful ``pair`` result."""
+    return {
+        "task_id": "signin",
+        "role": "frontend",
+        "agent_token": "sbk_x",
+        "mcp_url": "http://h/mcp",
+        "dashboard_url": "http://h/ui?v=sbv_y",
+        "expires_at": None,
+        "rules": "RULES",
+    }
+
+
+def test_join_flow_success(monkeypatch):
+    monkeypatch.setattr(onboarding, "pair", lambda *a, **k: _fake_join())
+    monkeypatch.setattr(
+        onboarding,
+        "configure_claude",
+        lambda *a, **k: {"ok": True, "detail": "registered", "command": "claude mcp add ..."},
+    )
+    result = onboarding.join_flow("sb1_link", "dave-frontend")
+    assert result["ok"] is True
+    assert result["role"] == "frontend"
+    assert result["task_id"] == "signin"
+    assert result["config_ok"] is True
+    assert isinstance(result["prompt"], str) and result["prompt"]
+    assert "signin" in result["prompt"]
+    assert result["dashboard_url"]
+    assert result["mcp_url"]
+
+
+def test_join_flow_pair_failure(monkeypatch):
+    def _raise(*a, **k):
+        raise ValueError("bad link")
+
+    monkeypatch.setattr(onboarding, "pair", _raise)
+    result = onboarding.join_flow("sb1_link", "dave-frontend")
+    assert result["ok"] is False
+    assert "bad link" in result["error"]
+
+
+def test_join_flow_surfaces_config_failure(monkeypatch):
+    monkeypatch.setattr(onboarding, "pair", lambda *a, **k: _fake_join())
+    monkeypatch.setattr(
+        onboarding,
+        "configure_claude",
+        lambda *a, **k: {
+            "ok": False,
+            "detail": "Claude Code CLI not found",
+            "command": "claude mcp add ...",
+        },
+    )
+    result = onboarding.join_flow("sb1_link", "dave-frontend")
+    assert result["ok"] is True  # pairing still worked
+    assert result["config_ok"] is False
+    assert "not found" in result["config_detail"]
+
+
+def test_join_flow_never_raises_on_unexpected(monkeypatch):
+    def _raise(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(onboarding, "pair", _raise)
+    result = onboarding.join_flow("sb1_link", "dave-frontend")
+    assert isinstance(result, dict)
+    assert result["ok"] is False
