@@ -53,7 +53,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
     if not roles:
         print("error: --roles must list at least one role", file=sys.stderr)
         return 2
-    task = admin.create_task(args.id, title=args.title or args.id, roles=roles)
+    task = admin.create_task(args.id, title=args.title or args.id, roles=roles, mode=args.mode)
     print(f"Created task '{task['id']}'  ·  roles: {', '.join(roles)}  ·  state: {task['state']}")
     return 0
 
@@ -250,6 +250,12 @@ def build_parser() -> argparse.ArgumentParser:
     tc.add_argument("id")
     tc.add_argument("--roles", required=True, help="Comma-separated roles, e.g. backend,frontend")
     tc.add_argument("--title", help="Human title (defaults to the id)")
+    tc.add_argument(
+        "--mode",
+        choices=["contract", "debug"],
+        default="contract",
+        help="'contract' (full workflow) or 'debug' (collaborate then mark resolved)",
+    )
     tc.set_defaults(func=cmd_task_create)
 
     sp = sub.add_parser("tasks", help="List tasks")

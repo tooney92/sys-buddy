@@ -40,29 +40,39 @@ def _write_event(conn: sqlite3.Connection, task_id: str, kind: str, detail: dict
     )
 
 
-def create_task(id: str, *, title: str, roles: list[str]) -> dict:
+def create_task(id: str, *, title: str, roles: list[str], mode: str = "contract") -> dict:
     """Create a task in the ``open`` state with the given fixed cast of roles.
+
+    ``mode`` selects the workflow: ``'contract'`` (the default) runs the full
+    propose/lock/deploy state machine; ``'debug'`` is a lightweight mode where two
+    buddies just fix a problem and mark it resolved, with no contract required.
 
     Duplicate ids are rejected explicitly (rather than surfacing a raw sqlite
     IntegrityError) so the CLI can print an actionable message.
     """
-    if "backend" not in roles:
+    if mode not in ("contract", "debug"):
+        raise ValueError(f"unknown mode {mode!r}; expected 'contract' or 'debug'")
+    if mode == "contract" and "backend" not in roles:
         # The state machine designates 'backend' as the role that deploys (SPEC §7);
-        # a task without it can lock a contract but never reach backend_live, so the
-        # workflow would deadlock. Reject at creation rather than strand it later.
+        # a contract task without it can lock a contract but never reach backend_live,
+        # so the workflow would deadlock. Reject at creation rather than strand it
+        # later. Debug tasks skip the state machine, so they need no backend seat.
         raise ValueError("roles must include 'backend' (the role that deploys)")
+    if not roles:
+        raise ValueError("a task needs at least one role")
     conn = connect()
     try:
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (id,)).fetchone() is not None:
             raise ValueError(f"task '{id}' already exists")
         now = time.time()
         conn.execute(
-            "INSERT INTO tasks (id, title, state, roles_json, created_at) VALUES (?,?,?,?,?)",
-            (id, title, "open", json.dumps(list(roles)), now),
+            "INSERT INTO tasks (id, title, state, mode, roles_json, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (id, title, "open", mode, json.dumps(list(roles)), now),
         )
         _write_event(conn, id, "task", {"text": f"Task created: {id}"})
         conn.commit()
-        return {"id": id, "state": "open", "title": title, "roles": list(roles)}
+        return {"id": id, "state": "open", "title": title, "roles": list(roles), "mode": mode}
     finally:
         conn.close()
 

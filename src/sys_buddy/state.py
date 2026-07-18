@@ -36,8 +36,9 @@ BACKEND_LIVE = "backend_live"
 TESTING = "testing"
 VERIFIED = "verified"
 STUCK = "stuck"
+RESOLVED = "resolved"  # debug tasks: terminal, reached from any non-terminal state
 
-TERMINAL_STATES = frozenset({VERIFIED, STUCK})
+TERMINAL_STATES = frozenset({VERIFIED, STUCK, RESOLVED})
 
 # --- report_status vocabulary -----------------------------------------------
 # The status strings an agent may pass to report_status. Named for what the agent
@@ -47,6 +48,7 @@ STATUS_TEST_PASSED = "test_passed"  # client role: e2e suite went green
 STATUS_TEST_FAILED = "test_failed"  # client role: e2e suite went red (a strike)
 STATUS_VERIFIED = "verified"        # feature confirmed end-to-end (terminal)
 STATUS_STUCK = "stuck"              # give up; humans needed (terminal)
+STATUS_RESOLVED = "resolved"        # debug task: the issue is fixed (terminal)
 
 TEST_STATUSES = frozenset({STATUS_TEST_PASSED, STATUS_TEST_FAILED})
 
@@ -69,6 +71,15 @@ def _state(conn, task_id: str) -> str:
     if row is None:
         raise ValueError(f"unknown task '{task_id}'")
     return row["state"]
+
+
+def _task_mode(conn, task_id: str) -> str:
+    """The task's workflow mode: 'contract' (full state machine) or 'debug'
+    (simple open → resolved). Defaults to 'contract' when NULL or missing."""
+    row = conn.execute("SELECT mode FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or row["mode"] is None:
+        return "contract"
+    return row["mode"]
 
 
 def _event(conn, task_id: str, kind: str, detail: object) -> None:
@@ -295,6 +306,20 @@ def report_status(conn, identity: Identity, status: str, detail: str) -> dict:
       * ``stuck``         — → terminal stuck
     """
     service.assert_content_size(detail, "status detail")
+
+    # Mode gate: debug tasks have a single 'resolved' status; contract tasks have
+    # the full deploy/test/verified vocabulary. Keep the two vocabularies disjoint.
+    mode = _task_mode(conn, identity.task_id)
+    if mode == "debug" and status != STATUS_RESOLVED:
+        raise ValueError(
+            "this is a debug task — report_status('resolved') when the issue is "
+            "fixed (deploy/test/verified don't apply)"
+        )
+    if mode != "debug" and status == STATUS_RESOLVED:
+        raise ValueError(
+            "'resolved' is only for debug tasks; contract tasks finish with 'verified'"
+        )
+
     if status == STATUS_DEPLOYED:
         return _report_deployed(conn, identity, detail)
     if status in TEST_STATUSES:
@@ -303,6 +328,8 @@ def report_status(conn, identity: Identity, status: str, detail: str) -> dict:
         return _report_verified(conn, identity, detail)
     if status == STATUS_STUCK:
         return _report_stuck(conn, identity, detail)
+    if status == STATUS_RESOLVED:
+        return _report_resolved(conn, identity, detail)
     raise ValueError(
         f"unknown status {status!r}; expected one of: "
         f"{STATUS_DEPLOYED}, {STATUS_TEST_PASSED}, {STATUS_TEST_FAILED}, "
@@ -433,6 +460,19 @@ def _report_verified(conn, identity: Identity, detail: str) -> dict:
     _slack(conn, identity.task_id, f"[{identity.name}] VERIFIED: {detail}")
     conn.commit()
     return {"status": STATUS_VERIFIED, "state": state}
+
+
+def _report_resolved(conn, identity: Identity, detail: str) -> dict:
+    """Debug task: the issue is fixed → terminal ``resolved``. Either party may
+    resolve, from any non-terminal state. Reopening after is a human's job."""
+    state = _state(conn, identity.task_id)
+    _reject_if_terminal(state)
+    state = _transition(conn, identity.task_id, RESOLVED)
+    service.post_message(conn, identity, "resolved", detail)
+    _event(conn, identity.task_id, "resolved", {"text": detail})
+    _slack(conn, identity.task_id, f"[{identity.name}] RESOLVED: {detail}")
+    conn.commit()
+    return {"status": STATUS_RESOLVED, "state": state}
 
 
 def _report_stuck(conn, identity: Identity, detail: str) -> dict:

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
     state       TEXT NOT NULL,
+    mode        TEXT NOT NULL DEFAULT 'contract',  -- 'contract' | 'debug'
     roles_json  TEXT NOT NULL,
     strikes     INTEGER NOT NULL DEFAULT 0,
     created_at  REAL NOT NULL,
@@ -151,6 +152,10 @@ def init_db(db_path: Path | str | None = None) -> Path:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)").fetchall()}
         if "expires_at" not in cols:
             conn.execute("ALTER TABLE agents ADD COLUMN expires_at REAL")
+        # Migration: add tasks.mode to a db created before debug tasks existed.
+        task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "mode" not in task_cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'contract'")
         conn.commit()
     finally:
         conn.close()
