@@ -194,9 +194,11 @@ def join_flow(link: str, agent_name: str, mcp_name: str = "sys-buddy") -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def host_create_task(task_id: str, roles: list[str], title: str | None = None) -> dict:
+def host_create_task(
+    task_id: str, roles: list[str], title: str | None = None, mode: str = "contract"
+) -> dict:
     """Host-side: create a task (title defaults to the id). Thin over ``admin``."""
-    return admin.create_task(task_id, title=title or task_id, roles=roles)
+    return admin.create_task(task_id, title=title or task_id, roles=roles, mode=mode)
 
 
 def host_invite_link(task_id: str, role: str, base_url: str) -> str:
@@ -205,12 +207,18 @@ def host_invite_link(task_id: str, role: str, base_url: str) -> str:
     return make_invite_link(base_url, code)
 
 
-def host_setup(task_id: str, roles: list[str], base_url: str, title: str | None = None) -> dict:
+def host_setup(
+    task_id: str,
+    roles: list[str],
+    base_url: str,
+    title: str | None = None,
+    mode: str = "contract",
+) -> dict:
     """Host-side setup in one call: create the task, mint one invite LINK per role,
     and issue an all-tasks host viewer token. NEVER raises — returns a dict the host
     UI renders (mirrors join_flow's shape)."""
     try:
-        host_create_task(task_id, roles, title)
+        host_create_task(task_id, roles, title, mode=mode)
         invites = [{"role": r, "link": host_invite_link(task_id, r, base_url)} for r in roles]
         from . import admin
         viewer_token = admin.issue_host_viewer("host")

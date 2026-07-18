@@ -136,7 +136,7 @@ class GuiApi:
             return {"error": str(exc)}
 
     def start_host(self, task_id: str, roles: list, title: str = "", public_url: str = "",
-                   trusted: bool = False) -> dict:
+                   trusted: bool = False, mode: str = "contract") -> dict:
         """Host flow: start the in-process broker (once), create the task, and mint an
         invite link per role. ``public_url`` (optional) is the host's tunnel origin
         (e.g. ngrok) so a buddy on another machine can reach the broker — the invite
@@ -155,7 +155,7 @@ class GuiApi:
                 from .config import get_config
                 if get_config().agent_token_ttl is None:
                     get_config().agent_token_ttl = 24 * 3600
-            return onboarding.host_setup(task_id, list(roles), base or BASE_URL, title=title or None)
+            return onboarding.host_setup(task_id, list(roles), base or BASE_URL, title=title or None, mode=mode)
         except Exception as exc:
             return {"error": str(exc)}
 

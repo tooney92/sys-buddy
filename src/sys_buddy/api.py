@@ -82,10 +82,9 @@ def _render_detail(kind: str, detail: dict) -> str:
         if passed:
             return "Tests passed"
         return f"Tests failed (strike {strike})" if strike is not None else "Tests failed"
-    if kind in ("slack", "token", "task"):
-        # These carry free-form/auxiliary detail; surface a text field if present.
-        return detail.get("text") or detail.get("message") or json.dumps(detail)
-    return json.dumps(detail)
+    # Everything else (slack, token, task, resolved, …) carries free-form detail;
+    # surface a text/message field if present, else a compact JSON dump.
+    return detail.get("text") or detail.get("message") or json.dumps(detail)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,11 +135,11 @@ def _list_tasks_for(conn, viewer: ViewerIdentity, *, now: float | None = None) -
     """
     if viewer.is_host:
         rows = conn.execute(
-            "SELECT id, title, state, roles_json, strikes, created_at FROM tasks ORDER BY created_at"
+            "SELECT id, title, state, mode, roles_json, strikes, created_at FROM tasks ORDER BY created_at"
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, title, state, roles_json, strikes, created_at FROM tasks WHERE id = ?",
+            "SELECT id, title, state, mode, roles_json, strikes, created_at FROM tasks WHERE id = ?",
             (viewer.task_id,),
         ).fetchall()
 
@@ -151,6 +150,7 @@ def _list_tasks_for(conn, viewer: ViewerIdentity, *, now: float | None = None) -
                 "id": r["id"],
                 "title": r["title"],
                 "state": r["state"],
+                "mode": r["mode"] or "contract",
                 "roles": json.loads(r["roles_json"]),
                 "last": _time_ago(_last_activity(conn, r["id"], r["created_at"]), now=now),
                 "strikes": r["strikes"],
@@ -317,7 +317,7 @@ def _task_detail(conn, task_id: str) -> dict | None:
     scope; this function is scope-agnostic (it's reused by both host and buddy).
     """
     t = conn.execute(
-        "SELECT id, title, state, roles_json, strikes, created_at FROM tasks WHERE id = ?",
+        "SELECT id, title, state, mode, roles_json, strikes, created_at FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if t is None:
@@ -326,6 +326,7 @@ def _task_detail(conn, task_id: str) -> dict | None:
         "id": t["id"],
         "title": t["title"],
         "state": t["state"],
+        "mode": t["mode"] or "contract",
         "roles": json.loads(t["roles_json"]),
         "strikes": t["strikes"],
         "times": _times_for(conn, task_id, t["created_at"]),

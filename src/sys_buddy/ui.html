@@ -508,6 +508,34 @@ function eventLogHTML(d){
     '<div style="max-height:320px;overflow-y:auto">'+rows+'</div></div>';
 }
 
+/* ---------- debug-mode task view (no stepper, no contract) ---------- */
+/* A debug task's lifecycle is just open → resolved, so it gets a tailored view:
+   a simple status header + the reused message thread + the reused event log. */
+function debugChip(stateName){
+  if(stateName==='resolved'){
+    return {label:'resolved ✓', bg:'var(--st-verified-bg)', fg:'var(--st-verified-fg)', dot:'var(--st-verified-dot)'};
+  }
+  return stateChip(stateName); // 'open' (and any other) falls through to the shared styles
+}
+function debugTaskHTML(d){
+  var chip=debugChip(d.state);
+  var avs=(d.roles||[]).map(function(r){ return avatarChip(r,22,10); }).join('');
+  var statusHeader='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:15px 20px;margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
+    '<span style="display:inline-flex;align-items:center;gap:7px;padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:7px;height:7px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
+    '<span style="font-size:12.5px;color:var(--text-2)">Debug session — collaborate, then mark resolved.</span>'+
+    '<div style="flex:1"></div><div style="display:flex;gap:4px">'+avs+'</div></div>';
+  return '<div style="max-width:1200px;margin:0 auto;padding:20px 20px 80px">'+
+    '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px">'+
+      '<button data-home="1" style="display:inline-flex;align-items:center;gap:6px;padding:6px 11px;background:var(--surface);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;color:var(--text-2)">'+IC.back+'Tasks</button>'+
+      '<h1 style="font-size:20px;font-weight:700;margin:0;color:var(--text);letter-spacing:-.02em">'+esc(d.title)+'</h1>'+
+      '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
+    '</div>'+
+    statusHeader+
+    threadHTML(d)+
+    eventLogHTML(d)+
+  '</div>';
+}
+
 /* ---------- task view ---------- */
 function taskHTML(){
   if(!state.detail){
@@ -516,6 +544,7 @@ function taskHTML(){
       '<div style="text-align:center;padding:80px 20px;color:var(--text-2);font-size:14px">Loading task…</div></div>';
   }
   var d=state.detail;
+  if(d.mode==='debug') return debugTaskHTML(d);
   var m=state.isMobile;
   var chip=stateChip(d.state);
   var steps=genSteps(d.state, d.times);

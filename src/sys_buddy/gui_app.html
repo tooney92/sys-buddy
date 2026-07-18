@@ -317,6 +317,28 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 .role-chk input:focus-visible ~ .role-tag{outline:2px solid var(--accent);outline-offset:2px}
 .role-chk input:disabled:checked ~ .role-tag{opacity:.85}
 
+/* ---------- host: session-type segmented toggle ---------- */
+.seg{display:inline-flex;align-self:flex-start;background:var(--surface);border:1px solid var(--border-strong);border-radius:11px;padding:3px;gap:3px}
+.seg label{position:relative;cursor:pointer;display:inline-flex}
+.seg input{position:absolute;opacity:0;width:1px;height:1px}
+.seg .seg-tag{
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:.9rem;font-weight:500;color:var(--text-2);
+  padding:8px 20px;border-radius:8px;
+  transition:color .16s ease,background .16s ease;
+}
+.seg input:checked ~ .seg-tag{color:var(--text);background:var(--surface-2)}
+.seg input:focus-visible ~ .seg-tag{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- numbered step badge (buddy result) ---------- */
+.step-lbl{display:flex;align-items:center;gap:0}
+.step-n{
+  display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:20px;height:20px;border-radius:50%;margin-right:9px;
+  background:var(--surface-2);border:1px solid var(--border-strong);
+  color:var(--text-2);font-size:.74rem;font-weight:600;line-height:1;
+}
+
 /* ---------- host: invites ---------- */
 .invites{display:flex;flex-direction:column;gap:10px}
 .invite-row{
@@ -464,6 +486,21 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       </div>
 
       <div class="field">
+        <span class="label-txt" id="mode-label">Session type</span>
+        <div class="seg" role="radiogroup" aria-labelledby="mode-label">
+          <label>
+            <input type="radio" name="session-mode" id="mode-contract" value="contract" checked>
+            <span class="seg-tag">Contract</span>
+          </label>
+          <label>
+            <input type="radio" name="session-mode" id="mode-debug" value="debug">
+            <span class="seg-tag">Debug</span>
+          </label>
+        </div>
+        <p class="hint" id="mode-hint">Contract = full negotiate / lock / deploy / verify workflow. Debug = collaborate freely then mark resolved (no contract, no backend required).</p>
+      </div>
+
+      <div class="field">
         <span class="label-txt" id="roles-label">Roles</span>
         <div class="roles" role="group" aria-labelledby="roles-label">
           <label class="role-chk">
@@ -479,7 +516,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
             <span class="role-tag" style="--rc:var(--role-mobile)"><span class="role-pip"></span>mobile</span>
           </label>
         </div>
-        <p class="hint">backend is always required</p>
+        <p class="hint" id="roles-note">backend is always required</p>
       </div>
 
       <button type="button" class="btn primary" id="btn-host">Create &amp; start broker</button>
@@ -551,7 +588,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       </div>
 
       <div class="blk">
-        <span class="lbl">Now brief your agent — paste this into your Claude session:</span>
+        <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your Claude session:</span>
         <textarea class="prompt" id="prompt-text" readonly rows="10" aria-label="Agent briefing prompt"></textarea>
         <div class="copy-row">
           <button type="button" class="btn copy" data-copy="prompt-text">Copy prompt</button>
@@ -731,29 +768,32 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       '✓ Paired as <span class="role" style="color:' + col + '">' + esc(res.role) + '</span>' +
       ' on task “<span class="tid">' + esc(res.task_id) + '</span>”';
 
-    // config status
-    cfgBlock.innerHTML = '';
+    // Step 1 — Connect Claude to sys-buddy. The `claude mcp add …` command is
+    // ALWAYS shown: the GUI's auto-run may write to a different Claude config/scope
+    // than the user's terminal, so they must be able to run it themselves.
+    var cmd = res.config_command || '';
+    var note;
     if (res.config_ok) {
-      cfgBlock.innerHTML =
-        '<span class="cfg-ok"><span class="pip" aria-hidden="true"></span>' +
-        '✓ Claude Code configured — MCP registered.</span>';
+      note =
+        '<p class="hint" style="margin-top:2px">We tried to run this for you. ' +
+        'If <code>claude mcp list</code> doesn’t show <strong>sys-buddy</strong>, run the command ' +
+        'above in the terminal where you start Claude (same folder/profile).</p>';
     } else {
-      var wrap = document.createElement('div');
-      wrap.className = 'alert amber show';
-      wrap.setAttribute('role', 'status');
-      wrap.innerHTML =
-        '<strong>Couldn’t auto-configure Claude.</strong> Run this yourself:' +
-        '<div class="copy-row" style="margin-top:10px">' +
-          '<pre class="code" id="cfg-cmd">' + esc(res.config_command) + '</pre>' +
-        '</div>' +
-        '<div class="copy-row" style="margin-top:8px">' +
-          '<button type="button" class="btn copy" id="cfg-copy">Copy command</button>' +
+      note =
+        '<div class="alert amber show" role="status" style="margin-top:2px">' +
+          '<strong>Couldn’t auto-configure — run the command above in your terminal.</strong>' +
         '</div>' +
         (res.config_detail ? '<p class="hint" style="margin-top:8px">' + esc(res.config_detail) + '</p>' : '');
-      cfgBlock.appendChild(wrap);
-      var cmdBtn = wrap.querySelector('#cfg-copy');
-      cmdBtn.addEventListener('click', function(){ copyText(res.config_command || '', cmdBtn); });
     }
+    cfgBlock.innerHTML =
+      '<span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your Claude to sys-buddy</span>' +
+      '<pre class="code" id="cfg-cmd">' + esc(cmd) + '</pre>' +
+      '<div class="copy-row">' +
+        '<button type="button" class="btn copy" id="cfg-copy">Copy command</button>' +
+      '</div>' +
+      note;
+    var cmdBtn = cfgBlock.querySelector('#cfg-copy');
+    cmdBtn.addEventListener('click', function(){ copyText(cmd, cmdBtn); });
 
     // briefing prompt
     promptTa.value = res.prompt || '';
@@ -778,8 +818,12 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   // ---- host start flow -------------------------------------------------
   var taskIdEl   = document.getElementById('in-task-id');
   var titleEl    = document.getElementById('in-title');
+  var roleBe     = document.getElementById('role-backend');
   var roleFe     = document.getElementById('role-frontend');
   var roleMo     = document.getElementById('role-mobile');
+  var modeContract = document.getElementById('mode-contract');
+  var modeDebug    = document.getElementById('mode-debug');
+  var rolesNote    = document.getElementById('roles-note');
   var hostBtn    = document.getElementById('btn-host');
   var hostNote   = document.getElementById('host-note');
   var hostStart  = document.getElementById('host-starting');
@@ -789,6 +833,22 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var hostInv    = document.getElementById('host-invites');
   var openDash   = document.getElementById('btn-open-dash');
   var dashFall   = document.getElementById('host-dash-fallback');
+
+  // session-type toggle: Debug frees the backend role (no contract, no backend
+  // required); Contract keeps backend checked+disabled with the "required" note.
+  function applyMode(){
+    if (modeDebug.checked) {
+      roleBe.disabled = false;
+      rolesNote.hidden = true;
+    } else {
+      roleBe.checked = true;
+      roleBe.disabled = true;
+      rolesNote.hidden = false;
+    }
+  }
+  modeContract.addEventListener('change', applyMode);
+  modeDebug.addEventListener('change', applyMode);
+  applyMode();
 
   hostBtn.addEventListener('click', function(){
     // reset transient UI
@@ -811,8 +871,14 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       return;
     }
 
-    // roles — backend is always required
-    var roles = ['backend'];
+    // session mode + roles. Contract forces backend; Debug sends whatever's checked.
+    var mode = modeDebug.checked ? 'debug' : 'contract';
+    var roles = [];
+    if (mode === 'debug') {
+      if (roleBe.checked) roles.push('backend');
+    } else {
+      roles.push('backend'); // always required in contract mode
+    }
     if (roleFe.checked) roles.push('frontend');
     if (roleMo.checked) roles.push('mobile');
 
@@ -825,7 +891,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     hostBtn.disabled = true;
     hostStart.classList.add('show');
 
-    Promise.resolve(api.start_host(taskId, roles, title, publicUrl, trusted)).then(function(res){
+    Promise.resolve(api.start_host(taskId, roles, title, publicUrl, trusted, mode)).then(function(res){
       hostStart.classList.remove('show');
       hostBtn.disabled = false;
       handleHostResult(res || {});
