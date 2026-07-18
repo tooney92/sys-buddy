@@ -254,4 +254,6 @@ def join(url: str, code: str, name: str, pubkey: str | None = None) -> dict | No
         "mcp_url": data.get("mcp_url"),
         "agent_token": data.get("agent_token"),
         "dashboard_url": data.get("dashboard_url"),
+        "expires_at": data.get("expires_at"),
+        "rules": data.get("rules"),  # surface the charter to the buddy (CLI prints it)
     }

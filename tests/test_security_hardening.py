@@ -360,3 +360,31 @@ def test_init_db_migrates_pre_ttl_schema(tmp_path):
     cols = {r[1] for r in c.execute("PRAGMA table_info(agents)").fetchall()}
     c.close()
     assert "expires_at" in cols
+
+
+def test_join_client_surfaces_charter_and_expiry(monkeypatch):
+    """The buddy-side join() must pass the /pair charter + expiry through — else the
+    agent never receives the Rules of Engagement (regression: dogfood caught this)."""
+    import json as _json
+
+    from sys_buddy import pairing
+
+    payload = {
+        "task_id": "t", "role": "frontend", "mcp_url": "http://x/mcp",
+        "agent_token": "sbk_a", "viewer_token": "sbv_b",
+        "dashboard_url": "http://x/ui?v=sbv_b", "expires_at": 123.0, "rules": "RULES",
+    }
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps(payload).encode()
+
+    monkeypatch.setattr(pairing.urllib.request, "urlopen", lambda *a, **k: FakeResp())
+    result = pairing.join("http://x", "t-code", "dave")
+    assert result["rules"] == "RULES" and result["expires_at"] == 123.0
