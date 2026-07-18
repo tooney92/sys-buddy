@@ -135,13 +135,19 @@ class GuiApi:
         except Exception as exc:
             return {"error": str(exc)}
 
-    def start_host(self, task_id: str, roles: list, title: str = "") -> dict:
+    def start_host(self, task_id: str, roles: list, title: str = "", public_url: str = "") -> dict:
         """Host flow: start the in-process broker (once), create the task, and mint an
-        invite link per role. Returns the host_setup dict, or an error the UI shows."""
+        invite link per role. ``public_url`` (optional) is the host's https tunnel
+        origin (e.g. ngrok) so a buddy on another machine can reach the broker — the
+        invite links embed it. Blank = same-machine (loopback). Returns the host_setup
+        dict, or an error the UI shows."""
         try:
+            base = (public_url or "").strip().rstrip("/")
+            if base and not base.lower().startswith("https://"):
+                return {"ok": False, "error": "Public URL must be an https:// tunnel origin (tokens would transit in cleartext otherwise). Leave it blank for same-machine."}
             if not _ensure_broker():
                 return {"ok": False, "error": f"broker did not come up on {BASE_URL} — is port {BROKER_PORT} free?"}
-            return onboarding.host_setup(task_id, list(roles), BASE_URL, title=title or None)
+            return onboarding.host_setup(task_id, list(roles), base or BASE_URL, title=title or None)
         except Exception as exc:
             return {"error": str(exc)}
 
