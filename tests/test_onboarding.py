@@ -226,3 +226,34 @@ def test_join_flow_never_raises_on_unexpected(monkeypatch):
     result = onboarding.join_flow("sb1_link", "dave-frontend")
     assert isinstance(result, dict)
     assert result["ok"] is False
+
+
+# --- host_setup -------------------------------------------------------------
+def test_host_setup_success(conn):
+    r = onboarding.host_setup("signin", ["backend", "frontend"], "http://127.0.0.1:8787")
+
+    assert r["ok"] is True
+    assert r["task_id"] == "signin"
+    assert len(r["invites"]) == 2
+    for invite in r["invites"]:
+        assert invite["role"] in {"backend", "frontend"}
+        assert invite["link"].startswith("sb1_")
+    assert onboarding.parse_invite_link(r["invites"][0]["link"])[0] == "http://127.0.0.1:8787"
+    assert r["viewer_token"]
+    assert "/ui?v=" in r["dashboard_url"]
+
+
+def test_host_setup_rejects_missing_backend(conn):
+    r = onboarding.host_setup("x", ["frontend"], "http://h")
+
+    assert r["ok"] is False
+    assert isinstance(r["error"], str) and r["error"]
+
+
+def test_host_setup_rejects_duplicate_task(conn):
+    first = onboarding.host_setup("dup", ["backend"], "http://h")
+    assert first["ok"] is True
+
+    r = onboarding.host_setup("dup", ["backend"], "http://h")
+    assert r["ok"] is False
+    assert "already exists" in r["error"]

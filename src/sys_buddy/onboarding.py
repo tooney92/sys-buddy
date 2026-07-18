@@ -203,3 +203,24 @@ def host_invite_link(task_id: str, role: str, base_url: str) -> str:
     """Host-side: mint an invite for ``role`` and pack it into a ``sb1_`` link."""
     code, _ = admin.mint_invite(task_id, role)
     return make_invite_link(base_url, code)
+
+
+def host_setup(task_id: str, roles: list[str], base_url: str, title: str | None = None) -> dict:
+    """Host-side setup in one call: create the task, mint one invite LINK per role,
+    and issue an all-tasks host viewer token. NEVER raises — returns a dict the host
+    UI renders (mirrors join_flow's shape)."""
+    try:
+        host_create_task(task_id, roles, title)
+        invites = [{"role": r, "link": host_invite_link(task_id, r, base_url)} for r in roles]
+        from . import admin
+        viewer_token = admin.issue_host_viewer("host")
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "base_url": base_url,
+            "invites": invites,
+            "viewer_token": viewer_token,
+            "dashboard_url": f"{base_url}/ui?v={viewer_token}",
+        }
+    except Exception as e:  # noqa: BLE001 — host setup must never crash the UI
+        return {"ok": False, "error": str(e)}

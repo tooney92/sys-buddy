@@ -27,10 +27,56 @@ WHY this exists:
 """
 
 import os
+import threading
+import time
+import urllib.request
 
 import webview
 
 from . import onboarding
+
+# The host runs the broker in-process on loopback. REMOTE mode is required (not
+# local): only then do agents authenticate by bearer token and get the parameter-free
+# tool surface the buddy's Claude expects. http is fine on 127.0.0.1; a two-machine
+# host exposes it via an https tunnel (M5). Kept in a daemon thread so it dies with
+# the app — no stray server to remember to kill.
+BROKER_HOST = "127.0.0.1"
+BROKER_PORT = 8787
+BASE_URL = f"http://{BROKER_HOST}:{BROKER_PORT}"
+
+_broker_thread: threading.Thread | None = None
+
+
+def _broker_is_up() -> bool:
+    try:
+        with urllib.request.urlopen(f"{BASE_URL}/ui", timeout=1):
+            return True
+    except Exception:
+        return False
+
+
+def _run_broker() -> None:
+    from .config import Config
+    from .server import run_server
+
+    # build_server sets the global config + inits the db, then serves (blocking).
+    run_server(Config(mode="remote", host=BROKER_HOST, port=BROKER_PORT, public_url=None))
+
+
+def _ensure_broker(timeout: float = 30.0) -> bool:
+    """Start the in-process broker once and wait until it answers. Idempotent."""
+    global _broker_thread
+    if _broker_is_up():
+        return True
+    if _broker_thread is None or not _broker_thread.is_alive():
+        _broker_thread = threading.Thread(target=_run_broker, daemon=True)
+        _broker_thread.start()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _broker_is_up():
+            return True
+        time.sleep(0.4)
+    return False
 
 
 class GuiApi:
@@ -86,6 +132,25 @@ class GuiApi:
         """Mint the invite link a Buddy uses to pair into ``role`` on ``task_id``."""
         try:
             return onboarding.host_invite_link(task_id, role, base_url)
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    def start_host(self, task_id: str, roles: list, title: str = "") -> dict:
+        """Host flow: start the in-process broker (once), create the task, and mint an
+        invite link per role. Returns the host_setup dict, or an error the UI shows."""
+        try:
+            if not _ensure_broker():
+                return {"ok": False, "error": f"broker did not come up on {BASE_URL} — is port {BROKER_PORT} free?"}
+            return onboarding.host_setup(task_id, list(roles), BASE_URL, title=title or None)
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    def open_dashboard(self, url: str) -> dict:
+        """Open the live read-only dashboard in its own native window (a separate
+        top-level window, so the broker's frame-ancestors CSP doesn't block it)."""
+        try:
+            webview.create_window("sys-buddy · dashboard", url=url, width=1200, height=860)
+            return {"ok": True}
         except Exception as exc:
             return {"error": str(exc)}
 

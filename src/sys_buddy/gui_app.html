@@ -28,6 +28,7 @@ html,body{margin:0;padding:0}
   --accent-2:#F0845C;
   --role-backend:#5468C9;
   --role-frontend:#C0568C;
+  --role-mobile:#3F9DA8;
   --ok:#33A852;
   --err:#DE5B4A;
   --amber:#E0A83F;
@@ -286,6 +287,70 @@ textarea.prompt:focus{outline:none;border-color:var(--accent)}
 textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .copy-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 
+/* ---------- host: roles ---------- */
+.label-txt{font-size:.82rem;font-weight:600;color:var(--text-2);letter-spacing:.01em}
+.roles{display:flex;flex-wrap:wrap;gap:10px}
+.role-chk{display:inline-flex;align-items:center;cursor:pointer}
+.role-chk input{position:absolute;opacity:0;width:1px;height:1px}
+.role-chk input:disabled ~ .role-tag{cursor:not-allowed}
+.role-tag{
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:.9rem;font-weight:500;color:var(--text-2);
+  background:var(--surface);
+  border:1px solid var(--border-strong);
+  border-radius:10px;
+  padding:9px 14px;
+  transition:border-color .16s ease,background .16s ease,color .16s ease;
+}
+.role-chk .role-pip{
+  width:10px;height:10px;border-radius:50%;flex:none;
+  background:var(--rc);
+  opacity:.28;
+  transition:opacity .16s ease,box-shadow .16s ease;
+}
+.role-chk input:checked ~ .role-tag{
+  color:var(--text);
+  border-color:var(--rc);
+  background:var(--surface-2);
+}
+.role-chk input:checked ~ .role-tag .role-pip{opacity:1;box-shadow:0 0 0 3px color-mix(in srgb,var(--rc) 22%,transparent)}
+.role-chk input:focus-visible ~ .role-tag{outline:2px solid var(--accent);outline-offset:2px}
+.role-chk input:disabled:checked ~ .role-tag{opacity:.85}
+
+/* ---------- host: invites ---------- */
+.invites{display:flex;flex-direction:column;gap:10px}
+.invite-row{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:11px;
+  padding:10px 12px;
+}
+.invite-role{
+  display:inline-flex;align-items:center;gap:7px;flex:none;
+  font-size:.85rem;font-weight:600;
+  min-width:88px;
+}
+.invite-role .role-pip{width:9px;height:9px;border-radius:50%;flex:none}
+.invite-link{
+  flex:1 1 240px;min-width:0;
+  font-family:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.82rem;
+  color:var(--text);
+  background:var(--bg);
+  border:1px solid var(--border-strong);
+  border-radius:9px;
+  padding:9px 11px;
+  text-overflow:ellipsis;
+}
+.invite-link:focus{outline:none;border-color:var(--accent)}
+.invite-link:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.result .base-url{
+  font-family:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.82rem;color:var(--text-3);font-weight:400;
+  display:block;margin-top:6px;
+}
+
 /* ---------- done view ---------- */
 .done-hero{margin-top:clamp(48px,12vh,120px);display:flex;flex-direction:column;gap:18px;align-items:flex-start}
 .done-hero h1{margin:0;font-size:clamp(1.8rem,5vw,2.7rem);font-weight:600;letter-spacing:-.02em}
@@ -368,12 +433,72 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     </div>
   </section>
 
-  <!-- ============ HOST (M3 stub) ============ -->
+  <!-- ============ HOST (M3) ============ -->
   <section class="view" id="view-host" aria-label="Host setup">
     <button type="button" class="back" data-nav="home">← Back</button>
     <div class="flow-head">
-      <h1>Host setup (coming next)</h1>
-      <p>The host flow — create a task, define roles, and generate an invite link — lands in the next milestone.</p>
+      <h1>Start a task</h1>
+      <p>Name the task, pick the roles, and share an invite link with each buddy.</p>
+    </div>
+
+    <div class="form" id="host-form">
+      <div class="field">
+        <label for="in-task-id">Task id</label>
+        <input class="input" type="text" id="in-task-id" autocomplete="off" spellcheck="false"
+               placeholder="signin">
+      </div>
+      <div class="field">
+        <label for="in-title">Title</label>
+        <input class="input" type="text" id="in-title" autocomplete="off" spellcheck="false"
+               placeholder="Optional — a human-friendly name">
+      </div>
+
+      <div class="field">
+        <span class="label-txt" id="roles-label">Roles</span>
+        <div class="roles" role="group" aria-labelledby="roles-label">
+          <label class="role-chk">
+            <input type="checkbox" id="role-backend" value="backend" checked disabled>
+            <span class="role-tag" style="--rc:var(--role-backend)"><span class="role-pip"></span>backend</span>
+          </label>
+          <label class="role-chk">
+            <input type="checkbox" id="role-frontend" value="frontend" checked>
+            <span class="role-tag" style="--rc:var(--role-frontend)"><span class="role-pip"></span>frontend</span>
+          </label>
+          <label class="role-chk">
+            <input type="checkbox" id="role-mobile" value="mobile">
+            <span class="role-tag" style="--rc:var(--role-mobile)"><span class="role-pip"></span>mobile</span>
+          </label>
+        </div>
+        <p class="hint">backend is always required</p>
+      </div>
+
+      <button type="button" class="btn primary" id="btn-host">Create &amp; start broker</button>
+      <p class="hint" id="host-note" hidden></p>
+
+      <div class="pairing" id="host-starting" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>Starting…</span>
+      </div>
+
+      <div class="alert err" id="host-error" role="alert" aria-live="assertive"></div>
+    </div>
+
+    <!-- result -->
+    <div class="result" id="host-result" aria-live="polite">
+      <p class="paired" id="host-running-line"></p>
+
+      <div class="blk">
+        <span class="lbl">Send each buddy their link:</span>
+        <div class="invites" id="host-invites"></div>
+      </div>
+
+      <div class="blk">
+        <div class="copy-row">
+          <button type="button" class="btn primary" id="btn-open-dash" style="align-self:flex-start">Open dashboard</button>
+        </div>
+        <div class="alert amber" id="host-dash-fallback" role="status"></div>
+        <p class="hint">Keep this window open — it's running the broker.</p>
+      </div>
     </div>
   </section>
 
@@ -528,7 +653,11 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var briefed   = document.getElementById('btn-briefed');
   var dashLink  = document.getElementById('dash-link');
 
-  var ROLE_COLORS = { backend: 'var(--role-backend)', frontend: 'var(--role-frontend)' };
+  var ROLE_COLORS = {
+    backend:  'var(--role-backend)',
+    frontend: 'var(--role-frontend)',
+    mobile:   'var(--role-mobile)'
+  };
 
   function roleColor(role){
     return ROLE_COLORS[(role || '').toLowerCase()] || 'var(--accent)';
@@ -635,6 +764,132 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     }
     showView('done');
   });
+
+  // ---- host start flow -------------------------------------------------
+  var taskIdEl   = document.getElementById('in-task-id');
+  var titleEl    = document.getElementById('in-title');
+  var roleFe     = document.getElementById('role-frontend');
+  var roleMo     = document.getElementById('role-mobile');
+  var hostBtn    = document.getElementById('btn-host');
+  var hostNote   = document.getElementById('host-note');
+  var hostStart  = document.getElementById('host-starting');
+  var hostErr    = document.getElementById('host-error');
+  var hostResult = document.getElementById('host-result');
+  var hostRunLn  = document.getElementById('host-running-line');
+  var hostInv    = document.getElementById('host-invites');
+  var openDash   = document.getElementById('btn-open-dash');
+  var dashFall   = document.getElementById('host-dash-fallback');
+
+  hostBtn.addEventListener('click', function(){
+    // reset transient UI
+    hostErr.classList.remove('show'); hostErr.textContent = '';
+    hostNote.hidden = true;
+
+    var api = window.pywebview && window.pywebview.api;
+    if (!api || typeof api.start_host !== 'function') {
+      hostNote.hidden = false;
+      hostNote.textContent = 'Bridge unavailable — run inside the app to start a broker.';
+      return;
+    }
+
+    var taskId = (taskIdEl.value || '').trim();
+    var title  = (titleEl.value || '').trim();
+    if (!taskId) {
+      hostErr.textContent = 'Give the task an id first.';
+      hostErr.classList.add('show');
+      taskIdEl.focus();
+      return;
+    }
+
+    // roles — backend is always required
+    var roles = ['backend'];
+    if (roleFe.checked) roles.push('frontend');
+    if (roleMo.checked) roles.push('mobile');
+
+    // starting state
+    hostBtn.disabled = true;
+    hostStart.classList.add('show');
+
+    Promise.resolve(api.start_host(taskId, roles, title)).then(function(res){
+      hostStart.classList.remove('show');
+      hostBtn.disabled = false;
+      handleHostResult(res || {});
+    }).catch(function(err){
+      hostStart.classList.remove('show');
+      hostBtn.disabled = false;
+      hostErr.textContent = 'Couldn’t start the broker: ' + (err && err.message ? err.message : String(err));
+      hostErr.classList.add('show');
+    });
+  });
+
+  function handleHostResult(res){
+    if (res.error || !res.ok) {
+      hostErr.textContent = res.error || 'Couldn’t start the broker. Try a different task id.';
+      hostErr.classList.add('show');
+      return;
+    }
+
+    // running line + base url
+    hostRunLn.innerHTML =
+      '✓ Broker running · task “<span class="tid">' + esc(res.task_id) + '</span>”' +
+      (res.base_url ? '<span class="base-url">' + esc(res.base_url) + '</span>' : '');
+
+    // invites — one row per role, link readonly + copy
+    hostInv.innerHTML = '';
+    var invites = res.invites || [];
+    invites.forEach(function(inv){
+      var col  = roleColor(inv.role);
+      var link = inv.link || '';
+      var row = document.createElement('div');
+      row.className = 'invite-row';
+      row.innerHTML =
+        '<span class="invite-role" style="color:' + col + '">' +
+          '<span class="role-pip" style="background:' + col + '"></span>' + esc(inv.role) +
+        '</span>' +
+        '<input class="input invite-link" type="text" readonly spellcheck="false" ' +
+          'aria-label="Invite link for ' + esc(inv.role) + '" value="' + esc(link) + '">' +
+        '<button type="button" class="btn copy">Copy link</button>';
+      var copyBtn = row.querySelector('.btn.copy');
+      copyBtn.addEventListener('click', function(){ copyText(link, copyBtn); });
+      var linkInput = row.querySelector('.invite-link');
+      linkInput.addEventListener('focus', function(){ linkInput.select(); });
+      hostInv.appendChild(row);
+    });
+
+    // open-dashboard button (bridge method may not exist — guard + fall back)
+    dashFall.classList.remove('show'); dashFall.textContent = '';
+    var dashUrl = res.dashboard_url || null;
+    openDash.onclick = function(){
+      var api = window.pywebview && window.pywebview.api;
+      if (api && typeof api.open_dashboard === 'function') {
+        Promise.resolve(api.open_dashboard(dashUrl)).catch(function(){
+          showDashFallback(dashUrl);
+        });
+      } else {
+        showDashFallback(dashUrl);
+      }
+    };
+
+    hostResult.classList.add('show');
+    hostErr.classList.remove('show');
+  }
+
+  function showDashFallback(url){
+    if (!url) {
+      dashFall.textContent = 'No dashboard URL available.';
+      dashFall.classList.add('show');
+      return;
+    }
+    dashFall.innerHTML =
+      '<strong>Open the dashboard in your browser:</strong>' +
+      '<div class="copy-row" style="margin-top:10px">' +
+        '<pre class="code" style="flex:1 1 240px;min-width:0">' + esc(url) + '</pre>' +
+        '<button type="button" class="btn copy" id="dash-copy">Copy link</button>' +
+      '</div>';
+    dashFall.classList.add('show');
+    var b = dashFall.querySelector('#dash-copy');
+    b.addEventListener('click', function(){ copyText(url, b); });
+  }
 
   // ---- footer bridge probe (guarded for plain-browser use) -------------
   var statusEl = document.getElementById('check-status');
