@@ -31,6 +31,10 @@ class Config:
     # Public base URL (e.g. the ngrok origin) used to build pairing links.
     # Falls back to http://host:port when unset.
     public_url: str | None = None
+    # Optional agent-token lifetime in seconds. None = tokens never expire (default,
+    # so a long-running Claude Code session isn't cut off). When set, a paired token
+    # expires after this long; the agent can refresh it with the rotate_token tool.
+    agent_token_ttl: float | None = None
 
     @property
     def is_remote(self) -> bool:

@@ -32,7 +32,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from . import audit
-from .config import Config
+from .config import Config, get_config
 from .db import connect
 from .identity import new_agent_token, new_viewer_token, sha256_hex
 from .rules import RULES_OF_ENGAGEMENT
@@ -86,6 +86,8 @@ def redeem_invite(
 
     agent_token = new_agent_token()
     viewer_token = new_viewer_token()
+    ttl = get_config().agent_token_ttl
+    expires_at = (now + ttl) if ttl else None
 
     try:
         # The closed-task check above is a fast-path message, but it is a read that
@@ -95,10 +97,10 @@ def redeem_invite(
         # first (0 rows insert here → we abort) or we commit first (close_task's sweep
         # then revokes this row). No live agent can survive on a closed task.
         cur = conn.execute(
-            "INSERT INTO agents (task_id, name, role, token_hash, pubkey, created_at) "
-            "SELECT ?,?,?,?,?,? WHERE EXISTS "
+            "INSERT INTO agents (task_id, name, role, token_hash, pubkey, created_at, expires_at) "
+            "SELECT ?,?,?,?,?,?,? WHERE EXISTS "
             "(SELECT 1 FROM tasks WHERE id = ? AND closed_at IS NULL)",
-            (task_id, agent_name, role, sha256_hex(agent_token), pubkey, now, task_id),
+            (task_id, agent_name, role, sha256_hex(agent_token), pubkey, now, expires_at, task_id),
         )
     except sqlite3.IntegrityError as e:
         # The partial unique index (one LIVE agent per role) — safety net against a
@@ -127,6 +129,7 @@ def redeem_invite(
         "viewer_token": viewer_token,
         "task_id": task_id,
         "role": role,
+        "expires_at": expires_at,
     }
 
 
@@ -207,6 +210,7 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
                 "role": result["role"],
                 "mcp_url": f"{cfg.base_url}/mcp",
                 "dashboard_url": f"{cfg.base_url}/ui?v={viewer_token}",
+                "expires_at": result["expires_at"],  # None = token never expires
                 # The broker's non-negotiable charter, handed to the agent at setup.
                 "rules": RULES_OF_ENGAGEMENT,
             }

@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS agents (
     token_hash  TEXT,                     -- sha256; NULL for implicit local identities
     pubkey      TEXT,
     created_at  REAL NOT NULL,
-    revoked_at  REAL
+    revoked_at  REAL,
+    expires_at  REAL                      -- optional TTL; NULL = never expires
 );
 
 -- Fixed cast: at most one *live* agent per role. A partial index (not a plain
@@ -145,6 +146,11 @@ def init_db(db_path: Path | str | None = None) -> Path:
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
+        # Migration: add agents.expires_at to a db created before token TTLs existed.
+        # (CREATE TABLE IF NOT EXISTS won't alter an existing table.)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)").fetchall()}
+        if "expires_at" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN expires_at REAL")
         conn.commit()
     finally:
         conn.close()

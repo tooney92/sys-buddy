@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import sqlite3
+import time
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -89,12 +90,14 @@ def resolve_agent_token(conn: sqlite3.Connection, token: str) -> Identity | None
     if not token:
         return None
     row = conn.execute(
-        "SELECT id, task_id, name, role FROM agents "
+        "SELECT id, task_id, name, role, expires_at FROM agents "
         "WHERE token_hash = ? AND revoked_at IS NULL",
         (sha256_hex(token),),
     ).fetchone()
     if row is None:
         return None
+    if row["expires_at"] is not None and row["expires_at"] < time.time():
+        return None  # expired token — treat exactly like a revoked one
     return Identity(agent_id=row["id"], task_id=row["task_id"], name=row["name"], role=row["role"])
 
 

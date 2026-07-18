@@ -167,6 +167,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     cfg.port = args.port
     cfg.public_url = args.public_url or os.environ.get("SYS_BUDDY_PUBLIC_URL")
     cfg.slack_webhook = os.environ.get("SLACK_WEBHOOK_URL") or None
+    _ttl_env = os.environ.get("SYS_BUDDY_TOKEN_TTL")
+    cfg.agent_token_ttl = (
+        args.token_ttl if args.token_ttl is not None
+        else (float(_ttl_env) if _ttl_env else None)
+    )
 
     # Remote mode ships bearer tokens (and the viewer/invite tokens in pairing links)
     # over this origin. Refuse a plaintext public_url; warn loudly if none is set.
@@ -208,6 +213,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--host", default="0.0.0.0")
     sp.add_argument("--port", type=int, default=DEFAULT_PORT)
     sp.add_argument("--public-url", help="Public base URL (e.g. the ngrok origin) for pairing links")
+    sp.add_argument(
+        "--token-ttl", type=float, default=None,
+        help="Agent-token lifetime in seconds (default: no expiry). Agents refresh with rotate_token.",
+    )
     sp.set_defaults(func=cmd_serve)
 
     task = sub.add_parser("task", help="Task management")

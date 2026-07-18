@@ -290,3 +290,73 @@ def test_audit_event_formats_without_secrets():
     line = audit.event("pair_ok", ip="1.2.3.4", task="signin", role="frontend")
     assert line == "pair_ok ip=1.2.3.4 task=signin role=frontend"
     assert "sbk_" not in line and "sbv_" not in line
+
+
+# --- Tier 2: agent-token TTL + rotation -------------------------------------
+def test_expired_agent_token_is_rejected(conn):
+    from sys_buddy.identity import resolve_agent_token, sha256_hex
+
+    seed_task(conn, "t", roles=("backend",))
+    conn.execute(
+        "INSERT INTO agents (task_id,name,role,token_hash,created_at,expires_at) "
+        "VALUES (?,?,?,?,?,?)",
+        ("t", "b", "backend", sha256_hex("sbk_expired"), time.time(), time.time() - 1),
+    )
+    conn.commit()
+    assert resolve_agent_token(conn, "sbk_expired") is None
+
+
+def test_unexpired_agent_token_resolves(conn):
+    from sys_buddy.identity import resolve_agent_token, sha256_hex
+
+    seed_task(conn, "t", roles=("backend",))
+    conn.execute(
+        "INSERT INTO agents (task_id,name,role,token_hash,created_at,expires_at) "
+        "VALUES (?,?,?,?,?,?)",
+        ("t", "b", "backend", sha256_hex("sbk_live"), time.time(), time.time() + 3600),
+    )
+    conn.commit()
+    ident = resolve_agent_token(conn, "sbk_live")
+    assert ident is not None and ident.role == "backend"
+
+
+def test_redeem_sets_expiry_when_ttl_configured(conn):
+    set_config(Config(mode="local", db_path=get_config().db_path, agent_token_ttl=100))
+    seed_task(conn, "signin", roles=("backend", "frontend"))
+    code = admin.mint_invite("signin", "frontend")[0]
+    result = pairing.redeem_invite(conn, code, "dave")
+    assert result["expires_at"] is not None
+    row = conn.execute("SELECT expires_at FROM agents WHERE name='dave'").fetchone()
+    assert row["expires_at"] is not None
+
+
+def test_rotate_token_invalidates_old_and_issues_new(conn):
+    from sys_buddy import tools
+    from sys_buddy.identity import Identity, resolve_agent_token
+
+    seed_task(conn, "t", roles=("backend",))
+    aid = seed_agent(conn, "t", "backend", "b", "sbk_old")
+    ident = Identity(agent_id=aid, task_id="t", name="b", role="backend")
+    new_token = tools._op_rotate(ident)["agent_token"]
+    assert resolve_agent_token(conn, "sbk_old") is None       # old dies immediately
+    assert resolve_agent_token(conn, new_token) is not None    # new works
+
+
+def test_init_db_migrates_pre_ttl_schema(tmp_path):
+    import sqlite3
+
+    from sys_buddy import db
+
+    p = tmp_path / "old.db"
+    c = sqlite3.connect(p)
+    c.execute(
+        "CREATE TABLE agents (id INTEGER PRIMARY KEY, task_id TEXT, name TEXT, role TEXT, "
+        "token_hash TEXT, pubkey TEXT, created_at REAL, revoked_at REAL)"  # no expires_at
+    )
+    c.commit()
+    c.close()
+    db.init_db(p)  # must ALTER agents to add expires_at
+    c = sqlite3.connect(p)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(agents)").fetchall()}
+    c.close()
+    assert "expires_at" in cols
