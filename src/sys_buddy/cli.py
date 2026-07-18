@@ -156,6 +156,13 @@ def cmd_local(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    from .gui import run_gui
+
+    run_gui()
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import os
     import sys
@@ -218,6 +225,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Agent-token lifetime in seconds (default: no expiry). Agents refresh with rotate_token.",
     )
     sp.set_defaults(func=cmd_serve)
+
+    sp = sub.add_parser("gui", help="Launch the desktop app (host + buddy onboarding)")
+    sp.set_defaults(func=cmd_gui)
 
     task = sub.add_parser("task", help="Task management")
     tsub = task.add_subparsers(dest="task_command", required=True)
