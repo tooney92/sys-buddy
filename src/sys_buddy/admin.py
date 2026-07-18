@@ -18,6 +18,7 @@ import json
 import sqlite3
 import time
 
+from . import audit
 from .db import connect
 from .identity import new_invite_code, new_viewer_token, sha256_hex
 
@@ -140,6 +141,7 @@ def revoke_agent(name: str, task: str | None = None) -> int:
                 (now, name, task),
             )
         conn.commit()
+        audit.event("revoke_agent", name=name, task=task or "*", count=cur.rowcount)
         return cur.rowcount
     finally:
         conn.close()
@@ -163,6 +165,7 @@ def revoke_viewer(label: str, task: str | None = None) -> int:
                 (now, label, task),
             )
         conn.commit()
+        audit.event("revoke_viewer", label=label, task=task or "*", count=cur.rowcount)
         return cur.rowcount
     finally:
         conn.close()
@@ -200,6 +203,7 @@ def close_task(task: str) -> None:
         conn.commit()
     finally:
         conn.close()
+    audit.event("task_closed", task=task)
 
 
 def list_tasks() -> list[dict]:

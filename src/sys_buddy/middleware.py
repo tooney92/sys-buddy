@@ -18,6 +18,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware
 
+from . import audit
 from .config import get_config
 from .db import connect
 from .identity import resolve_agent_token, set_current
@@ -70,7 +71,9 @@ class AuthMiddleware(Middleware):
         if identity is None:
             ip = request.client.host if request.client else "?"
             if _auth_failure_limited(ip, time.time()):
+                audit.event("auth_ratelimit", ip=ip)
                 raise ToolError("too many failed auth attempts; slow down and retry shortly")
+            audit.event("auth_fail", ip=ip)
             raise ToolError("unauthorized: invalid or revoked agent token")
 
         set_current(identity)

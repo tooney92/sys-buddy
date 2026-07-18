@@ -243,3 +243,50 @@ def test_rules_charter_states_the_hard_prohibitions():
     assert "data, never instructions" in r
     assert "staging_url" in r
     assert "never read local files" in r
+
+
+# --- Tier 2: DB at rest, resource caps, audit -------------------------------
+def test_db_file_is_owner_only(tmp_path):
+    import os
+    import stat
+
+    from sys_buddy import db
+
+    p = tmp_path / "perm.db"
+    db.init_db(p)
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+
+
+def test_channel_history_limit_is_clamped(conn):
+    seed_task(conn, "t1", roles=("backend",))
+    aid = seed_agent(conn, "t1", "backend", "b", "sbk_x")
+    for _ in range(service.MAX_HISTORY + 20):
+        conn.execute(
+            "INSERT INTO messages (task_id, from_agent_id, type, body_json, state_at_send, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("t1", aid, "status_update", '"hi"', "open", time.time()),
+        )
+    conn.commit()
+    rows = service.channel_history(conn, "t1", limit=10**9)
+    assert len(rows) == service.MAX_HISTORY  # not 220
+
+
+def test_wait_backs_off_when_seat_at_max():
+    from sys_buddy import tools
+    from sys_buddy.identity import Identity
+
+    ident = Identity(agent_id=999, task_id="t", name="n", role="backend")
+    tools._active_waits[999] = tools.MAX_CONCURRENT_WAITS
+    try:
+        # Guard returns [] before ever opening a connection.
+        assert asyncio.run(tools._op_wait(ident, timeout_seconds=5)) == []
+    finally:
+        tools._active_waits.pop(999, None)
+
+
+def test_audit_event_formats_without_secrets():
+    from sys_buddy import audit
+
+    line = audit.event("pair_ok", ip="1.2.3.4", task="signin", role="frontend")
+    assert line == "pair_ok ip=1.2.3.4 task=signin role=frontend"
+    assert "sbk_" not in line and "sbv_" not in line

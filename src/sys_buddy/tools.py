@@ -32,6 +32,12 @@ from .rules import RULES_OF_ENGAGEMENT
 WAIT_CAP = 540  # under Claude Code's ~9min MCP tool timeout
 POLL_INTERVAL = 2.0
 
+# Each parked wait_for_message holds a connection for up to WAIT_CAP seconds. Cap the
+# number a single seat can hold open so a client can't exhaust the connection pool
+# with many simultaneous long polls (OWASP API4: unrestricted resource consumption).
+MAX_CONCURRENT_WAITS = 4
+_active_waits: dict[int, int] = {}
+
 
 # --------------------------------------------------------------------------- #
 # shared operations — logic + connection lifecycle, written once
@@ -63,6 +69,10 @@ def _op_check(ident: Identity) -> list[dict]:
 
 
 async def _op_wait(ident: Identity, timeout_seconds: int) -> list[dict]:
+    # Back off if this seat already has the max long-polls parked (resource cap).
+    if _active_waits.get(ident.agent_id, 0) >= MAX_CONCURRENT_WAITS:
+        return []
+    _active_waits[ident.agent_id] = _active_waits.get(ident.agent_id, 0) + 1
     # One connection reused across the whole poll loop (not one per 2s tick).
     conn = connect()
     try:
@@ -85,6 +95,11 @@ async def _op_wait(ident: Identity, timeout_seconds: int) -> list[dict]:
         return []
     finally:
         conn.close()
+        remaining = _active_waits.get(ident.agent_id, 1) - 1
+        if remaining <= 0:
+            _active_waits.pop(ident.agent_id, None)
+        else:
+            _active_waits[ident.agent_id] = remaining
 
 
 def _op_ack(ident: Identity, ids: list[int]) -> str:

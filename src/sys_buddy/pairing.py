@@ -31,6 +31,7 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from . import audit
 from .config import Config
 from .db import connect
 from .identity import new_agent_token, new_viewer_token, sha256_hex
@@ -165,6 +166,7 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
     async def pair(request: Request) -> Response:
         ip = request.client.host if request.client else "?"
         if _rate_limited(ip, time.time()):
+            audit.event("pair_ratelimit", ip=ip)
             return JSONResponse(
                 {"error": "too many pairing attempts; slow down and retry shortly"},
                 status_code=429,
@@ -190,9 +192,11 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
             result = redeem_invite(conn, code, agent_name, pubkey=pubkey)
         except ValueError as e:
             # Invalid/expired/used invite, or a taken role — a client error, not a 500.
+            audit.event("pair_fail", ip=ip, name=agent_name)
             return JSONResponse({"error": str(e)}, status_code=400)
         finally:
             conn.close()
+        audit.event("pair_ok", ip=ip, task=result["task_id"], role=result["role"], name=agent_name)
 
         viewer_token = result["viewer_token"]
         return JSONResponse(

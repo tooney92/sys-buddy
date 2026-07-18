@@ -259,8 +259,16 @@ def ack(conn, identity: Identity, ids: list[int]) -> int:
     return len(valid)
 
 
+MAX_HISTORY = 200  # cap the agent-supplied `limit` (OWASP API4: records per page)
+
+
 def channel_history(conn, task_id: str, limit: int = 20) -> list[dict]:
     """Recent traffic on a task (read or unread), oldest-first, for context."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, MAX_HISTORY))
     rows = conn.execute(
         """
         SELECT m.id, m.type, m.body_json, m.created_at, a.name AS from_name, a.role AS from_role

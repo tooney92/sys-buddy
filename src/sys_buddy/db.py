@@ -16,6 +16,7 @@ per-recipient table preserves the crash-safety intent — split delivered/acked,
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -147,4 +148,12 @@ def init_db(db_path: Path | str | None = None) -> Path:
         conn.commit()
     finally:
         conn.close()
+    # The db holds token hashes, messages, and contracts — restrict it (and its WAL/
+    # SHM sidecars) to owner-only. Best-effort: a no-op where chmod isn't supported.
+    for p in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+        try:
+            if p.exists():
+                os.chmod(p, 0o600)
+        except OSError:
+            pass
     return path
