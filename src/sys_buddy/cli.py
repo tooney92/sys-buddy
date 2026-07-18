@@ -106,7 +106,7 @@ def cmd_revoke_agent(args: argparse.Namespace) -> int:
     from . import admin
 
     _cfg_from_args(args)
-    n = admin.revoke_agent(args.name)
+    n = admin.revoke_agent(args.name, task=getattr(args, "task", None))
     print(f"Revoked agent '{args.name}'." if n else f"No active agent named '{args.name}'.")
     return 0 if n else 1
 
@@ -115,7 +115,7 @@ def cmd_revoke_viewer(args: argparse.Namespace) -> int:
     from . import admin
 
     _cfg_from_args(args)
-    n = admin.revoke_viewer(args.label)
+    n = admin.revoke_viewer(args.label, task=getattr(args, "task", None))
     print(f"Revoked viewer '{args.label}'." if n else f"No active viewer '{args.label}'.")
     return 0 if n else 1
 
@@ -154,6 +154,7 @@ def cmd_local(args: argparse.Namespace) -> int:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     import os
+    import sys
 
     from .server import run_server
 
@@ -162,6 +163,23 @@ def cmd_serve(args: argparse.Namespace) -> int:
     cfg.port = args.port
     cfg.public_url = args.public_url or os.environ.get("SYS_BUDDY_PUBLIC_URL")
     cfg.slack_webhook = os.environ.get("SLACK_WEBHOOK_URL") or None
+
+    # Remote mode ships bearer tokens (and the viewer/invite tokens in pairing links)
+    # over this origin. Refuse a plaintext public_url; warn loudly if none is set.
+    if cfg.public_url and not cfg.public_url.lower().startswith("https://"):
+        print(
+            "error: --public-url must be an https:// origin — otherwise agent tokens "
+            "and pairing links transit in cleartext. Point it at your TLS tunnel.",
+            file=sys.stderr,
+        )
+        return 2
+    if not cfg.public_url:
+        print(
+            "warning: no --public-url set — pairing links fall back to "
+            f"http://{cfg.host}:{cfg.port} and tokens will transit in cleartext. "
+            "Set --public-url (or $SYS_BUDDY_PUBLIC_URL) to your https tunnel origin.",
+            file=sys.stderr,
+        )
     run_server(cfg)
     return 0
 
@@ -217,10 +235,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("revoke-agent", help="Revoke an agent's MCP access")
     sp.add_argument("name")
+    sp.add_argument("--task", help="Scope revocation to this task (avoids hitting same-named agents on other tasks)")
     sp.set_defaults(func=cmd_revoke_agent)
 
     sp = sub.add_parser("revoke-viewer", help="Revoke a viewer's dashboard access")
     sp.add_argument("label")
+    sp.add_argument("--task", help="Scope revocation to this task")
     sp.set_defaults(func=cmd_revoke_viewer)
 
     sp = sub.add_parser("close", help="Close a task and revoke all its access")

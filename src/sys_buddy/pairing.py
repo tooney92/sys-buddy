@@ -20,6 +20,7 @@ messages or reach other tasks.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -127,6 +128,31 @@ def redeem_invite(
     }
 
 
+# --- /pair abuse controls ---------------------------------------------------
+# The endpoint is unauthenticated (it hands out the first token), so it gets a
+# lightweight fixed-window per-IP cap: a backstop against invite-guessing / a free
+# DB-write DoS, and a signal when someone is hammering it. Invite entropy already
+# makes brute force impractical; this bounds attempts and abuse.
+PAIR_RATE_MAX = 20
+PAIR_RATE_WINDOW = 60.0
+_PAIR_HITS: dict[str, list[float]] = {}
+
+# agent_name is buddy-controlled and surfaces in the message envelope and Slack;
+# constrain charset/length (defense-in-depth on top of the escaping in _wrap/notify).
+_NAME_RE = re.compile(r"^[A-Za-z0-9 ._-]{1,64}$")
+
+
+def _rate_limited(ip: str, now: float) -> bool:
+    hits = [t for t in _PAIR_HITS.get(ip, ()) if now - t < PAIR_RATE_WINDOW]
+    hits.append(now)
+    _PAIR_HITS[ip] = hits
+    return len(hits) > PAIR_RATE_MAX
+
+
+def _valid_agent_name(name) -> bool:
+    return isinstance(name, str) and bool(_NAME_RE.match(name))
+
+
 def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
     """Mount ``POST /pair`` on the FastMCP app (SPEC §2).
 
@@ -136,6 +162,12 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
 
     @mcp.custom_route("/pair", methods=["POST"])
     async def pair(request: Request) -> Response:
+        ip = request.client.host if request.client else "?"
+        if _rate_limited(ip, time.time()):
+            return JSONResponse(
+                {"error": "too many pairing attempts; slow down and retry shortly"},
+                status_code=429,
+            )
         try:
             payload = await request.json()
         except Exception:
@@ -146,6 +178,11 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
         pubkey = payload.get("pubkey")
         if not code or not agent_name:
             return JSONResponse({"error": "code and agent_name are required"}, status_code=400)
+        if not _valid_agent_name(agent_name):
+            return JSONResponse(
+                {"error": "agent_name must be 1-64 chars: letters, digits, space, . _ -"},
+                status_code=400,
+            )
 
         conn = connect()
         try:

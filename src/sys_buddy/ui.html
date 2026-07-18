@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sys-buddy</title>
 <!-- sys-buddy dashboard — single-file vanilla rebuild of the design prototype (SPEC §12).
-     Served at /ui. Reads the viewer token from ?v=, fetches the real read-only /api/*,
-     polls every ~3s. No framework, no build step. -->
+     Served at /ui. Auth rides an HttpOnly sb_view cookie (set by /ui from the ?v=
+     bootstrap link); fetches the read-only /api/* and polls every ~3s. No framework,
+     no build step. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -110,7 +111,9 @@ function dividerIcon(kind){
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];}); }
 
 /* ---------- state ---------- */
-var token = new URLSearchParams(location.search).get('v') || '';
+/* The viewer token lives in an HttpOnly cookie (set by /ui on first load) and is
+   sent automatically with same-origin /api fetches — JS neither reads nor forwards
+   it. A missing/invalid token surfaces as a 401 from /api/tasks below. */
 var state = {
   view:'list', taskId:null,
   theme: localStorage.getItem('sb-theme') || 'light',
@@ -121,18 +124,15 @@ var state = {
   mobileTab:'thread', switcherOpen:false, isMobile: window.innerWidth<900,
   lastRefresh:0, refreshing:false
 };
-if(!token) state.error='no-token';
-
 var lastSig=null;
 var app=document.getElementById('app');
 
 /* ---------- fetching ---------- */
 function api(path){
-  var sep = path.indexOf('?')>=0 ? '&':'?';
-  return fetch(path+sep+'v='+encodeURIComponent(token),{headers:{'Accept':'application/json'}});
+  /* auth rides the HttpOnly sb_view cookie — same-origin, sent automatically */
+  return fetch(path,{headers:{'Accept':'application/json'},credentials:'same-origin'});
 }
 function fetchTasks(){
-  if(!token) return Promise.resolve();
   state.refreshing=true; patchVolatile();
   return api('/api/tasks').then(function(r){
     if(r.status===401){ state.error='unauthorized'; throw 0; }
@@ -147,7 +147,7 @@ function fetchTasks(){
   }).then(function(){ state.refreshing=false; render(); });
 }
 function fetchDetail(id){
-  if(!token||!id) return Promise.resolve();
+  if(!id) return Promise.resolve();
   return api('/api/task/'+encodeURIComponent(id)).then(function(r){
     if(r.status===401){ state.error='unauthorized'; throw 0; }
     if(r.status===403){ state.error='forbidden'; throw 0; }
@@ -635,16 +635,13 @@ window.addEventListener('resize', function(){
 
 /* ---------- boot + poll ---------- */
 function poll(){
-  if(!token) return;
   fetchTasks();
   if(state.view==='task' && state.taskId) fetchDetail(state.taskId);
 }
 render();
-if(token){
-  poll();
-  setInterval(poll, 3000);
-  setInterval(patchVolatile, 1000); // keep "refreshed Ns ago" ticking
-}
+poll();  // the cookie carries auth; a missing/invalid token surfaces as a 401
+setInterval(poll, 3000);
+setInterval(patchVolatile, 1000); // keep "refreshed Ns ago" ticking
 })();
 </script>
 </body>

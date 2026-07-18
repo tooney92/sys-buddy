@@ -67,6 +67,16 @@ async def _op_wait(ident: Identity, timeout_seconds: int) -> list[dict]:
     try:
         deadline = asyncio.get_event_loop().time() + min(timeout_seconds, WAIT_CAP)
         while asyncio.get_event_loop().time() < deadline:
+            # Revocation must be effectively instant, even for an agent parked in a
+            # long poll: stop delivering the moment its seat is revoked or the task is
+            # closed, rather than only re-checking on the next tool call.
+            live = conn.execute(
+                "SELECT 1 FROM agents a JOIN tasks t ON t.id = a.task_id "
+                "WHERE a.id = ? AND a.revoked_at IS NULL AND t.closed_at IS NULL",
+                (ident.agent_id,),
+            ).fetchone()
+            if live is None:
+                return []
             msgs = service.fetch_new(conn, ident)  # only NEW mail wakes a parked agent
             if msgs:
                 return msgs

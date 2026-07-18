@@ -18,7 +18,7 @@ import json
 import time
 from pathlib import Path
 
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from . import identity
 from .config import Config
@@ -339,18 +339,20 @@ def _task_detail(conn, task_id: str) -> dict | None:
 # HTTP plumbing
 # --------------------------------------------------------------------------- #
 def _request_token(request) -> str:
-    """Read the viewer token from ``?v=`` or an ``Authorization: Bearer`` header.
+    """Resolve the viewer token, most-secure source first:
 
-    Query param first: dashboard links are shaped ``/ui?v=sbv_...`` (SPEC §9), so
-    the browser carries the token in the URL; the header is the API-client path.
+    1. the ``sb_view`` HttpOnly cookie (set on the first ``/ui`` load — JS can't read
+       it and it never rides in a URL, so it can't leak via history/Referer/logs),
+    2. an ``Authorization: Bearer`` header (API clients),
+    3. the ``?v=`` query param (the bootstrap link, before the cookie is set).
     """
-    tok = request.query_params.get("v")
-    if tok:
-        return tok
+    cookie = request.cookies.get("sb_view")
+    if cookie:
+        return cookie
     auth = request.headers.get("authorization", "")
     if auth[:7].lower() == "bearer ":
         return auth[7:].strip()
-    return ""
+    return request.query_params.get("v", "") or ""
 
 
 def _resolve(request, conn) -> ViewerIdentity | None:
@@ -418,11 +420,25 @@ def register_api_routes(mcp, cfg: Config) -> None:
 
     @mcp.custom_route("/ui", methods=["GET"])
     async def ui(request):
-        """Serve the packaged single-file dashboard (a placeholder until step 7).
+        """Serve the packaged single-file dashboard.
 
-        Served as a static file with no token gate: the page itself is inert and
-        reads data only from ``/api/*``, which *is* token-scoped. The token rides
-        in ``?v=`` for the page's own fetches.
+        The page is inert and reads data only from ``/api/*`` (token-scoped). A
+        dashboard link arrives as ``/ui?v=<token>``; we move that token into an
+        HttpOnly cookie and redirect to a clean ``/ui`` so the secret leaves the URL
+        after the first hop (out of browser history, Referer, and proxy logs). The
+        page's own ``/api/*`` fetches then authenticate via the cookie automatically.
         """
+        secure = (cfg.public_url or "").lower().startswith("https://")
+        v = request.query_params.get("v")
+        if v:
+            resp = RedirectResponse(url="/ui", status_code=302)
+            resp.set_cookie(
+                "sb_view", v, max_age=7 * 24 * 3600, path="/",
+                httponly=True, samesite="strict", secure=secure,
+            )
+            resp.headers["Referrer-Policy"] = "no-referrer"
+            return resp
         html = (Path(__file__).parent / "ui.html").read_text(encoding="utf-8")
-        return HTMLResponse(html)
+        resp = HTMLResponse(html)
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        return resp

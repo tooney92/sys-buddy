@@ -117,34 +117,51 @@ def issue_host_viewer(label: str) -> str:
         conn.close()
 
 
-def revoke_agent(name: str) -> int:
-    """Revoke every live agent with ``name``. Returns how many were revoked.
+def revoke_agent(name: str, task: str | None = None) -> int:
+    """Revoke live agents named ``name``. Returns how many were revoked.
 
-    Only live agents (``revoked_at IS NULL``) are touched, so re-running is a no-op
-    and the returned count reflects agents actually killed by this call.
+    Because ``name`` is buddy-chosen at pairing, the same name can exist on more than
+    one task; pass ``task`` to scope the revocation so a host doesn't collaterally
+    kill a same-named agent on an unrelated task. Only live agents
+    (``revoked_at IS NULL``) are touched, so re-running is a no-op.
     """
     conn = connect()
     try:
         now = time.time()
-        cur = conn.execute(
-            "UPDATE agents SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL",
-            (now, name),
-        )
+        if task is None:
+            cur = conn.execute(
+                "UPDATE agents SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL",
+                (now, name),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE agents SET revoked_at = ? WHERE name = ? AND task_id = ? "
+                "AND revoked_at IS NULL",
+                (now, name, task),
+            )
         conn.commit()
         return cur.rowcount
     finally:
         conn.close()
 
 
-def revoke_viewer(label: str) -> int:
-    """Revoke every live viewer with ``label``. Returns how many were revoked."""
+def revoke_viewer(label: str, task: str | None = None) -> int:
+    """Revoke live viewers with ``label`` (optionally scoped to ``task``). Returns
+    how many were revoked."""
     conn = connect()
     try:
         now = time.time()
-        cur = conn.execute(
-            "UPDATE viewers SET revoked_at = ? WHERE label = ? AND revoked_at IS NULL",
-            (now, label),
-        )
+        if task is None:
+            cur = conn.execute(
+                "UPDATE viewers SET revoked_at = ? WHERE label = ? AND revoked_at IS NULL",
+                (now, label),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE viewers SET revoked_at = ? WHERE label = ? AND task_id = ? "
+                "AND revoked_at IS NULL",
+                (now, label, task),
+            )
         conn.commit()
         return cur.rowcount
     finally:

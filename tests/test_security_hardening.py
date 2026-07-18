@@ -13,8 +13,10 @@ import time
 
 import pytest
 
-from sys_buddy import admin, pairing, service, state
-from tests.conftest import seed_task
+from sys_buddy import admin, pairing, service, slack, state
+from sys_buddy.config import Config, get_config, set_config
+from sys_buddy.pairing import PAIR_RATE_MAX, _rate_limited, _valid_agent_name
+from tests.conftest import seed_agent, seed_task
 from tests.test_state import _agents, _to_backend_live, _task_state, _valid_spec
 
 
@@ -91,3 +93,46 @@ def test_redeem_on_closed_task_is_rejected(conn):
     with pytest.raises(ValueError, match="closed"):
         pairing.redeem_invite(conn, code, "late-frontend")
     assert conn.execute("SELECT COUNT(*) AS n FROM agents").fetchone()["n"] == 0
+
+
+# --- M1: Slack mrkdwn sanitize + https-only ---------------------------------
+def test_slack_escapes_mrkdwn_link_injection():
+    out = slack._mrkdwn_safe("<https://evil.com|Security Alert>")
+    assert "<https://evil.com" not in out
+    assert out == "&lt;https://evil.com|Security Alert&gt;"
+
+
+def test_slack_rejects_non_https_webhook(conn):
+    set_config(Config(mode="local", db_path=get_config().db_path, slack_webhook="http://insecure/x"))
+    msg = slack.notify("terminal event")
+    assert "https" in msg.lower() and "not sending" in msg.lower()  # never attempted
+
+
+# --- /pair abuse controls ---------------------------------------------------
+def test_pair_rate_limiter_trips_after_cap():
+    ip, now = "203.0.113.7", 1000.0
+    for _ in range(PAIR_RATE_MAX):
+        assert _rate_limited(ip, now) is False
+    assert _rate_limited(ip, now) is True  # one past the cap
+
+
+@pytest.mark.parametrize(
+    "name,ok",
+    [("dave-frontend", True), ("a", True), ("x" * 64, True),
+     ("x" * 65, False), ("", False), ("bad<name>", False), ("drop;drop", False)],
+)
+def test_valid_agent_name(name, ok):
+    assert _valid_agent_name(name) is ok
+
+
+# --- task-scoped revocation -------------------------------------------------
+def test_revoke_agent_scoped_to_one_task(conn):
+    seed_task(conn, "t1", roles=("backend",))
+    seed_task(conn, "t2", roles=("backend",))
+    seed_agent(conn, "t1", "backend", "dup", "sbk_a")
+    seed_agent(conn, "t2", "backend", "dup", "sbk_b")
+    assert admin.revoke_agent("dup", task="t1") == 1
+    live = conn.execute(
+        "SELECT task_id FROM agents WHERE name='dup' AND revoked_at IS NULL"
+    ).fetchall()
+    assert [r["task_id"] for r in live] == ["t2"]  # t2's same-named agent untouched
