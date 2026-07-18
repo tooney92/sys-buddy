@@ -135,18 +135,26 @@ class GuiApi:
         except Exception as exc:
             return {"error": str(exc)}
 
-    def start_host(self, task_id: str, roles: list, title: str = "", public_url: str = "") -> dict:
+    def start_host(self, task_id: str, roles: list, title: str = "", public_url: str = "",
+                   trusted: bool = False) -> dict:
         """Host flow: start the in-process broker (once), create the task, and mint an
-        invite link per role. ``public_url`` (optional) is the host's https tunnel
-        origin (e.g. ngrok) so a buddy on another machine can reach the broker — the
-        invite links embed it. Blank = same-machine (loopback). Returns the host_setup
-        dict, or an error the UI shows."""
+        invite link per role. ``public_url`` (optional) is the host's tunnel origin
+        (e.g. ngrok) so a buddy on another machine can reach the broker — the invite
+        links embed it. Blank = same-machine (loopback). ``trusted`` marks it a private
+        overlay (Tailscale/WireGuard) so an http origin is allowed (the network already
+        encrypts). Returns the host_setup dict, or an error the UI shows."""
         try:
             base = (public_url or "").strip().rstrip("/")
-            if base and not base.lower().startswith("https://"):
-                return {"ok": False, "error": "Public URL must be an https:// tunnel origin (tokens would transit in cleartext otherwise). Leave it blank for same-machine."}
+            if base and not trusted and not base.lower().startswith("https://"):
+                return {"ok": False, "error": "Public URL must be https:// — or tick 'private network' if it's a Tailscale/WireGuard overlay. Leave blank for same-machine."}
             if not _ensure_broker():
                 return {"ok": False, "error": f"broker did not come up on {BASE_URL} — is port {BROKER_PORT} free?"}
+            if base:
+                # Exposed beyond this machine → default agent tokens to a 24h TTL so a
+                # leaked token self-expires (agents refresh with rotate_token).
+                from .config import get_config
+                if get_config().agent_token_ttl is None:
+                    get_config().agent_token_ttl = 24 * 3600
             return onboarding.host_setup(task_id, list(roles), base or BASE_URL, title=title or None)
         except Exception as exc:
             return {"error": str(exc)}

@@ -59,6 +59,10 @@ uv run sys-buddy join http://127.0.0.1:8787 <CODE> --name alice-backend
 
 ---
 
+## Security modes (going over the internet)
+- **Default — ngrok (buddy installs nothing):** the host exposes the broker via an https tunnel. Protections with **zero buddy install**: every MCP request (even the `initialize` handshake) requires a valid token — nothing, not even the tool list, is reachable unauthenticated; agent tokens **auto-expire in 24h** in tunnel mode (agents refresh via the `rotate_token` tool); `/pair` is rate-limited + invite-gated; auth failures are audit-logged.
+- **Max — Tailscale/WireGuard private overlay:** both sides run Tailscale (free, ~2 min). The broker is reachable **only** to authorized devices, encrypted peer-to-peer, **no public surface**. Tick **"Private network"** in the host screen (or `serve --trusted-network`) — it allows an `http://100.x` / `*.ts.net` origin since the overlay already encrypts. This is the strongest posture.
+
 ## Notes
 - **Windows buddy:** needs only Claude Code + the invite link/token — Python optional (the host can run `join` and send the `claude mcp add` line). The broker also runs on Windows (the `0600` db-permission lockdown is a no-op there).
 - **The broker enforces**, so a misbehaving agent can't skip a step, fake a status, verify without tests, or be talked into fetching a rogue URL (it follows the Rules of Engagement and only fetches the signed `staging_url`).

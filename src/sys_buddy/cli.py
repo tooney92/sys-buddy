@@ -179,10 +179,21 @@ def cmd_serve(args: argparse.Namespace) -> int:
         args.token_ttl if args.token_ttl is not None
         else (float(_ttl_env) if _ttl_env else None)
     )
+    # Tunnel mode (a public_url is set) exposes the broker beyond this machine, so
+    # default agent tokens to a 24h TTL unless the operator chose one — a leaked token
+    # self-expires; agents refresh with rotate_token. Same-machine (no public_url)
+    # keeps no-expiry so a long local session isn't cut off.
+    if cfg.agent_token_ttl is None and cfg.public_url:
+        cfg.agent_token_ttl = 24 * 3600
+
+    # A private overlay (Tailscale/WireGuard) already encrypts the transport, so an
+    # http:// origin over it is fine; --trusted-network says "this public_url rides an
+    # encrypted private network" and lifts the https requirement for that case only.
+    trusted = getattr(args, "trusted_network", False)
 
     # Remote mode ships bearer tokens (and the viewer/invite tokens in pairing links)
     # over this origin. Refuse a plaintext public_url; warn loudly if none is set.
-    if cfg.public_url and not cfg.public_url.lower().startswith("https://"):
+    if cfg.public_url and not trusted and not cfg.public_url.lower().startswith("https://"):
         print(
             "error: --public-url must be an https:// origin — otherwise agent tokens "
             "and pairing links transit in cleartext. Point it at your TLS tunnel.",
@@ -222,7 +233,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--public-url", help="Public base URL (e.g. the ngrok origin) for pairing links")
     sp.add_argument(
         "--token-ttl", type=float, default=None,
-        help="Agent-token lifetime in seconds (default: no expiry). Agents refresh with rotate_token.",
+        help="Agent-token lifetime in seconds (default: no expiry; 24h when --public-url is set).",
+    )
+    sp.add_argument(
+        "--trusted-network", action="store_true",
+        help="The --public-url rides an encrypted private overlay (Tailscale/WireGuard); allow http.",
     )
     sp.set_defaults(func=cmd_serve)
 

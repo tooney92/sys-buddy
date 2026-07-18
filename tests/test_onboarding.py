@@ -257,3 +257,10 @@ def test_host_setup_rejects_duplicate_task(conn):
     r = onboarding.host_setup("dup", ["backend"], "http://h")
     assert r["ok"] is False
     assert "already exists" in r["error"]
+
+
+def test_gui_start_host_rejects_http_public_url_without_trusted():
+    """Host GUI must refuse a cleartext public_url unless it's a trusted overlay."""
+    from sys_buddy import gui
+    r = gui.GuiApi().start_host("t", ["backend"], "", "http://insecure.example", False)
+    assert r.get("ok") is False and "https" in r["error"].lower()

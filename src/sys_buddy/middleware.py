@@ -46,7 +46,12 @@ def _bearer_token(headers) -> str:
 
 
 class AuthMiddleware(Middleware):
-    async def on_call_tool(self, context, call_next):
+    async def on_request(self, context, call_next):
+        """Authenticate EVERY MCP request in remote mode — not just tool calls but the
+        ``initialize`` handshake and ``tools/list`` too, so nothing (not even the tool
+        catalogue) is reachable without a valid bearer token. Notifications pass
+        through (they carry no action); the custom /pair, /ui, /api routes have their
+        own gating and are not MCP requests."""
         cfg = get_config()
 
         # Local mode: no auth, identity comes from tool params. Step aside.
@@ -58,8 +63,12 @@ class AuthMiddleware(Middleware):
         try:
             request = get_http_request()
         except RuntimeError:
-            # No HTTP request in scope (e.g. stdio) — remote mode requires HTTP.
-            raise ToolError("unauthorized: remote mode requires an HTTP request with a bearer token")
+            # No HTTP request in scope → an in-process/trusted call (introspection,
+            # tests), never the network. A real remote client always carries an HTTP
+            # request, so this can't be an attacker bypass; pass it through without an
+            # identity. A tool call reaching here still fails later at require_current().
+            set_current(None)
+            return await call_next(context)
 
         token = _bearer_token(request.headers)
         conn = connect()

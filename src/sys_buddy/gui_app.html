@@ -457,6 +457,10 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
         <input class="input" type="text" id="in-public-url" autocomplete="off" spellcheck="false"
                placeholder="Leave blank for same machine — else your https tunnel, e.g. https://abc.ngrok.app">
         <p class="hint">Run <code>ngrok http 8787</code> and paste the https URL so a remote buddy's invite link reaches you.</p>
+        <label class="role-chk" style="margin-top:8px">
+          <input type="checkbox" id="in-trusted-net">
+          <span class="role-tag" style="--rc:var(--role-mobile)"><span class="role-pip"></span>Private network (Tailscale/WireGuard) — max security, allows http</span>
+        </label>
       </div>
 
       <div class="field">
@@ -814,12 +818,14 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
     var publicUrlEl = document.getElementById('in-public-url');
     var publicUrl = (publicUrlEl && publicUrlEl.value || '').trim();
+    var trustedEl = document.getElementById('in-trusted-net');
+    var trusted = !!(trustedEl && trustedEl.checked);
 
     // starting state
     hostBtn.disabled = true;
     hostStart.classList.add('show');
 
-    Promise.resolve(api.start_host(taskId, roles, title, publicUrl)).then(function(res){
+    Promise.resolve(api.start_host(taskId, roles, title, publicUrl, trusted)).then(function(res){
       hostStart.classList.remove('show');
       hostBtn.disabled = false;
       handleHostResult(res || {});
