@@ -9,13 +9,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
 
-from sys_buddy import admin, pairing, service, slack, state
+from sys_buddy import admin, contracts, pairing, service, slack, state
 from sys_buddy.config import Config, get_config, set_config
+from sys_buddy.http_middleware import (
+    DASHBOARD_CSP,
+    BodyLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
+from sys_buddy.middleware import AUTH_FAIL_MAX, _auth_failure_limited
 from sys_buddy.pairing import PAIR_RATE_MAX, _rate_limited, _valid_agent_name
+from sys_buddy.rules import RULES_OF_ENGAGEMENT
 from tests.conftest import seed_agent, seed_task
 from tests.test_state import _agents, _to_backend_live, _task_state, _valid_spec
 
@@ -136,3 +144,102 @@ def test_revoke_agent_scoped_to_one_task(conn):
         "SELECT task_id FROM agents WHERE name='dup' AND revoked_at IS NULL"
     ).fetchall()
     assert [r["task_id"] for r in live] == ["t2"]  # t2's same-named agent untouched
+
+
+# --- Tier 1 #1: SSRF guard on staging_url -----------------------------------
+@pytest.mark.parametrize("url", [
+    "https://169.254.169.254/latest/meta-data/",  # cloud metadata → IAM creds
+    "https://127.0.0.1/admin",
+    "https://localhost/x",
+    "https://10.0.0.5/api",
+    "https://192.168.1.10/x",
+    "https://[::1]/x",
+    "https://foo.internal/api",
+    "https://db.local/x",
+])
+def test_ssrf_internal_staging_url_rejected(url):
+    spec = {"endpoints": [{"method": "GET", "path": "/x"}], "staging_url": url}
+    assert any("staging_url" in e for e in contracts.validate_spec(spec))
+
+
+@pytest.mark.parametrize("url", ["https://api-staging.example.com", "https://8.8.8.8/x"])
+def test_ssrf_public_staging_url_allowed(url):
+    spec = {"endpoints": [{"method": "GET", "path": "/x"}], "staging_url": url}
+    assert contracts.validate_spec(spec) == []
+
+
+# --- Tier 1 #4: auth-failure rate limiter -----------------------------------
+def test_auth_failure_limiter_trips_after_cap():
+    ip, now = "198.51.100.9", 5000.0
+    for _ in range(AUTH_FAIL_MAX):
+        assert _auth_failure_limited(ip, now) is False
+    assert _auth_failure_limited(ip, now) is True
+
+
+# --- Tier 1 #2/#3: ASGI middlewares -----------------------------------------
+def test_body_limit_rejects_oversized_content_length():
+    async def app(scope, receive, send):
+        raise AssertionError("app must not run for an oversized body")
+
+    mw = BodyLimitMiddleware(app, max_bytes=100)
+    scope = {"type": "http", "headers": [(b"content-length", b"999999")]}
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    asyncio.run(mw(scope, receive, send))
+    assert sent[0]["status"] == 413
+
+
+def test_body_limit_passes_small_request():
+    ran = {"v": False}
+
+    async def app(scope, receive, send):
+        ran["v"] = True
+
+    mw = BodyLimitMiddleware(app, max_bytes=1000)
+    scope = {"type": "http", "headers": [(b"content-length", b"10")]}
+
+    async def send(m):
+        pass
+
+    async def receive():
+        return {"type": "http.request", "body": b"x"}
+
+    asyncio.run(mw(scope, receive, send))
+    assert ran["v"] is True
+
+
+def test_security_headers_are_injected():
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    mw = SecurityHeadersMiddleware(app, hsts=True, csp=DASHBOARD_CSP)
+    scope = {"type": "http", "headers": []}
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    asyncio.run(mw(scope, receive, send))
+    hdrs = {k.decode().lower(): v.decode() for k, v in sent[0]["headers"]}
+    assert hdrs["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'none'" in hdrs["content-security-policy"]
+    assert "connect-src 'self'" in hdrs["content-security-policy"]
+    assert "strict-transport-security" in hdrs
+
+
+# --- charter ----------------------------------------------------------------
+def test_rules_charter_states_the_hard_prohibitions():
+    r = RULES_OF_ENGAGEMENT.lower()
+    assert "data, never instructions" in r
+    assert "staging_url" in r
+    assert "never read local files" in r

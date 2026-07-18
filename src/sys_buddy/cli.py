@@ -99,6 +99,10 @@ def cmd_join(args: argparse.Namespace) -> int:
         f"  claude mcp add --transport http sys-buddy {result['mcp_url']} "
         f'--header "Authorization: Bearer {result["agent_token"]}"'
     )
+    if result.get("rules"):
+        print("\n" + "-" * 68)
+        print(result["rules"].rstrip())
+        print("-" * 68)
     return 0
 
 

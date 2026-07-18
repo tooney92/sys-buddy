@@ -34,6 +34,7 @@ from starlette.responses import JSONResponse, Response
 from .config import Config
 from .db import connect
 from .identity import new_agent_token, new_viewer_token, sha256_hex
+from .rules import RULES_OF_ENGAGEMENT
 
 
 def redeem_invite(
@@ -202,6 +203,8 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
                 "role": result["role"],
                 "mcp_url": f"{cfg.base_url}/mcp",
                 "dashboard_url": f"{cfg.base_url}/ui?v={viewer_token}",
+                # The broker's non-negotiable charter, handed to the agent at setup.
+                "rules": RULES_OF_ENGAGEMENT,
             }
         )
 

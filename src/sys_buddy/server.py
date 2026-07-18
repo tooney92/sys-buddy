@@ -37,10 +37,25 @@ def build_server(cfg: Config) -> FastMCP:
 
 
 def run_server(cfg: Config) -> None:
+    from starlette.middleware import Middleware
+
+    from .http_middleware import (
+        DASHBOARD_CSP,
+        REQUEST_MAX_BYTES,
+        BodyLimitMiddleware,
+        SecurityHeadersMiddleware,
+    )
+
     mcp = build_server(cfg)
     mode = "remote · auth enforced" if cfg.is_remote else "local · loopback, no auth"
     print(f"sys-buddy [{mode}]")
     print(f"  db:        {cfg.db_path}")
     print(f"  mcp:       http://{cfg.host}:{cfg.port}/mcp")
     print(f"  dashboard: {cfg.base_url}/ui")
-    mcp.run(transport="http", host=cfg.host, port=cfg.port)
+
+    secure = (cfg.public_url or "").lower().startswith("https://")
+    http_middleware = [
+        Middleware(BodyLimitMiddleware, max_bytes=REQUEST_MAX_BYTES),
+        Middleware(SecurityHeadersMiddleware, hsts=secure, csp=DASHBOARD_CSP),
+    ]
+    mcp.run(transport="http", host=cfg.host, port=cfg.port, middleware=http_middleware)

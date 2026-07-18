@@ -16,7 +16,13 @@ verb"`` — a validation error the receiving agent can act on without a human.
 
 from __future__ import annotations
 
+import ipaddress
 from urllib.parse import urlparse
+
+# Hostnames that always point somewhere internal — the test-runner must never fetch
+# them, even though they aren't literal IPs. (DNS rebinding — a public name that
+# resolves to a private IP — is a residual the fetch-time layer must also guard.)
+_BLOCKED_HOSTS = {"localhost", "metadata", "metadata.google.internal"}
 
 # The HTTP verbs a contract endpoint may declare (SPEC §6).
 VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
@@ -105,8 +111,12 @@ def _validate_endpoint(index: int, endpoint: object) -> list[str]:
 
 
 def _validate_staging_url(url: object) -> list[str]:
-    """The staging URL is the security-load-bearing field: it must be an absolute
-    https URL with a host, because the test-runner agent will hit it (SPEC §9)."""
+    """The staging URL is the security-load-bearing field: the test-runner agent will
+    hit it (SPEC §9). It must be an absolute https URL, and — crucially — must NOT
+    point at internal infrastructure. A backend that set it to http://169.254.169.254
+    (cloud metadata → IAM creds) or http://127.0.0.1/admin would turn the buddy's
+    test-runner into an SSRF gadget, so private/reserved/loopback/link-local targets
+    and known-internal hostnames are rejected here (OWASP SSRF Prevention)."""
     if not isinstance(url, str) or not url.strip():
         return ["'staging_url' must be a non-empty string"]
     parsed = urlparse(url)
@@ -115,8 +125,18 @@ def _validate_staging_url(url: object) -> list[str]:
             f"'staging_url' must be an absolute https URL (got scheme "
             f"{parsed.scheme or 'none'!r})"
         ]
-    if not parsed.netloc:
+    host = parsed.hostname
+    if not host:
         return ["'staging_url' must include a host, e.g. https://api-staging.example.com"]
+    if host.lower() in _BLOCKED_HOSTS or host.lower().endswith((".local", ".internal")):
+        return [f"'staging_url' host {host!r} is internal and not allowed"]
+    try:
+        # A literal IP must be globally routable — reject private/reserved/loopback/
+        # link-local (incl. 169.254.169.254 metadata) ranges, IPv4 and IPv6.
+        if not ipaddress.ip_address(host).is_global:
+            return [f"'staging_url' host {host!r} is a private/reserved address"]
+    except ValueError:
+        pass  # not a literal IP — a hostname; allowed (subject to fetch-time checks)
     return []
 
 
