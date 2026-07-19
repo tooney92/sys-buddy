@@ -210,9 +210,27 @@ function genSteps(stateName, times){
 }
 
 /* ---------- role avatar helper ---------- */
+/* Find the live agent for a role in the current task detail, or null when the
+   detail (or its agents list) is missing — matched by role, then name. */
+function agentFor(role, name){
+  var ags = state.detail && state.detail.agents;
+  if(!ags || !ags.length) return null;
+  for(var i=0;i<ags.length;i++){ if(ags[i].role===role || (name&&ags[i].name===name)) return ags[i]; }
+  return null;
+}
+/* A small 🔒 badge on an agent that hasn't passed the pre-flight (ready===false);
+   '' when the agent is ready, unknown, or no agents list is present. */
+var LOCK_TIP="Hasn't passed the pre-flight readiness check — can't send messages or change status yet.";
+function lockBadge(role, name){
+  var ag=agentFor(role, name);
+  if(!ag || ag.ready) return '';
+  return '<span title="'+esc(LOCK_TIP)+'" style="position:absolute;bottom:-3px;right:-3px;width:13px;height:13px;border-radius:50%;background:var(--st-stuck-bg);color:var(--st-stuck-fg);border:1.5px solid var(--surface);display:flex;align-items:center;justify-content:center">'+
+    '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg></span>';
+}
 function avatarChip(role, size, fs){
   var a=av(role);
-  return '<span title="'+esc(a.label)+'" style="width:'+size+'px;height:'+size+'px;border-radius:7px;background:'+a.c+';color:#fff;font-size:'+fs+'px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>';
+  var lock=lockBadge(role);
+  return '<span title="'+esc(a.label)+'" style="position:relative;width:'+size+'px;height:'+size+'px;border-radius:7px;background:'+a.c+';color:#fff;font-size:'+fs+'px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+lock+'</span>';
 }
 
 /* ---------- header ---------- */
@@ -540,6 +558,7 @@ function debugTaskHTML(d){
     statusHeader+
     threadHTML(d)+
     eventLogHTML(d)+
+    readinessPreviewHTML(d)+
     tipsHTML()+
   '</div>';
 }
@@ -560,6 +579,22 @@ function tipsHTML(){
       '<div>Messages broadcast to everyone on the task by default.</div>'+
       '<div>A <span style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:999px;padding:1px 7px">→ role</span> chip means a private message directed to that one role.</div>'+
     '</div></details>';
+}
+
+/* ---------- readiness pre-flight (compact, collapsed-by-default) ---------- */
+/* Mirrors the Tips card palette. Lists the generic questions every agent must
+   answer via submit_readiness before its action tools unlock. Omitted entirely
+   when the API hands back no preview. */
+function readinessPreviewHTML(d){
+  var qs=(d&&d.readiness_preview)||[];
+  if(!qs.length) return '';
+  var items=qs.map(function(q){ return '<li style="margin:0 0 4px">'+esc(q)+'</li>'; }).join('');
+  return '<details style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden">'+
+    '<summary style="list-style:none;cursor:pointer;padding:11px 16px;font-size:12.5px;font-weight:600;color:var(--text-2);display:flex;align-items:center;gap:8px;user-select:none">'+
+      '<span style="color:var(--text-3);display:flex">'+dividerIcon('lock')+'</span>Readiness pre-flight</summary>'+
+    '<div style="padding:2px 16px 14px;font-size:12.5px;color:var(--text-2);line-height:1.5">'+
+      '<p style="margin:0 0 8px">Each agent must answer these before it can act.</p>'+
+      '<ol style="margin:0;padding-left:20px">'+items+'</ol></div></details>';
 }
 
 /* ---------- task view ---------- */
@@ -612,6 +647,7 @@ function taskHTML(){
       '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+contractHTML(d)+'</div>'+
     '</div>'+
     '<div style="display:'+logDisp+'">'+eventLogHTML(d)+'</div>'+
+    readinessPreviewHTML(d)+
     tipsHTML()+
   '</div>';
 }

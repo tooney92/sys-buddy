@@ -24,7 +24,7 @@ import time
 
 from fastmcp import FastMCP
 
-from . import audit, service, slack, state
+from . import audit, readiness, service, slack, state
 from .config import Config, get_config
 from .db import connect
 from .identity import Identity, new_agent_token, require_current, sha256_hex
@@ -177,6 +177,33 @@ def _op_rotate(ident: Identity) -> dict:
     return {"agent_token": token, "expires_at": expires_at}
 
 
+# --- pre-flight readiness ops (questions/grading live in readiness.py) ------ #
+def _op_readiness_check(ident: Identity) -> dict:
+    conn = connect()
+    try:
+        row = conn.execute("SELECT mode FROM tasks WHERE id = ?", (ident.task_id,)).fetchone()
+        mode = row["mode"] if row and row["mode"] else "contract"
+    finally:
+        conn.close()
+    return {"questions": readiness.questions(ident.role, mode)}
+
+
+def _op_submit_readiness(ident: Identity, answers: dict) -> dict:
+    conn = connect()
+    try:
+        row = conn.execute("SELECT mode FROM tasks WHERE id = ?", (ident.task_id,)).fetchone()
+        mode = row["mode"] if row and row["mode"] else "contract"
+        result = readiness.grade(ident.role, ident.task_id, mode, answers)
+        if result["passed"]:
+            conn.execute("UPDATE agents SET ready = 1 WHERE id = ?", (ident.agent_id,))
+            conn.commit()
+    finally:
+        conn.close()
+    if result["passed"]:
+        audit.event("agent_ready", task=ident.task_id, role=ident.role, name=ident.name)
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # registration
 # --------------------------------------------------------------------------- #
@@ -272,6 +299,18 @@ def _register_remote(mcp: FastMCP) -> None:
         return RULES_OF_ENGAGEMENT
 
     @mcp.tool
+    def readiness_check() -> dict:
+        """Get the pre-flight questions you must answer before you can send messages
+        or change status. Read rules() first."""
+        return _op_readiness_check(require_current())
+
+    @mcp.tool
+    def submit_readiness(answers: dict) -> dict:
+        """Submit {question_id: answer} for the readiness questions. Pass all of them
+        to unlock your action tools."""
+        return _op_submit_readiness(require_current(), answers)
+
+    @mcp.tool
     def rotate_token() -> dict:
         """Rotate YOUR agent token. Returns a new bearer token (and its expiry, if
         any); the OLD token stops working immediately. After calling this, update your
@@ -351,3 +390,15 @@ def _register_local(mcp: FastMCP) -> None:
         """Ping the human owners on Slack. Use ONLY for terminal events (verified,
         or stuck and need help). Best-effort — never fails your turn."""
         return _op_notify(_local_identity(task, agent), message)
+
+    @mcp.tool
+    def readiness_check(task: str, agent: str) -> dict:
+        """Get the pre-flight questions you must answer before you can send messages
+        or change status. Read rules() first."""
+        return _op_readiness_check(_local_identity(task, agent))
+
+    @mcp.tool
+    def submit_readiness(task: str, agent: str, answers: dict) -> dict:
+        """Submit {question_id: answer} for the readiness questions. Pass all of them
+        to unlock your action tools."""
+        return _op_submit_readiness(_local_identity(task, agent), answers)

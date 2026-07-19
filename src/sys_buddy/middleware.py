@@ -21,7 +21,13 @@ from fastmcp.server.middleware import Middleware
 from . import audit
 from .config import get_config
 from .db import connect
-from .identity import resolve_agent_token, set_current
+from .identity import get_current, resolve_agent_token, set_current
+
+# The action tools that change collaboration state. They stay LOCKED until the agent
+# passes the pre-flight readiness check (agents.ready = 1) — read-only tools (rules,
+# check_messages, wait_for_message, get_contract, readiness_check, submit_readiness)
+# are never gated, so the agent can read the briefing + answer the check first.
+ACTION_TOOLS = frozenset({"send_message", "propose_contract", "lock_contract", "report_status"})
 
 # Anti-brute-force on the auth path (OWASP API2): throttle repeated *failed* token
 # attempts per client IP — successful calls are never counted, so a busy agent's
@@ -46,6 +52,29 @@ def _bearer_token(headers) -> str:
 
 
 class AuthMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        """Readiness gate: in remote mode, an authenticated agent cannot call an ACTION
+        tool until it has passed the pre-flight check (agents.ready). Auth itself runs
+        in on_request; here we only gate the *action* tools by readiness."""
+        cfg = get_config()
+        if cfg.is_remote:
+            ident = get_current()  # stamped by on_request earlier in this request
+            tool = context.message.name
+            if ident is not None and tool in ACTION_TOOLS:
+                conn = connect()
+                try:
+                    row = conn.execute(
+                        "SELECT ready FROM agents WHERE id = ?", (ident.agent_id,)
+                    ).fetchone()
+                finally:
+                    conn.close()
+                if not (row and row["ready"]):
+                    raise ToolError(
+                        f"locked: read rules(), then pass readiness_check() and "
+                        f"submit_readiness(...) before calling {tool}."
+                    )
+        return await call_next(context)
+
     async def on_request(self, context, call_next):
         """Authenticate EVERY MCP request in remote mode — not just tool calls but the
         ``initialize`` handshake and ``tools/list`` too, so nothing (not even the tool

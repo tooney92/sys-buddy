@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS agents (
     pubkey      TEXT,
     created_at  REAL NOT NULL,
     revoked_at  REAL,
-    expires_at  REAL                      -- optional TTL; NULL = never expires
+    expires_at  REAL,                     -- optional TTL; NULL = never expires
+    ready       INTEGER NOT NULL DEFAULT 0 -- 0 = not yet passed the pre-flight
 );
 
 -- Fixed cast: at most one *live* agent per role. A partial index (not a plain
@@ -153,6 +154,9 @@ def init_db(db_path: Path | str | None = None) -> Path:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)").fetchall()}
         if "expires_at" not in cols:
             conn.execute("ALTER TABLE agents ADD COLUMN expires_at REAL")
+        # Migration: add agents.ready to a db created before pre-flight readiness existed.
+        if "ready" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN ready INTEGER NOT NULL DEFAULT 0")
         # Migration: add tasks.mode to a db created before debug tasks existed.
         task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "mode" not in task_cols:

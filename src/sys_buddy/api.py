@@ -20,7 +20,7 @@ from pathlib import Path
 
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from . import identity
+from . import identity, readiness
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -310,6 +310,19 @@ def _events_for(conn, task_id: str, filter: str = "all") -> list[dict]:
     return [[_hhmm(r["created_at"]), r["kind"], _render_detail(r["kind"], json.loads(r["detail_json"]))] for r in rows]
 
 
+def _agents_for(conn, task_id: str) -> list[dict]:
+    """Live agents on the task (revoked_at IS NULL), with their pre-flight readiness.
+
+    ``ready`` is surfaced as a bool so the UI can padlock any agent that hasn't yet
+    passed ``submit_readiness`` (its action tools are still locked by the broker).
+    """
+    rows = conn.execute(
+        "SELECT name, role, ready FROM agents WHERE task_id = ? AND revoked_at IS NULL ORDER BY id",
+        (task_id,),
+    ).fetchall()
+    return [{"name": r["name"], "role": r["role"], "ready": bool(r["ready"])} for r in rows]
+
+
 def _task_detail(conn, task_id: str) -> dict | None:
     """Full per-task payload (SPEC §11 ``/api/task/{id}``), or ``None`` if absent.
 
@@ -333,6 +346,8 @@ def _task_detail(conn, task_id: str) -> dict | None:
         "contract": _contract_for(conn, task_id),
         "messages": _messages_for(conn, task_id),
         "events": _events_for(conn, task_id),
+        "agents": _agents_for(conn, task_id),
+        "readiness_preview": readiness.preview_questions(),
     }
 
 
