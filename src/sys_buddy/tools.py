@@ -51,11 +51,11 @@ def _local_identity(task: str, agent: str) -> Identity:
         conn.close()
 
 
-def _op_send(ident: Identity, type: str, body: str) -> str:
+def _op_send(ident: Identity, type: str, body: str, to_role: str | None = None) -> str:
     service.assert_sendable(type)  # lifecycle types must go through report_status
     conn = connect()
     try:
-        r = service.post_message(conn, ident, type, body)
+        r = service.post_message(conn, ident, type, body, to_role)
     finally:
         conn.close()
     return f"Delivered to task '{ident.task_id}' ({r['recipients']} recipient(s)). id={r['id']}"
@@ -189,15 +189,17 @@ def register_tools(mcp: FastMCP, cfg: Config) -> None:
 
 def _register_remote(mcp: FastMCP) -> None:
     @mcp.tool
-    def send_message(type: str, body: str) -> str:
+    def send_message(type: str, body: str, to_role: str = "") -> str:
         """Send a message to the other agents on your task.
 
         `type` is a conversational type: question, answer, status_update, or
         contract_proposal. Lifecycle events (deploy_confirmed, test_result,
         verified, stuck) are NOT sent here — report them via report_status so the
         broker records the transition and counts strikes. Batch related content
-        into ONE message. Be concrete."""
-        return _op_send(require_current(), type, body)
+        into ONE message. Be concrete. Optionally set `to_role` to send privately
+        to ONE role on the task (e.g. "mobile"); leave empty to broadcast to
+        everyone (the default)."""
+        return _op_send(require_current(), type, body, to_role or None)
 
     @mcp.tool
     def check_messages() -> list[dict]:
@@ -280,11 +282,13 @@ def _register_remote(mcp: FastMCP) -> None:
 
 def _register_local(mcp: FastMCP) -> None:
     @mcp.tool
-    def send_message(task: str, agent: str, type: str, body: str) -> str:
+    def send_message(task: str, agent: str, type: str, body: str, to_role: str = "") -> str:
         """Send a message to the other agents on `task`. `agent` is your own name.
         Use conversational types (question/answer/status_update/contract_proposal);
-        lifecycle events go through report_status, not here."""
-        return _op_send(_local_identity(task, agent), type, body)
+        lifecycle events go through report_status, not here. Optionally set `to_role`
+        to send privately to ONE role on the task (e.g. "mobile"); leave empty to
+        broadcast to everyone (the default)."""
+        return _op_send(_local_identity(task, agent), type, body, to_role or None)
 
     @mcp.tool
     def check_messages(task: str, agent: str) -> list[dict]:

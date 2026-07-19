@@ -258,7 +258,7 @@ def _messages_for(conn, task_id: str) -> list[dict]:
 
     rows = conn.execute(
         """
-        SELECT m.id, m.type, m.body_json, m.created_at, a.role AS role
+        SELECT m.id, m.type, m.body_json, m.to_role, m.created_at, a.role AS role
         FROM messages m
         JOIN agents a ON a.id = m.from_agent_id
         WHERE m.task_id = ?
@@ -271,7 +271,7 @@ def _messages_for(conn, task_id: str) -> list[dict]:
     test_idx = 0
     for r in rows:
         body = json.loads(r["body_json"])
-        msg: dict = {"id": r["id"], "role": r["role"], "type": r["type"], "time": _hhmm(r["created_at"])}
+        msg: dict = {"id": r["id"], "role": r["role"], "type": r["type"], "to_role": r["to_role"], "time": _hhmm(r["created_at"])}
         if isinstance(body, dict):
             msg["body"] = body.get("text") or body.get("body") or ""
             if "code" in body:

@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS messages (
     type          TEXT NOT NULL,
     body_json     TEXT NOT NULL,
     state_at_send TEXT NOT NULL,
-    created_at    REAL NOT NULL
+    created_at    REAL NOT NULL,
+    to_role       TEXT                      -- optional directed recipient; NULL = broadcast to all roles
 );
 
 -- Per-recipient delivery tracking (see module docstring).
@@ -156,6 +157,10 @@ def init_db(db_path: Path | str | None = None) -> Path:
         task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "mode" not in task_cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'contract'")
+        # Migration: add messages.to_role to a db created before directed messages existed.
+        msg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
+        if "to_role" not in msg_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN to_role TEXT")
         conn.commit()
     finally:
         conn.close()

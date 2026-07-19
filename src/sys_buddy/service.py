@@ -112,33 +112,44 @@ def _count_other_agents(conn, task_id: str, exclude_id: int) -> int:
     ).fetchone()["n"]
 
 
-def post_message(conn, identity: Identity, mtype: str, body: str) -> dict:
+def post_message(conn, identity: Identity, mtype: str, body: str, to_role: str | None = None) -> dict:
     """Store a message from ``identity`` on its task. Returns a small receipt.
 
     Delivery rows are created lazily on fetch, so an agent that pairs later still
     picks up anything it hasn't acked.
+
+    ``to_role`` directs the message at a single role; None/empty broadcasts to all
+    other agents on the task (the unchanged default). A non-empty ``to_role`` must
+    name a role declared on the task.
     """
     task = conn.execute(
-        "SELECT state, closed_at FROM tasks WHERE id = ?", (identity.task_id,)
+        "SELECT state, closed_at, roles_json FROM tasks WHERE id = ?", (identity.task_id,)
     ).fetchone()
     if task is None:
         raise ValueError(f"unknown task '{identity.task_id}'")
     if task["closed_at"] is not None:
         raise ValueError(f"task '{identity.task_id}' is closed")
+    # Empty string means broadcast, same as None.
+    if not to_role:
+        to_role = None
+    elif to_role not in json.loads(task["roles_json"]):
+        raise ValueError(
+            f"cannot address '{to_role}' — not a role on task '{identity.task_id}'"
+        )
     assert_content_size(body, "message body")
     state_at_send = task["state"]
     now = time.time()
     cur = conn.execute(
-        "INSERT INTO messages (task_id, from_agent_id, type, body_json, state_at_send, created_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (identity.task_id, identity.agent_id, mtype, json.dumps(body), state_at_send, now),
+        "INSERT INTO messages (task_id, from_agent_id, type, body_json, to_role, state_at_send, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (identity.task_id, identity.agent_id, mtype, json.dumps(body), to_role, state_at_send, now),
     )
     conn.commit()
     recipients = _count_other_agents(conn, identity.task_id, identity.agent_id)
-    return {"id": cur.lastrowid, "recipients": recipients, "type": mtype}
+    return {"id": cur.lastrowid, "recipients": recipients, "type": mtype, "to_role": to_role}
 
 
-def _wrap(from_name: str, role: str, task_id: str, body: str) -> str:
+def _wrap(from_name: str, role: str, task_id: str, body: str, to_role: str | None = None) -> str:
     """The untrusted-content envelope (SPEC §7). Content is DATA, not instructions.
 
     Every interpolated value is HTML-escaped so attacker-controlled content can't
@@ -149,8 +160,9 @@ def _wrap(from_name: str, role: str, task_id: str, body: str) -> str:
     pairing time, so the attributes are escaped too (``quote=True``).
     """
     attr = lambda v: html.escape(str(v), quote=True)
+    to_attr = f' to="{attr(to_role)}"' if to_role else ""
     return (
-        f'<msg from="{attr(from_name)}" role="{attr(role)}" trust="external" task="{attr(task_id)}">\n'
+        f'<msg from="{attr(from_name)}" role="{attr(role)}"{to_attr} trust="external" task="{attr(task_id)}">\n'
         f"{html.escape(str(body), quote=False)}\n"
         f"</msg>"
     )
@@ -178,17 +190,18 @@ def _fetch(conn, identity: Identity, only_new: bool, mark_delivered: bool = True
     unseen = "d.delivered_at IS NULL" if only_new else "d.acked_at IS NULL"
     rows = conn.execute(
         f"""
-        SELECT m.id, m.from_agent_id, m.type, m.body_json, m.created_at,
+        SELECT m.id, m.from_agent_id, m.type, m.body_json, m.created_at, m.to_role,
                a.name AS from_name, a.role AS from_role
         FROM messages m
         JOIN agents a ON a.id = m.from_agent_id
         LEFT JOIN deliveries d ON d.message_id = m.id AND d.agent_id = ?
         WHERE m.task_id = ?
           AND m.from_agent_id != ?
+          AND (m.to_role IS NULL OR m.to_role = ?)
           AND ({unseen})
         ORDER BY m.id
         """,
-        (identity.agent_id, identity.task_id, identity.agent_id),
+        (identity.agent_id, identity.task_id, identity.agent_id, identity.role),
     ).fetchall()
 
     now = time.time()
@@ -210,7 +223,7 @@ def _fetch(conn, identity: Identity, only_new: bool, mark_delivered: bool = True
                 "role": r["from_role"],
                 "type": r["type"],
                 "sent_at": _fmt_time(r["created_at"]),
-                "content": _wrap(r["from_name"], r["from_role"], identity.task_id, body),
+                "content": _wrap(r["from_name"], r["from_role"], identity.task_id, body, r["to_role"]),
             }
         )
     if mark_delivered:
@@ -271,7 +284,7 @@ def channel_history(conn, task_id: str, limit: int = 20) -> list[dict]:
     limit = max(1, min(limit, MAX_HISTORY))
     rows = conn.execute(
         """
-        SELECT m.id, m.type, m.body_json, m.created_at, a.name AS from_name, a.role AS from_role
+        SELECT m.id, m.type, m.body_json, m.created_at, m.to_role, a.name AS from_name, a.role AS from_role
         FROM messages m
         JOIN agents a ON a.id = m.from_agent_id
         WHERE m.task_id = ?
@@ -286,6 +299,7 @@ def channel_history(conn, task_id: str, limit: int = 20) -> list[dict]:
             "from": r["from_name"],
             "role": r["from_role"],
             "type": r["type"],
+            "to_role": r["to_role"],
             "sent_at": _fmt_time(r["created_at"]),
             "body": json.loads(r["body_json"]),
         }
