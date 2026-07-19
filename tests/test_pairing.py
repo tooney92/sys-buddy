@@ -259,3 +259,24 @@ def test_list_tasks_returns_id_state_title(conn):
     assert ids == {"signin", "search"}
     for r in rows:
         assert "state" in r and "title" in r
+
+
+def test_create_task_rejects_duplicate_roles(conn):
+    try:
+        admin.create_task("dup-roles", title="Dup", roles=["backend", "backend", "frontend"])
+        assert False, "duplicate roles should be rejected"
+    except ValueError as e:
+        assert "unique" in str(e).lower()
+
+
+def test_create_task_rejects_blank_role(conn):
+    try:
+        admin.create_task("blank-role", title="Blank", roles=["backend", "  "])
+        assert False, "blank role should be rejected"
+    except ValueError as e:
+        assert "role" in str(e).lower()
+
+
+def test_create_task_trims_role_whitespace(conn):
+    t = admin.create_task("trimmed", title="Trim", roles=[" backend ", "frontend "])
+    assert t["roles"] == ["backend", "frontend"]

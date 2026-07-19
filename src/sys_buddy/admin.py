@@ -52,14 +52,20 @@ def create_task(id: str, *, title: str, roles: list[str], mode: str = "contract"
     """
     if mode not in ("contract", "debug"):
         raise ValueError(f"unknown mode {mode!r}; expected 'contract' or 'debug'")
+    # Normalise + validate the cast: trim, no blanks, no duplicates. The fixed-cast
+    # rule allows one live agent per role, so a duplicate role is nonsensical — reject
+    # it at creation rather than silently storing a role that can never be filled twice.
+    roles = [r.strip() for r in roles]
+    if not roles or any(not r for r in roles):
+        raise ValueError("a task needs at least one non-empty role")
+    if len(roles) != len(set(roles)):
+        raise ValueError("task roles must be unique (no duplicates)")
     if mode == "contract" and "backend" not in roles:
         # The state machine designates 'backend' as the role that deploys (SPEC §7);
         # a contract task without it can lock a contract but never reach backend_live,
         # so the workflow would deadlock. Reject at creation rather than strand it
         # later. Debug tasks skip the state machine, so they need no backend seat.
         raise ValueError("roles must include 'backend' (the role that deploys)")
-    if not roles:
-        raise ValueError("a task needs at least one role")
     conn = connect()
     try:
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (id,)).fetchone() is not None:
