@@ -149,8 +149,9 @@ def role_prompt(role: str, task_id: str, mode: str = "contract") -> str:
             "doesn't. `verified` when it all works end-to-end; `stuck` if you need the humans.\n\n"
             "Testing tip (optional): you'll likely integrate/verify against the `staging_url` "
             "using the Playwright MCP. If you don't have it set up, in Claude Code run "
-            "`claude mcp add playwright npx '@playwright/mcp@latest'` (then restart the session "
-            "so it loads). This is only a suggestion — test however you like; the broker just "
+            "`claude mcp add playwright npx '@playwright/mcp@latest'` (needs Node/npx; then restart "
+            "the session so it loads, and confirm with `claude mcp list`). This is only a suggestion "
+            "— test however you like; the broker just "
             "needs your honest `report_status` and a `verified` once it truly works.\n\n"
         )
 
