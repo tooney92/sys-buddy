@@ -61,6 +61,17 @@ def parse_invite_link(link: str) -> tuple[str, str]:
     return base_url, code
 
 
+def make_join_url(origin: str, code: str) -> str:
+    """Build the browser onboarding URL for an invite ``code`` at ``origin``.
+
+    The code rides in the URL *fragment* (``#c=<code>``) on purpose: fragments are
+    never sent to the server, so a pasted/clicked join link keeps the single-use
+    invite code out of access logs, Referer headers, and proxies — the browser page
+    reads it client-side and POSTs it to ``/pair``.
+    """
+    return f"{origin.rstrip('/')}/join#c={code}"
+
+
 def role_prompt(role: str, task_id: str, mode: str = "contract") -> str:
     """The briefing an operator pastes into their Claude agent for ``role``.
 
@@ -363,7 +374,18 @@ def host_setup(
         # Invite links go to every role EXCEPT the one the host is claiming itself.
         seat_host = host_role is not None and host_role in roles
         link_roles = [r for r in roles if r != host_role] if seat_host else list(roles)
-        invites = [{"role": r, "link": host_invite_link(task_id, r, base_url)} for r in link_roles]
+        # One mint per role → both links off the SAME code: the web link the buddy
+        # opens in a browser (the easy path), and the sb1_ blob for the desktop-app /
+        # CLI paste path. (Minting twice would burn two codes for one seat.)
+        def _invite_entry(role: str) -> dict:
+            code, _ = admin.mint_invite(task_id, role)
+            return {
+                "role": role,
+                "join_url": make_join_url(base_url, code),
+                "link": make_invite_link(base_url, code),
+            }
+
+        invites = [_invite_entry(r) for r in link_roles]
 
         viewer_token = admin.issue_host_viewer("host")
         result = {

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from sys_buddy import admin, pairing
+from sys_buddy import admin, onboarding, pairing
 from sys_buddy.identity import sha256_hex
 from tests.conftest import seed_task
 
@@ -105,6 +105,26 @@ def test_redeem_invite_creates_agent_and_viewer_and_burns_invite(conn):
     assert conn.execute("SELECT used_at FROM invites").fetchone()["used_at"] is not None
     # Token event written.
     assert conn.execute("SELECT 1 FROM events WHERE task_id='signin' AND kind='token'").fetchone()
+
+
+def test_pair_response_carries_viewer_token_and_prompt(conn):
+    """The ``/pair`` JSON exposes ``viewer_token`` top-level and a mode-aware
+    ``prompt``. Assembled from the same pieces the route uses (redeem_invite +
+    role_prompt), since the handler is tested at that level here (no HTTP server)."""
+    code = _mint(conn)
+    result = pairing.redeem_invite(conn, code, "dave-frontend")
+
+    # viewer_token is returned by redeem_invite (the route surfaces it top-level).
+    assert result["viewer_token"].startswith("sbv_")
+
+    # The route reads the task mode, then builds the prompt from role + task + mode.
+    mode = conn.execute(
+        "SELECT mode FROM tasks WHERE id = ?", (result["task_id"],)
+    ).fetchone()["mode"]
+    assert mode == "contract"
+    prompt = onboarding.role_prompt(result["role"], result["task_id"], mode)
+    assert isinstance(prompt, str) and prompt
+    assert result["task_id"] in prompt
 
 
 def test_revoked_role_can_be_repaired(conn):
@@ -277,3 +297,40 @@ def test_create_task_rejects_blank_role(conn):
 def test_create_task_trims_role_whitespace(conn):
     t = admin.create_task("trimmed", title="Trim", roles=[" backend ", "frontend "])
     assert t["roles"] == ["backend", "frontend"]
+
+
+# --- join() rebases broker-stamped URLs onto the origin the buddy reached --------
+def test_rebase_swaps_origin_keeps_path_and_query():
+    got = pairing._rebase(
+        "http://127.0.0.1:8787/ui?v=tok", "https://618a.ngrok-free.app/"
+    )
+    assert got == "https://618a.ngrok-free.app/ui?v=tok"
+    assert pairing._rebase(None, "https://x") is None
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._b = payload
+    def read(self):
+        import json as _j
+        return _j.dumps(self._b).encode()
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+def test_join_rebases_loopback_mcp_url_to_tunnel_origin(monkeypatch):
+    # Broker sits behind a tunnel it doesn't know about, so /pair echoes loopback URLs.
+    server_payload = {
+        "task_id": "t1", "role": "frontend",
+        "agent_token": "sbk_tok", "expires_at": None, "rules": "…",
+        "mcp_url": "http://127.0.0.1:8787/mcp",
+        "dashboard_url": "http://127.0.0.1:8787/ui?v=vtok",
+    }
+    monkeypatch.setattr(
+        pairing.urllib.request, "urlopen", lambda *a, **k: _FakeResp(server_payload)
+    )
+    res = pairing.join("https://618a.ngrok-free.app", "code", "buddy")
+    assert res["mcp_url"] == "https://618a.ngrok-free.app/mcp"
+    assert res["dashboard_url"] == "https://618a.ngrok-free.app/ui?v=vtok"

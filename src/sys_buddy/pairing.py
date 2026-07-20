@@ -26,6 +26,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 
 from fastmcp import FastMCP
 from starlette.requests import Request
@@ -193,6 +194,13 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
         conn = connect()
         try:
             result = redeem_invite(conn, code, agent_name, pubkey=pubkey)
+            # The briefing prompt is mode-aware (contract vs debug); read the task's
+            # mode off the same connection before it closes, defaulting to "contract"
+            # if the row/column is somehow missing.
+            row = conn.execute(
+                "SELECT mode FROM tasks WHERE id = ?", (result["task_id"],)
+            ).fetchone()
+            mode = (row["mode"] if row and row["mode"] else "contract")
         except ValueError as e:
             # Invalid/expired/used invite, or a taken role — a client error, not a 500.
             audit.event("pair_fail", ip=ip, name=agent_name)
@@ -200,6 +208,10 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
         finally:
             conn.close()
         audit.event("pair_ok", ip=ip, task=result["task_id"], role=result["role"], name=agent_name)
+
+        # Lazy import: onboarding imports pairing at module top, so importing it here
+        # (inside the handler) avoids a circular import.
+        from .onboarding import role_prompt
 
         viewer_token = result["viewer_token"]
         return JSONResponse(
@@ -211,10 +223,30 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
                 "mcp_url": f"{cfg.base_url}/mcp",
                 "dashboard_url": f"{cfg.base_url}/ui?v={viewer_token}",
                 "expires_at": result["expires_at"],  # None = token never expires
+                # The briefing the operator pastes into their Claude agent.
+                "prompt": role_prompt(result["role"], result["task_id"], mode),
                 # The broker's non-negotiable charter, handed to the agent at setup.
                 "rules": RULES_OF_ENGAGEMENT,
             }
         )
+
+
+def _rebase(server_url: str | None, connected_base: str) -> str | None:
+    """Rewrite a broker-returned URL onto the origin the buddy actually reached.
+
+    The ``/pair`` route stamps ``mcp_url``/``dashboard_url`` from the broker's OWN
+    config (``cfg.base_url``), which is loopback whenever the broker sits behind a
+    tunnel it doesn't know about (``ngrok http 8787`` / ``tailscale serve 8787``).
+    But the buddy reached the broker at ``connected_base`` — the invite link's origin
+    — so that origin, not the broker's self-view, is the one the buddy must use. We
+    keep the server's path + query (the dashboard's ``?v=<token>`` rides along) and
+    swap only the scheme + host.
+    """
+    if not server_url:
+        return server_url
+    b = urlsplit(connected_base.rstrip("/"))
+    s = urlsplit(server_url)
+    return urlunsplit((b.scheme, b.netloc, s.path, s.query, s.fragment))
 
 
 def join(url: str, code: str, name: str, pubkey: str | None = None) -> dict | None:
@@ -248,12 +280,14 @@ def join(url: str, code: str, name: str, pubkey: str | None = None) -> dict | No
         print(f"error: unexpected pairing failure: {e}", file=sys.stderr)
         return None
 
+    # Rebase the broker's self-stamped URLs onto the origin we actually reached, so a
+    # broker behind a tunnel it doesn't know about still hands back a reachable mcp_url.
     return {
         "task_id": data.get("task_id"),
         "role": data.get("role"),
-        "mcp_url": data.get("mcp_url"),
+        "mcp_url": _rebase(data.get("mcp_url"), url) or f"{url.rstrip('/')}/mcp",
         "agent_token": data.get("agent_token"),
-        "dashboard_url": data.get("dashboard_url"),
+        "dashboard_url": _rebase(data.get("dashboard_url"), url),
         "expires_at": data.get("expires_at"),
         "rules": data.get("rules"),  # surface the charter to the buddy (CLI prints it)
     }

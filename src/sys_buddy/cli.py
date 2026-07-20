@@ -60,14 +60,21 @@ def cmd_task_create(args: argparse.Namespace) -> int:
 
 def cmd_invite(args: argparse.Namespace) -> int:
     from . import admin
+    from .config import get_config
+    from .onboarding import make_invite_link, make_join_url
 
     _cfg_from_args(args)
     code, expires = admin.mint_invite(args.task, args.role)
+    origin = get_config().base_url
     print(f"Invite: {code}")
     print(f"  role:    {args.role}")
     print(f"  task:    {args.task}")
     print(f"  expires: {expires} (single use)")
-    print("\nShare the broker URL + this code with your buddy over Slack/Signal.")
+    print("\nSend your buddy this link — they open it in a browser to set up:")
+    print(f"  {make_join_url(origin, code)}")
+    print("\nOr for the desktop app / CLI join:")
+    print(f"  link: {make_invite_link(origin, code)}")
+    print(f"  cli:  sys-buddy join {origin} {code} <name>")
     return 0
 
 

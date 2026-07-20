@@ -476,3 +476,18 @@ def register_api_routes(mcp, cfg: Config) -> None:
         resp = HTMLResponse(html)
         resp.headers["Referrer-Policy"] = "no-referrer"
         return resp
+
+    @mcp.custom_route("/join", methods=["GET"])
+    async def join(request):
+        """Serve the packaged single-file buddy onboarding page.
+
+        A pre-token entry point, so — like ``/pair`` — it is UNAUTHENTICATED: it is
+        where a buddy lands with an invite code (carried in the URL fragment, never
+        reaching the server) to redeem it. Simpler than ``/ui``: no ``?v=`` cookie
+        dance, just the static page. ``Referrer-Policy: no-referrer`` keeps the
+        landing URL out of any onward Referer header.
+        """
+        html = (Path(__file__).parent / "join.html").read_text(encoding="utf-8")
+        resp = HTMLResponse(html)
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        return resp

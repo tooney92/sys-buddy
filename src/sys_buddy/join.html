@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Join a task · sys-buddy</title>
+<!-- sys-buddy browser onboarding — served at /join. The host sends the buddy a link
+     of the form  https://<broker-origin>/join#c=<invite-code>  and this page reads the
+     invite code from the URL FRAGMENT, redeems it against /pair on click (single-use —
+     never on load), then shows the connect command + briefing prompt + dashboard link.
+     Self-contained: inline CSS/JS, no external fonts/scripts/images (strict CSP).
+     Theme-aware (light/dark) like ui.html; result UI mirrors gui_app.html patterns. -->
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+:root{
+  --bg:#FAF9F7;--surface:#ffffff;--surface-2:#F5F3F0;--surface-3:#EDEAE5;
+  --border:#EBE8E3;--border-strong:#DAD5CE;
+  --text:#211F1C;--text-2:#6B6763;--text-3:#9C978F;
+  --accent:#E0693F;--accent-2:#C4552E;--accent-soft:#FBEADF;
+  --shadow:0 1px 2px rgba(40,30,20,.04),0 6px 16px rgba(40,30,20,.05);
+  --role-backend:#5468C9;--role-frontend:#C0568C;--role-mobile:#3F9E8C;--role-system:#8A857F;
+  --ok:#2C8A3D;--ok-bg:#E1F2E3;--ok-fg:#2C8A3D;
+  --err:#BF4638;--err-bg:#FBE7E3;--err-fg:#BF4638;
+  --amber-bg:#FBF0DA;--amber-fg:#A9720F;--amber-border:#E0A22B;
+}
+[data-theme="dark"]{
+  --bg:#161514;--surface:#201E1D;--surface-2:#282624;--surface-3:#312E2B;
+  --border:#332F2C;--border-strong:#443F3A;
+  --text:#F3F1EE;--text-2:#A7A29C;--text-3:#726D68;
+  --accent:#F0845C;--accent-2:#F59A77;--accent-soft:#38271F;
+  --shadow:0 1px 2px rgba(0,0,0,.24),0 6px 18px rgba(0,0,0,.30);
+  --role-backend:#7E8FE0;--role-frontend:#DB7CAC;--role-mobile:#5FBDAA;--role-system:#9A948D;
+  --ok:#74CB82;--ok-bg:#182C1C;--ok-fg:#74CB82;
+  --err:#F08876;--err-bg:#301C19;--err-fg:#F08876;
+  --amber-bg:#2F2712;--amber-fg:#E6B95F;--amber-border:#D9A032;
+}
+/* Follow the OS scheme when the visitor hasn't picked one (no data-theme set). */
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme]){
+    --bg:#161514;--surface:#201E1D;--surface-2:#282624;--surface-3:#312E2B;
+    --border:#332F2C;--border-strong:#443F3A;
+    --text:#F3F1EE;--text-2:#A7A29C;--text-3:#726D68;
+    --accent:#F0845C;--accent-2:#F59A77;--accent-soft:#38271F;
+    --shadow:0 1px 2px rgba(0,0,0,.24),0 6px 18px rgba(0,0,0,.30);
+    --role-backend:#7E8FE0;--role-frontend:#DB7CAC;--role-mobile:#5FBDAA;--role-system:#9A948D;
+    --ok:#74CB82;--ok-bg:#182C1C;--ok-fg:#74CB82;
+    --err:#F08876;--err-bg:#301C19;--err-fg:#F08876;
+    --amber-bg:#2F2712;--amber-fg:#E6B95F;--amber-border:#D9A032;
+  }
+}
+body{
+  min-height:100vh;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--accent-2)}
+button{font-family:inherit}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.86em}
+.wrap{width:100%;max-width:660px;margin:0 auto;padding:clamp(28px,6vh,64px) clamp(20px,5vw,40px);flex:1 0 auto;display:flex;flex-direction:column}
+
+/* ---------- wordmark ---------- */
+.brand{display:flex;align-items:center;gap:11px}
+.mark{display:inline-flex;align-items:center;gap:3px}
+.mark .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.mark .dot.a{background:var(--accent)}
+.mark .dot.b{background:var(--role-backend)}
+.mark .line{width:16px;height:2px;border-radius:2px;background:var(--border-strong);display:inline-block}
+.wordmark{font-weight:700;font-size:1.05rem;letter-spacing:-.02em;color:var(--text)}
+.wordmark .mid{color:var(--text-3);font-weight:400;padding:0 1px}
+
+/* ---------- headings / intro ---------- */
+.head{margin-top:clamp(30px,7vh,64px)}
+.head h1{margin:0;font-size:clamp(1.6rem,4.4vw,2.2rem);font-weight:700;letter-spacing:-.02em;line-height:1.1;color:var(--text)}
+.head p{margin:12px 0 0;color:var(--text-2);font-size:1rem;line-height:1.55}
+
+/* ---------- forms ---------- */
+.form{margin-top:clamp(22px,4vh,32px);display:flex;flex-direction:column;gap:16px}
+.field{display:flex;flex-direction:column;gap:7px}
+.field label{font-size:.82rem;font-weight:600;color:var(--text-2);letter-spacing:.01em}
+.input{
+  font-family:inherit;font-size:.98rem;color:var(--text);
+  background:var(--surface);border:1px solid var(--border-strong);border-radius:11px;
+  padding:12px 14px;width:100%;transition:border-color .16s ease,background .16s ease;
+}
+.input::placeholder{color:var(--text-3)}
+.input:hover{border-color:var(--accent)}
+.input:focus{outline:none;border-color:var(--accent);background:var(--surface-2)}
+.input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* ---------- buttons ---------- */
+.btn{
+  appearance:none;cursor:pointer;font-family:inherit;font-size:.95rem;font-weight:600;
+  border-radius:11px;padding:12px 20px;
+  transition:transform .12s ease,box-shadow .16s ease,background .16s ease,border-color .16s ease,opacity .16s ease;
+}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.btn.primary{color:#fff;background:var(--accent);border:1px solid var(--accent);align-self:flex-start;display:inline-flex;align-items:center;gap:9px}
+.btn.primary:hover:not(:disabled){background:var(--accent-2);transform:translateY(-1px)}
+.btn.primary:disabled{opacity:.6;cursor:progress;transform:none}
+.btn.copy{
+  font-size:.82rem;font-weight:500;padding:7px 13px;color:var(--text);
+  background:var(--surface-2);border:1px solid var(--border-strong);border-radius:9px;
+}
+.btn.copy:hover{border-color:var(--accent);background:var(--surface)}
+.btn.copy.done{border-color:var(--ok);color:var(--ok)}
+.btn.link-btn{
+  color:#fff;background:var(--accent);border:1px solid var(--accent);
+  display:inline-flex;align-items:center;gap:8px;text-decoration:none;align-self:flex-start;
+}
+.btn.link-btn:hover{background:var(--accent-2);transform:translateY(-1px);color:#fff}
+
+/* ---------- spinner ---------- */
+.spinner{
+  width:15px;height:15px;flex:none;
+  border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;
+  animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ---------- alerts ---------- */
+.alert{display:none;margin-top:6px;padding:12px 14px;border-radius:11px;font-size:.9rem;line-height:1.5;border:1px solid}
+.alert.show{display:block}
+.alert.err{color:var(--err-fg);background:var(--err-bg);border-color:var(--err)}
+.alert.amber{color:var(--amber-fg);background:var(--amber-bg);border-color:var(--amber-border)}
+.alert strong{color:inherit;font-weight:700}
+
+/* ---------- result panel ---------- */
+.result{display:none;margin-top:clamp(22px,4vh,32px);flex-direction:column;gap:22px}
+.result.show{display:flex}
+.paired{font-size:1.2rem;font-weight:700;letter-spacing:-.01em;color:var(--text);display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.paired .check{width:24px;height:24px;flex:none;border-radius:50%;background:var(--ok-bg);color:var(--ok-fg);display:inline-flex;align-items:center;justify-content:center}
+.paired .role{font-weight:800}
+.paired .tid{font-weight:700}
+.blk{display:flex;flex-direction:column;gap:9px}
+.blk .lbl{font-size:.92rem;font-weight:600;color:var(--text)}
+
+/* numbered step badge (mirrors gui_app.html) */
+.step-lbl{display:flex;align-items:center;gap:0}
+.step-n{
+  display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:20px;height:20px;border-radius:50%;margin-right:9px;
+  background:var(--surface-2);border:1px solid var(--border-strong);
+  color:var(--text-2);font-size:.74rem;font-weight:700;line-height:1;
+}
+
+pre.code{
+  margin:0;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:.84rem;line-height:1.55;color:var(--text);
+  background:var(--surface-3);border:1px solid var(--border-strong);border-radius:10px;
+  padding:12px 14px;
+  white-space:pre-wrap;        /* keep the remove/add line break, but wrap long lines */
+  overflow-wrap:anywhere;      /* break the long bearer-token line rather than clipping */
+}
+textarea.prompt{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:.84rem;line-height:1.55;color:var(--text);
+  background:var(--surface-3);border:1px solid var(--border-strong);border-radius:10px;
+  padding:12px 14px;width:100%;resize:vertical;min-height:210px;
+}
+textarea.prompt:focus{outline:none;border-color:var(--accent)}
+textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.copy-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.hint{font-size:.84rem;color:var(--text-3);margin:2px 0 0;line-height:1.5}
+.privacy{
+  display:flex;align-items:flex-start;gap:9px;margin-top:6px;
+  padding:11px 13px;border-radius:11px;font-size:.85rem;line-height:1.5;
+  color:var(--amber-fg);background:var(--amber-bg);border:1px solid var(--amber-border);
+}
+.privacy svg{flex:none;margin-top:1px}
+
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header class="brand">
+    <span class="mark" aria-hidden="true">
+      <span class="dot a"></span><span class="line"></span><span class="dot b"></span>
+    </span>
+    <span class="wordmark">sys<span class="mid">-</span>buddy</span>
+  </header>
+
+  <!-- ============ INCOMPLETE LINK ============ -->
+  <section class="head" id="view-incomplete" hidden>
+    <h1>This invite link looks incomplete</h1>
+    <p>We couldn't find an invite code in this link. Ask your host to resend it — the full link ends with <code>/join#c=…</code>.</p>
+  </section>
+
+  <!-- ============ INTRO / PAIR ============ -->
+  <section id="view-intro" hidden>
+    <div class="head">
+      <h1>Join a task</h1>
+      <p>You've been invited to pair on a sys-buddy task. Name your agent, then pair to get your setup — the invite is single-use, so we'll only redeem it when you're ready.</p>
+    </div>
+
+    <div class="form">
+      <div class="field">
+        <label for="in-name">Your agent name</label>
+        <input class="input" type="text" id="in-name" autocomplete="off" spellcheck="false" value="buddy">
+      </div>
+
+      <button type="button" class="btn primary" id="btn-pair">
+        <span class="spinner" id="pair-spinner" hidden aria-hidden="true"></span>
+        <span id="pair-btn-label">Pair &amp; get setup</span>
+      </button>
+
+      <div class="alert err" id="pair-error" role="alert" aria-live="assertive"></div>
+    </div>
+  </section>
+
+  <!-- ============ RESULT ============ -->
+  <section class="result" id="view-result" aria-live="polite">
+    <p class="paired" id="paired-line"></p>
+
+    <!-- Step 1 — connect Claude to sys-buddy -->
+    <div class="blk">
+      <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your Claude to sys-buddy</span>
+      <pre class="code" id="connect-cmd"></pre>
+      <div class="copy-row">
+        <button type="button" class="btn copy" id="copy-cmd">Copy command</button>
+      </div>
+      <p class="hint">Run this in the terminal where you start Claude Code, then restart your Claude session.</p>
+      <p class="hint" id="playwright-note" hidden></p>
+    </div>
+
+    <!-- Step 2 — brief the agent -->
+    <div class="blk">
+      <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your Claude session</span>
+      <textarea class="prompt" id="prompt-text" readonly rows="10" aria-label="Agent briefing prompt"></textarea>
+      <div class="copy-row">
+        <button type="button" class="btn copy" id="copy-prompt">Copy prompt</button>
+      </div>
+    </div>
+
+    <!-- Step 3 — watch it live -->
+    <div class="blk">
+      <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">3</span>Watch it live</span>
+      <a class="btn link-btn" id="dash-link" href="#" target="_blank" rel="noopener">Open the dashboard ↗</a>
+    </div>
+
+    <div class="privacy" role="note">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>
+      <span>Keep your token and links private — they grant access to this task.</span>
+    </div>
+  </section>
+</main>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---------- html escaping (matches ui.html / gui_app.html) ---------- */
+  function esc(s){
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+      return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    });
+  }
+
+  /* ---------- role tint (best-effort; falls back to accent) ---------- */
+  var ROLE_COLORS = {backend:'var(--role-backend)',frontend:'var(--role-frontend)',mobile:'var(--role-mobile)'};
+  function roleColor(role){ return ROLE_COLORS[(role||'').toLowerCase()] || 'var(--accent)'; }
+
+  /* ---------- copy-to-clipboard helper (ported from gui_app.html) ---------- */
+  function copyText(text, btn){
+    var label = btn.textContent;
+    var confirm = function(){
+      btn.textContent = 'Copied!';
+      btn.classList.add('done');
+      setTimeout(function(){ btn.textContent = label; btn.classList.remove('done'); }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(confirm).catch(function(){ fallbackCopy(text, confirm); });
+    } else {
+      fallbackCopy(text, confirm);
+    }
+  }
+  function fallbackCopy(text, done){
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      done();
+    } catch(e){ /* clipboard unavailable — no-op */ }
+  }
+
+  /* ---------- element refs ---------- */
+  var viewIncomplete = document.getElementById('view-incomplete');
+  var viewIntro      = document.getElementById('view-intro');
+  var viewResult     = document.getElementById('view-result');
+  var nameEl         = document.getElementById('in-name');
+  var pairBtn        = document.getElementById('btn-pair');
+  var pairSpinner    = document.getElementById('pair-spinner');
+  var pairBtnLabel   = document.getElementById('pair-btn-label');
+  var pairErr        = document.getElementById('pair-error');
+  var pairedLine     = document.getElementById('paired-line');
+  var connectCmd     = document.getElementById('connect-cmd');
+  var copyCmdBtn     = document.getElementById('copy-cmd');
+  var playwrightNote = document.getElementById('playwright-note');
+  var promptTa       = document.getElementById('prompt-text');
+  var copyPromptBtn  = document.getElementById('copy-prompt');
+  var dashLink       = document.getElementById('dash-link');
+
+  /* ---------- read the invite code from the URL FRAGMENT ----------
+     Format: https://<origin>/join#c=<code>. We parse the hash (not the query) so the
+     code never rides in the URL path/search and isn't sent to the server on GET. */
+  function readCode(){
+    var hash = (location.hash || '').replace(/^#/, '');
+    if (!hash) return '';
+    // Support `#c=<code>` and, defensively, a bare `#<code>`.
+    var m = /(?:^|&)c=([^&]+)/.exec(hash);
+    var raw = m ? m[1] : (hash.indexOf('=') === -1 ? hash : '');
+    try { return decodeURIComponent(raw).trim(); } catch(e){ return raw.trim(); }
+  }
+
+  var code = readCode();
+
+  if (!code){
+    viewIncomplete.hidden = false;
+    return; // nothing to pair — stop.
+  }
+  viewIntro.hidden = false;
+
+  /* ---------- pairing ---------- */
+  function setPairing(on){
+    pairBtn.disabled = on;
+    pairSpinner.hidden = !on;
+    pairBtnLabel.textContent = on ? 'Pairing…' : 'Pair & get setup';
+  }
+  function showError(msg){
+    pairErr.textContent = msg;
+    pairErr.classList.add('show');
+  }
+  function clearError(){
+    pairErr.classList.remove('show');
+    pairErr.textContent = '';
+  }
+
+  var GENERIC_ERR = 'This invite may be used, expired, or the broker is unreachable — ask your host for a fresh link.';
+
+  pairBtn.addEventListener('click', function(){
+    clearError();
+    var agentName = (nameEl.value || '').trim() || 'buddy';
+    setPairing(true);
+
+    fetch('/pair', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({code: code, agent_name: agentName})
+    }).then(function(r){
+      // Try to parse a body either way — errors may carry a JSON `error` field.
+      return r.json().catch(function(){ return null; }).then(function(data){
+        return {ok: r.ok, data: data};
+      });
+    }).then(function(res){
+      var data = res.data;
+      if (!res.ok || !data || data.error){
+        setPairing(false);
+        showError((data && data.error) ? String(data.error) : GENERIC_ERR);
+        return;
+      }
+      renderResult(data);
+    }).catch(function(){
+      setPairing(false);
+      showError(GENERIC_ERR);
+    });
+  });
+
+  /* ---------- render the setup panel ----------
+     CONTRACT — response fields relied upon exactly:
+     { agent_token, viewer_token, task_id, role, prompt, dashboard_url, rules, expires_at }
+     Note: the connect command AND the dashboard link are both rebuilt from
+     location.origin (the real public origin this page was served from) — NOT from
+     any server-echoed URL, since the broker may stamp a loopback origin. */
+  function renderResult(res){
+    var role  = res.role || '';
+    var col   = roleColor(role);
+
+    pairedLine.innerHTML =
+      '<span class="check" aria-hidden="true">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>' +
+      '</span>' +
+      'Paired as <span class="role" style="color:' + col + '">' + esc(role) + '</span>' +
+      ' on task “<span class="tid">' + esc(res.task_id) + '</span>”';
+
+    // Step 1 — connect command, built from the BROWSER origin + agent token.
+    var origin = location.origin;
+    var token  = res.agent_token || '';
+    var cmd =
+      'claude mcp remove sys-buddy\n' +
+      'claude mcp add --transport http sys-buddy ' + origin + '/mcp --header "Authorization: Bearer ' + token + '"';
+    connectCmd.textContent = cmd;                 // textContent — no manual escaping needed
+    copyCmdBtn.onclick = function(){ copyText(cmd, copyCmdBtn); };
+
+    // Optional Playwright note for non-backend roles (UI testers).
+    if (String(role).toLowerCase() !== 'backend'){
+      playwrightNote.innerHTML =
+        'Testing a UI? You can also add Playwright (optional): ' +
+        '<code>claude mcp add playwright npx \'@playwright/mcp@latest\'</code> then restart your session.';
+      playwrightNote.hidden = false;
+    } else {
+      playwrightNote.hidden = true;
+    }
+
+    // Step 2 — briefing prompt (readonly textarea).
+    promptTa.value = res.prompt || '';
+    copyPromptBtn.onclick = function(){ copyText(promptTa.value, copyPromptBtn); };
+
+    // Step 3 — dashboard link, rebuilt from origin + viewer_token (NOT dashboard_url).
+    dashLink.href = origin + '/ui?v=' + encodeURIComponent(res.viewer_token || '');
+
+    // reveal the result, hide the intro form
+    viewIntro.hidden = true;
+    viewResult.classList.add('show');
+    try { pairedLine.setAttribute('tabindex', '-1'); pairedLine.focus(); } catch(e){}
+  }
+})();
+</script>
+</body>
+</html>

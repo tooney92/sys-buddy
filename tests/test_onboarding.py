@@ -39,6 +39,23 @@ def test_make_invite_link_has_no_padding_or_whitespace():
     assert not any(ch.isspace() for ch in link)
 
 
+# --- make_join_url ----------------------------------------------------------
+def test_make_join_url_shape_and_fragment():
+    url = onboarding.make_join_url("https://abc.ngrok.app", "signin-abc123")
+    # /join with the code in the FRAGMENT (after #), so it never reaches the server.
+    assert url == "https://abc.ngrok.app/join#c=signin-abc123"
+    path, _, fragment = url.partition("#")
+    assert path.endswith("/join")
+    assert fragment == "c=signin-abc123"
+
+
+def test_make_join_url_trims_trailing_slash():
+    assert (
+        onboarding.make_join_url("https://abc.ngrok.app/", "code123")
+        == "https://abc.ngrok.app/join#c=code123"
+    )
+
+
 # --- parse_invite_link error handling ---------------------------------------
 def _link_missing_c_key():
     """A structurally valid sb1_ link whose payload is missing the required 'c' key."""

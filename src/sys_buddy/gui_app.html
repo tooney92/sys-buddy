@@ -412,6 +412,11 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   min-width:88px;
 }
 .invite-role .role-pip{width:9px;height:9px;border-radius:50%;flex:none}
+/* secondary desktop/CLI paste line under the primary browser link */
+.invite-alt{flex-basis:100%;display:flex;align-items:center;gap:8px;margin-top:2px}
+.invite-alt-lbl{flex:none;margin:0;font-size:.74rem}
+.invite-link-sm{font-size:.74rem}
+.invite-copy-sm{font-size:.74rem;padding:5px 9px}
 .invite-link{
   flex:1 1 240px;min-width:0;
   font-family:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -624,7 +629,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       </div>
 
       <div class="blk" id="host-invites-blk">
-        <span class="lbl">Send each buddy their link:</span>
+        <span class="lbl">Send each buddy their link — they open it in a browser to set up:</span>
         <div class="invites" id="host-invites"></div>
       </div>
 
@@ -1118,8 +1123,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     var invites = res.invites || [];
     document.getElementById('host-invites-blk').hidden = invites.length === 0;
     invites.forEach(function(inv){
-      var col  = roleColor(inv.role);
-      var link = inv.link || '';
+      var col     = roleColor(inv.role);
+      var joinUrl = inv.join_url || '';
+      var sb1     = inv.link || '';
       var row = document.createElement('div');
       row.className = 'invite-row';
       row.innerHTML =
@@ -1127,12 +1133,21 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
           '<span class="role-pip" style="background:' + col + '"></span>' + esc(inv.role) +
         '</span>' +
         '<input class="input invite-link" type="text" readonly spellcheck="false" ' +
-          'aria-label="Invite link for ' + esc(inv.role) + '" value="' + esc(link) + '">' +
-        '<button type="button" class="btn copy">Copy link</button>';
-      var copyBtn = row.querySelector('.btn.copy');
-      copyBtn.addEventListener('click', function(){ copyText(link, copyBtn); });
-      var linkInput = row.querySelector('.invite-link');
-      linkInput.addEventListener('focus', function(){ linkInput.select(); });
+          'aria-label="Browser invite link for ' + esc(inv.role) + '" value="' + esc(joinUrl) + '">' +
+        '<button type="button" class="btn copy" data-which="join">Copy link</button>' +
+        '<div class="invite-alt">' +
+          '<span class="hint invite-alt-lbl">Desktop app / CLI:</span>' +
+          '<input class="input invite-link invite-link-sm" type="text" readonly spellcheck="false" ' +
+            'aria-label="Desktop/CLI invite code for ' + esc(inv.role) + '" value="' + esc(sb1) + '">' +
+          '<button type="button" class="btn copy invite-copy-sm" data-which="sb1">Copy</button>' +
+        '</div>';
+      var joinBtn = row.querySelector('[data-which="join"]');
+      joinBtn.addEventListener('click', function(){ copyText(joinUrl, joinBtn); });
+      var sb1Btn = row.querySelector('[data-which="sb1"]');
+      sb1Btn.addEventListener('click', function(){ copyText(sb1, sb1Btn); });
+      Array.prototype.forEach.call(row.querySelectorAll('.invite-link'), function(inp){
+        inp.addEventListener('focus', function(){ inp.select(); });
+      });
       hostInv.appendChild(row);
     });
 
