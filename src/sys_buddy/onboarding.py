@@ -194,16 +194,46 @@ def claude_add_command(mcp_url: str, token: str, name: str = "sys-buddy") -> lis
     ]
 
 
-def configure_claude(mcp_url: str, token: str, name: str = "sys-buddy") -> dict:
-    """Run the ``claude mcp add`` command for the operator; never raise.
+def claude_remove_command(name: str = "sys-buddy") -> list[str]:
+    """The argv that de-registers an existing MCP entry.
 
-    The UI shows the result verbatim, so failures come back as data, not
-    exceptions: ``{"ok", "detail", "command"}`` where ``command`` is a copy-paste
-    string the human can run by hand if the automated attempt can't (e.g. the
-    CLI isn't installed).
+    ``claude mcp add`` refuses to overwrite an existing entry, so a re-pair (new
+    tunnel URL and/or new token) must remove the stale one first. On a first-time
+    setup this is a harmless no-op that prints "not found".
+    """
+    return ["claude", "mcp", "remove", name]
+
+
+def claude_setup_command(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
+    """Copy-paste, re-pair-safe setup: ``remove`` then ``add``, one command per line.
+
+    Two plain lines (not a shell ``&&``/``;`` chain) so it pastes cleanly on any OS
+    — bash, zsh, PowerShell, or cmd. The ``remove`` line is a no-op the first time.
+    """
+    return (
+        shlex.join(claude_remove_command(name)) + "\n" +
+        shlex.join(claude_add_command(mcp_url, token, name))
+    )
+
+
+def configure_claude(mcp_url: str, token: str, name: str = "sys-buddy") -> dict:
+    """Run the ``claude mcp`` setup for the operator; never raise.
+
+    Removes any stale entry first (so re-pairing with a new token/URL replaces it),
+    then adds the current one. The UI shows the result verbatim, so failures come
+    back as data, not exceptions: ``{"ok", "detail", "command"}`` where ``command``
+    is the re-pair-safe copy-paste string the human can run by hand if the automated
+    attempt can't (e.g. the CLI isn't installed).
     """
     argv = claude_add_command(mcp_url, token, name)
-    command = shlex.join(argv)
+    command = claude_setup_command(mcp_url, token, name)
+    # Best-effort remove so a re-pair replaces the old entry rather than colliding
+    # with it. A missing entry (or missing CLI) just fails here — the add below
+    # reports the real outcome the UI shows.
+    try:
+        subprocess.run(claude_remove_command(name), capture_output=True, text=True, timeout=30)
+    except Exception:  # noqa: BLE001 — remove is advisory; add is the source of truth
+        pass
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
@@ -305,7 +335,7 @@ def _mint_host_seat(task_id: str, host_role: str, base_url: str, mode: str) -> d
         "mcp_url": mcp_url,
         "agent_token": res["agent_token"],
         "prompt": role_prompt(host_role, task_id, mode),
-        "config_command": shlex.join(claude_add_command(mcp_url, res["agent_token"])),
+        "config_command": claude_setup_command(mcp_url, res["agent_token"]),
     }
 
 

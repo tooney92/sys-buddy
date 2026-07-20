@@ -151,6 +151,27 @@ def test_claude_add_command_shape():
     assert "Authorization: Bearer sbk_tok" in cmd
 
 
+# --- claude_setup_command (re-pair-safe: remove then add) -------------------
+def test_claude_setup_command_removes_before_adding():
+    cmd = onboarding.claude_setup_command("https://abc.ngrok.app/mcp", "sbk_tok")
+    lines = cmd.splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("claude mcp remove sys-buddy")
+    assert lines[1].startswith("claude mcp add")
+    assert "sbk_tok" in lines[1]
+
+
+def test_configure_claude_runs_remove_before_add(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        onboarding.subprocess, "run",
+        lambda argv, *a, **k: (calls.append(list(argv)), _FakeCompleted(returncode=0))[1],
+    )
+    onboarding.configure_claude("https://abc.ngrok.app/mcp", "sbk_tok")
+    assert calls[0][:3] == ["claude", "mcp", "remove"]
+    assert calls[1][:3] == ["claude", "mcp", "add"]
+
+
 # --- configure_claude -------------------------------------------------------
 class _FakeCompleted:
     def __init__(self, returncode=0, stderr="", stdout=""):

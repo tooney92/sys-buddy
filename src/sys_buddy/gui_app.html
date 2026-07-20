@@ -231,6 +231,25 @@ body{
 }
 @keyframes spin{to{transform:rotate(360deg)}}
 
+/* ---------- full-page loader (host start) ---------- */
+.loading-hero{
+  margin:auto;
+  display:flex;flex-direction:column;align-items:center;
+  gap:20px;text-align:center;padding:24px;
+}
+.spinner-lg{
+  width:46px;height:46px;flex:none;
+  border:3px solid var(--border-strong);
+  border-top-color:var(--accent);
+  border-radius:50%;
+  animation:spin .7s linear infinite;
+}
+.loading-hero .load-msg{
+  margin:0;font-size:1.2rem;font-weight:600;letter-spacing:-.01em;
+  transition:opacity .18s ease;
+}
+.loading-hero .load-sub{margin:0;font-size:.92rem;color:var(--text-2)}
+
 .alert{
   display:none;
   margin-top:4px;
@@ -269,7 +288,8 @@ pre.code{
   border-radius:10px;
   padding:12px 14px;
   overflow-x:auto;
-  white-space:pre;
+  white-space:pre-wrap;      /* keep the remove/add line break, but wrap long lines */
+  overflow-wrap:anywhere;    /* break the long bearer-token line instead of clipping it */
 }
 textarea.prompt{
   font-family:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -565,12 +585,25 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       </div>
       <p class="hint" id="host-note" hidden></p>
 
-      <div class="pairing" id="host-starting" role="status" aria-live="polite">
-        <span class="spinner" aria-hidden="true"></span>
-        <span>Starting…</span>
-      </div>
-
       <div class="alert err" id="host-error" role="alert" aria-live="assertive"></div>
+    </div>
+  </section>
+
+  <!-- ============ HOST: starting (full-page loader) ============ -->
+  <section class="view" id="view-loading" aria-label="Starting broker">
+    <div class="loading-hero" role="status" aria-live="polite">
+      <span class="spinner-lg" aria-hidden="true"></span>
+      <p class="load-msg" id="load-msg">Starting broker…</p>
+      <p class="load-sub">Setting up your session — this only takes a moment.</p>
+    </div>
+  </section>
+
+  <!-- ============ HOST: running (result / invites — its own page, no scroll) ============ -->
+  <section class="view" id="view-hostrun" aria-label="Broker running">
+    <button type="button" class="back" data-nav="home">← Home</button>
+    <div class="flow-head">
+      <h1>Broker running</h1>
+      <p>Send each buddy their invite link, then open the dashboard to follow the task.</p>
     </div>
 
     <!-- result -->
@@ -685,10 +718,12 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
   // ---- tiny router -----------------------------------------------------
   var views = {
-    home:  document.getElementById('view-home'),
-    host:  document.getElementById('view-host'),
-    buddy: document.getElementById('view-buddy'),
-    done:  document.getElementById('view-done')
+    home:    document.getElementById('view-home'),
+    host:    document.getElementById('view-host'),
+    loading: document.getElementById('view-loading'),
+    hostrun: document.getElementById('view-hostrun'),
+    buddy:   document.getElementById('view-buddy'),
+    done:    document.getElementById('view-done')
   };
 
   function showView(name){
@@ -887,7 +922,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var hostBtn    = document.getElementById('btn-host');
   var hostGate   = document.getElementById('host-gate');
   var hostNote   = document.getElementById('host-note');
-  var hostStart  = document.getElementById('host-starting');
+  var loadMsg    = document.getElementById('load-msg');
   var hostErr    = document.getElementById('host-error');
   var hostResult = document.getElementById('host-result');
   var hostRunLn  = document.getElementById('host-running-line');
@@ -1011,21 +1046,57 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     var connMode = (connRadios.filter(function(r){ return r.checked; })[0] || {}).value || 'local';
     var publicUrl = connMode === 'local' ? '' : (publicUrlEl && publicUrlEl.value || '').trim();
 
-    // starting state
+    // starting state — swap to the full-page loader so the running screen lands
+    // on its own page (no scrolling past the form to find the invites).
     hostBtn.disabled = true;
-    hostStart.classList.add('show');
+    var loader = startLoader();
 
     Promise.resolve(api.start_host(title, roles, hostRole, publicUrl, mode)).then(function(res){
-      hostStart.classList.remove('show');
-      hostBtn.disabled = false;
-      handleHostResult(res || {});
+      // Keep the loader visible for a minimum beat so it never flickers on a fast
+      // start, then reveal the running page (or drop back to the form on error).
+      loader.finish(function(){
+        hostBtn.disabled = false;
+        if (res && (res.error || !res.ok)) {
+          showView('host');
+          handleHostResult(res || {});   // paints hostErr in the form view
+          return;
+        }
+        handleHostResult(res || {});
+        showView('hostrun');
+      });
     }).catch(function(err){
-      hostStart.classList.remove('show');
-      hostBtn.disabled = false;
-      hostErr.textContent = 'Couldn’t start the broker: ' + (err && err.message ? err.message : String(err));
-      hostErr.classList.add('show');
+      loader.finish(function(){
+        hostBtn.disabled = false;
+        showView('host');
+        hostErr.textContent = 'Couldn’t start the broker: ' + (err && err.message ? err.message : String(err));
+        hostErr.classList.add('show');
+      });
     });
   });
+
+  // Full-page loader with rotating status lines and a minimum visible time, so a
+  // fast start still gets a satisfying beat instead of a flicker. `finish(cb)`
+  // runs `cb` once BOTH the work resolves and the minimum time has elapsed.
+  var LOAD_MIN_MS = 1200;
+  var LOAD_STEPS = ['Starting broker…', 'Minting invite links…', 'Almost ready…'];
+  function startLoader(){
+    var start = Date.now();
+    var i = 0;
+    loadMsg.textContent = LOAD_STEPS[0];
+    showView('loading');
+    var timer = setInterval(function(){
+      i = Math.min(i + 1, LOAD_STEPS.length - 1);
+      loadMsg.textContent = LOAD_STEPS[i];
+    }, 500);
+    return {
+      finish: function(cb){
+        clearInterval(timer);
+        var waited = Date.now() - start;
+        var rest = Math.max(0, LOAD_MIN_MS - waited);
+        setTimeout(cb, rest);
+      }
+    };
+  }
 
   function handleHostResult(res){
     if (res.error || !res.ok) {
