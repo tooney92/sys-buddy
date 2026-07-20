@@ -135,18 +135,28 @@ class GuiApi:
         except Exception as exc:
             return {"error": str(exc)}
 
-    def start_host(self, task_id: str, roles: list, title: str = "", public_url: str = "",
-                   trusted: bool = False, mode: str = "contract") -> dict:
-        """Host flow: start the in-process broker (once), create the task, and mint an
-        invite link per role. ``public_url`` (optional) is the host's tunnel origin
-        (e.g. ngrok) so a buddy on another machine can reach the broker — the invite
-        links embed it. Blank = same-machine (loopback). ``trusted`` marks it a private
-        overlay (Tailscale/WireGuard) so an http origin is allowed (the network already
-        encrypts). Returns the host_setup dict, or an error the UI shows."""
+    def start_host(self, title: str, roles: list, host_role: str = "", public_url: str = "",
+                   mode: str = "contract") -> dict:
+        """Host flow: start the in-process broker (once), create the task (id derived
+        from ``title``), mint invite links for the buddy role(s), and — when
+        ``host_role`` is given — seat the host's OWN agent on that role and auto-wire
+        their Claude. ``public_url`` (optional) is the host's origin so a buddy on
+        another machine can reach the broker — the invite links embed it. Blank =
+        same machine (loopback). Both remote paths present an https origin: a public
+        tunnel (``ngrok http 8787``) or a private network proxy (``tailscale serve
+        8787``), so the GUI requires https for any remote origin. Returns the
+        host_setup dict (with ``host_seat`` when host_role is set), or an error."""
         try:
+            title = (title or "").strip()
+            if not title:
+                return {"ok": False, "error": "Give the task a title first."}
             base = (public_url or "").strip().rstrip("/")
-            if base and not trusted and not base.lower().startswith("https://"):
-                return {"ok": False, "error": "Public URL must be https:// — or tick 'private network' if it's a Tailscale/WireGuard overlay. Leave blank for same-machine."}
+            # ngrok and `tailscale serve` both hand you an https origin; raw-http private
+            # overlays are a CLI-only power move (`serve --trusted-network`). So the GUI
+            # simply requires https for anything beyond this machine — tokens never ride
+            # a cleartext origin.
+            if base and not base.lower().startswith("https://"):
+                return {"ok": False, "error": "Public URL must be an https:// address — from `ngrok http 8787` or `tailscale serve 8787`. Leave it blank if your buddy is on this same computer."}
             if not _ensure_broker():
                 return {"ok": False, "error": f"broker did not come up on {BASE_URL} — is port {BROKER_PORT} free?"}
             if base:
@@ -155,17 +165,58 @@ class GuiApi:
                 from .config import get_config
                 if get_config().agent_token_ttl is None:
                     get_config().agent_token_ttl = 24 * 3600
-            return onboarding.host_setup(task_id, list(roles), base or BASE_URL, title=title or None, mode=mode)
+            host_role = (host_role or "").strip() or None
+            res = onboarding.host_setup(
+                None, list(roles), base or BASE_URL, title=title, mode=mode, host_role=host_role
+            )
+            # The host is on the same box as the broker, so try to auto-register their
+            # own seat's MCP (same as the buddy flow). The command is shown regardless,
+            # since the GUI's Claude config/scope may differ from the host's terminal.
+            seat = res.get("host_seat") if isinstance(res, dict) else None
+            if seat:
+                cfg = onboarding.configure_claude(seat["mcp_url"], seat["agent_token"])
+                seat["config_ok"] = cfg["ok"]
+                seat["config_detail"] = cfg["detail"]
+                seat["config_command"] = cfg["command"]
+            return res
         except Exception as exc:
             return {"error": str(exc)}
 
     def open_dashboard(self, url: str) -> dict:
         """Open the live read-only dashboard in its own native window (a separate
-        top-level window, so the broker's frame-ancestors CSP doesn't block it)."""
+        top-level window, so the broker's frame-ancestors CSP doesn't block it).
+
+        The window gets a MINIMAL bridge (``_DashApi``, only ``new_task``) so the
+        host can jump back to the Start-a-task screen from the dashboard — the
+        dashboard stays read-only for data (that all flows through the broker's
+        read-only ``/api``); this bridge only navigates the local app UI."""
         try:
-            webview.create_window("sys-buddy · dashboard", url=url, width=1200, height=860)
+            webview.create_window(
+                "sys-buddy · dashboard", url=url, js_api=_DashApi(), width=1200, height=860
+            )
             return {"ok": True}
         except Exception as exc:
+            return {"error": str(exc)}
+
+
+class _DashApi:
+    """Tiny bridge exposed to the dashboard window. Deliberately NOT ``GuiApi`` —
+    the dashboard loads from the broker origin (possibly a remote tunnel), so it must
+    not reach start_host/pairing. Its one method just deep-links the local app back to
+    the host screen."""
+
+    def new_task(self) -> dict:
+        """Bring the main app window to the 'Start a task' screen (host add-task
+        deep-link). Never raises across the bridge."""
+        try:
+            main = webview.windows[0]  # the GuiApi window, created first in run_gui
+            main.evaluate_js("window.__sbGotoHost && window.__sbGotoHost()")
+            try:
+                main.restore()  # un-minimise / bring forward, best-effort per platform
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001
             return {"error": str(exc)}
 
 

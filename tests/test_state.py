@@ -65,11 +65,61 @@ def test_propose_valid_contract_moves_to_proposed(conn):
 
 
 def test_propose_invalid_contract_raises_with_errors(conn):
+    # staging_url strictness is remote-only, so exercise the https rule in remote mode.
+    from sys_buddy.config import Config, get_config, set_config
+    set_config(Config(mode="remote", db_path=get_config().db_path))
     ag = _agents(conn)
+    for ident in ag.values():  # clear the remote pre-flight gate first
+        conn.execute("UPDATE agents SET ready = 1 WHERE id = ?", (ident.agent_id,))
+    conn.commit()
     bad = _valid_spec(url="http://insecure.example.com")  # non-https
     with pytest.raises(ValueError, match="https"):
         state.propose_contract(conn, ag["backend"], bad)
     assert _task_state(conn) == state.OPEN  # no transition on invalid
+
+
+def test_propose_allows_localhost_url_locally(conn):
+    # Local mode (the conftest default): the frontend just hits the backend on the
+    # same box, so http/localhost is a valid staging_url — no deploy needed.
+    ag = _agents(conn)
+    result = state.propose_contract(
+        conn, ag["backend"], _valid_spec(url="http://localhost:3000")
+    )
+    assert result["state"] == state.CONTRACT_PROPOSED
+
+
+def test_propose_blocked_until_all_pass_preflight_remote(conn):
+    from sys_buddy.config import Config, get_config, set_config
+    set_config(Config(mode="remote", db_path=get_config().db_path))
+    ag = _agents(conn)
+    # Only the backend has passed pre-flight; the frontend hasn't.
+    conn.execute("UPDATE agents SET ready = 1 WHERE id = ?", (ag["backend"].agent_id,))
+    conn.commit()
+    with pytest.raises(ValueError, match="pre-flight"):
+        state.propose_contract(conn, ag["backend"], _valid_spec())
+    # Once both pass, it goes through.
+    conn.execute("UPDATE agents SET ready = 1 WHERE id = ?", (ag["frontend"].agent_id,))
+    conn.commit()
+    result = state.propose_contract(conn, ag["backend"], _valid_spec())
+    assert result["state"] == state.CONTRACT_PROPOSED
+
+
+def test_reopen_negotiations_drops_locked_task_back(conn):
+    ag = _agents(conn)
+    _to_backend_live(conn, ag)  # propose → lock → deploy (backend_live)
+    assert _task_state(conn) == state.BACKEND_LIVE
+    result = state.reopen_negotiations(conn, ag["frontend"], "need a new field on /login")
+    assert result["state"] == state.CONTRACT_PROPOSED
+    assert _task_state(conn) == state.CONTRACT_PROPOSED
+    # The previously-locked contract still serves as the working blueprint.
+    assert state.get_contract(conn, "signin")["exists"] is True
+
+
+def test_reopen_negotiations_rejected_before_any_lock(conn):
+    ag = _agents(conn)
+    state.propose_contract(conn, ag["backend"], _valid_spec())  # proposed, not locked
+    with pytest.raises(ValueError, match="nothing to reopen"):
+        state.reopen_negotiations(conn, ag["frontend"], "too soon")
 
 
 def test_reproposal_increments_version_and_reopens(conn):
@@ -151,7 +201,7 @@ def test_get_contract_absent_before_lock(conn):
 def test_deploy_rejected_with_unsigned_proposal(conn):
     ag = _agents(conn, roles=("backend", "frontend"))
     state.propose_contract(conn, ag["backend"], _valid_spec())  # proposed, not locked
-    with pytest.raises(ValueError, match="cannot deploy"):
+    with pytest.raises(ValueError, match="cannot report 'ready'"):
         state.report_status(conn, ag["backend"], state.STATUS_DEPLOYED, "go")
 
 
@@ -172,11 +222,12 @@ def test_deploy_rejected_mid_renegotiation(conn):
         state.report_status(conn, ag["backend"], state.STATUS_DEPLOYED, "sneaky redeploy")
 
 
-def test_only_backend_can_deploy(conn):
+def test_only_producer_can_report_ready(conn):
+    # backend PROPOSES the contract → backend is the producer (model B); frontend can't report ready.
     ag = _agents(conn, roles=("backend", "frontend"))
     state.propose_contract(conn, ag["backend"], _valid_spec())
     _lock_all(conn, ag, version=1)
-    with pytest.raises(ValueError, match="only the 'backend'"):
+    with pytest.raises(ValueError, match="proposed the contract"):
         state.report_status(conn, ag["frontend"], state.STATUS_DEPLOYED, "sneaky")
 
 
@@ -194,14 +245,15 @@ def test_test_rejected_before_backend_live(conn):
     ag = _agents(conn, roles=("backend", "frontend"))
     state.propose_contract(conn, ag["backend"], _valid_spec())
     _lock_all(conn, ag, version=1)  # contract_locked, not yet live
-    with pytest.raises(ValueError, match="before the backend is live"):
+    with pytest.raises(ValueError, match="before the producer is ready"):
         state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, "green")
 
 
-def test_only_non_backend_can_test(conn):
+def test_producer_cannot_report_checks(conn):
+    # backend proposed → backend is the producer, so it can't report its own checks.
     ag = _agents(conn, roles=("backend", "frontend"))
     _to_backend_live(conn, ag)
-    with pytest.raises(ValueError, match="may not report test results"):
+    with pytest.raises(ValueError, match="doesn't report checks"):
         state.report_status(conn, ag["backend"], state.STATUS_TEST_PASSED, "green")
 
 
@@ -292,3 +344,93 @@ def test_transition_event_shape_for_times_map(conn):
         "SELECT detail_json FROM events WHERE kind='transition' ORDER BY id LIMIT 1"
     ).fetchone()
     assert json.loads(row["detail_json"]) == {"from": "open", "to": "contract_proposed"}
+
+
+# --- task-agnostic status aliases -------------------------------------------
+# 'ready'/'checked'/'blocked' are pure aliases of 'deployed'/'test_passed'/
+# 'test_failed'; each must produce identical behavior to the word it stands for.
+def _to_locked(conn, ag):
+    """Drive a task through propose → lock (all) so it is ready to deploy."""
+    state.propose_contract(conn, ag["backend"], _valid_spec())
+    _lock_all(conn, ag, version=1)
+
+
+def test_ready_is_alias_of_deployed(conn):
+    ag = _agents(conn, roles=("backend", "frontend"))
+    _to_locked(conn, ag)
+    r = state.report_status(conn, ag["backend"], state.STATUS_READY, "part ready")
+    assert r == {"status": state.STATUS_DEPLOYED, "state": "backend_live", "strikes": 0}
+    assert _task_state(conn) == "backend_live"
+
+
+def test_checked_is_alias_of_test_passed(conn):
+    ag = _agents(conn, roles=("backend", "frontend"))
+    _to_backend_live(conn, ag)
+    r = state.report_status(conn, ag["frontend"], state.STATUS_CHECKED, "works")
+    assert r == {"status": state.STATUS_TEST_PASSED, "state": "testing", "strikes": 0}
+    assert _strikes(conn) == 0
+
+
+def test_blocked_is_alias_of_test_failed_and_strikes(conn):
+    ag = _agents(conn, roles=("backend", "frontend"))
+    _to_backend_live(conn, ag)
+    r = state.report_status(conn, ag["frontend"], state.STATUS_BLOCKED, "broken")
+    assert r == {"status": state.STATUS_TEST_FAILED, "state": "testing", "strikes": 1}
+    assert _strikes(conn) == 1  # same strike increment as 'test_failed'
+
+
+def test_blocked_three_times_forces_stuck_like_test_failed(conn):
+    ag = _agents(conn, roles=("backend", "frontend"))
+    _to_backend_live(conn, ag)
+    for _ in range(3):
+        state.report_status(conn, ag["frontend"], state.STATUS_BLOCKED, "red")
+    assert _task_state(conn) == "stuck"
+    assert _strikes(conn) == 3
+
+
+def test_new_word_and_old_word_reach_identical_state(conn):
+    """A task driven entirely with ready/checked ends where deployed/test_passed would."""
+    ag = _agents(conn, roles=("backend", "frontend"))
+    _to_locked(conn, ag)
+    state.report_status(conn, ag["backend"], state.STATUS_READY, "ready")
+    state.report_status(conn, ag["frontend"], state.STATUS_CHECKED, "works")
+    r = state.report_status(conn, ag["frontend"], state.STATUS_VERIFIED, "done")
+    assert r["status"] == state.STATUS_VERIFIED
+    assert _task_state(conn) == "verified"
+
+
+def test_unknown_status_message_lists_new_vocabulary(conn):
+    ag = _agents(conn, roles=("backend", "frontend"))
+    _to_locked(conn, ag)
+    with pytest.raises(ValueError) as exc:
+        state.report_status(conn, ag["backend"], "bogus", "x")
+    msg = str(exc.value)
+    for word in ("ready", "checked", "blocked", "verified", "stuck"):
+        assert word in msg
+
+
+# --- model B: producer = whoever proposes (no hardcoded 'backend') ----------
+def test_non_backend_producer_full_flow(conn):
+    """A contract with NO 'backend' role: the role that PROPOSES is the producer.
+    Here frontend proposes → frontend reports `ready`; mobile (the consumer) checks."""
+    ag = _agents(conn, roles=("frontend", "mobile"))
+    # frontend proposes → becomes the producer
+    state.propose_contract(conn, ag["frontend"], _valid_spec())
+    _lock_all(conn, ag, version=1)
+
+    # the NON-proposer (mobile) may not report ready
+    with pytest.raises(ValueError, match="proposed the contract"):
+        state.report_status(conn, ag["mobile"], state.STATUS_READY, "nope")
+
+    # the producer (frontend) reports ready → backend_live
+    r = state.report_status(conn, ag["frontend"], state.STATUS_READY, "my part is up")
+    assert r["state"] == state.BACKEND_LIVE
+
+    # the producer can't check its own work; the consumer (mobile) can
+    with pytest.raises(ValueError, match="doesn't report checks"):
+        state.report_status(conn, ag["frontend"], state.STATUS_CHECKED, "self-check")
+    r = state.report_status(conn, ag["mobile"], state.STATUS_CHECKED, "works against frontend")
+    assert r["state"] == state.TESTING
+
+    r = state.report_status(conn, ag["mobile"], state.STATUS_VERIFIED, "all good")
+    assert r["state"] == state.VERIFIED

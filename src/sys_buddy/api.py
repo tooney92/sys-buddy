@@ -224,6 +224,7 @@ def _contract_for(conn, task_id: str) -> dict:
             "locked": locked,
             "signed": [{"role": s["role"], "time": _hhmm(s["signed_at"])} for s in signed],
             "endpoints": spec.get("endpoints", []),
+            "staging_url": spec.get("staging_url"),
         }
 
     return {
@@ -313,14 +314,31 @@ def _events_for(conn, task_id: str, filter: str = "all") -> list[dict]:
 def _agents_for(conn, task_id: str) -> list[dict]:
     """Live agents on the task (revoked_at IS NULL), with their pre-flight readiness.
 
-    ``ready`` is surfaced as a bool so the UI can padlock any agent that hasn't yet
-    passed ``submit_readiness`` (its action tools are still locked by the broker).
+    ``ready`` is a bool so the UI can padlock any agent that hasn't yet passed
+    ``submit_readiness``. ``readiness_status`` (pending/passed/failed) distinguishes a
+    FAILED attempt from a not-yet-attempted one — ``ready`` alone can't — and
+    ``readiness_report`` carries the per-question results (parsed) so the human can see
+    WHY it failed and coach the agent to retry.
     """
     rows = conn.execute(
-        "SELECT name, role, ready FROM agents WHERE task_id = ? AND revoked_at IS NULL ORDER BY id",
+        "SELECT name, role, ready, readiness_status, readiness_report "
+        "FROM agents WHERE task_id = ? AND revoked_at IS NULL ORDER BY id",
         (task_id,),
     ).fetchall()
-    return [{"name": r["name"], "role": r["role"], "ready": bool(r["ready"])} for r in rows]
+    out = []
+    for r in rows:
+        try:
+            report = json.loads(r["readiness_report"]) if r["readiness_report"] else None
+        except (ValueError, TypeError):
+            report = None
+        out.append({
+            "name": r["name"],
+            "role": r["role"],
+            "ready": bool(r["ready"]),
+            "readiness_status": r["readiness_status"] or "pending",
+            "readiness_report": report,
+        })
+    return out
 
 
 def _task_detail(conn, task_id: str) -> dict | None:

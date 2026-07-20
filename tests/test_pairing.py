@@ -29,22 +29,19 @@ def test_create_task_inserts_open_task_and_event(conn):
 
 
 def test_create_task_rejects_duplicate_id(conn):
-    admin.create_task("signin", title="Sign in", roles=["backend"])
+    admin.create_task("signin", title="Sign in", roles=["backend", "frontend"])
     try:
-        admin.create_task("signin", title="Again", roles=["backend"])
+        admin.create_task("signin", title="Again", roles=["backend", "frontend"])
         assert False, "expected duplicate id to be rejected"
     except ValueError as e:
         assert "already exists" in str(e)
 
 
-def test_create_task_requires_a_backend_role(conn):
-    """A task with no 'backend' role would deadlock (can lock but never deploy),
-    so it's rejected at creation (regression: review #3)."""
-    try:
-        admin.create_task("x", title="No deployer", roles=["api", "web"])
-        assert False, "expected missing-backend-role rejection"
-    except ValueError as e:
-        assert "backend" in str(e)
+def test_create_task_contract_no_longer_requires_backend(conn):
+    """Model B: the producer is whoever proposes the contract, so a contract task
+    needs NO role named 'backend' — any 2+ roles are fine."""
+    t = admin.create_task("x", title="No deployer", roles=["api", "web"])
+    assert t["roles"] == ["api", "web"]
 
 
 # --- mint_invite ------------------------------------------------------------
@@ -252,8 +249,8 @@ def test_close_unknown_task_is_rejected(conn):
 
 # --- list_tasks -------------------------------------------------------------
 def test_list_tasks_returns_id_state_title(conn):
-    admin.create_task("signin", title="Sign in", roles=["backend"])
-    admin.create_task("search", title="Search", roles=["backend"])
+    admin.create_task("signin", title="Sign in", roles=["backend", "frontend"])
+    admin.create_task("search", title="Search", roles=["backend", "frontend"])
     rows = admin.list_tasks()
     ids = {r["id"] for r in rows}
     assert ids == {"signin", "search"}

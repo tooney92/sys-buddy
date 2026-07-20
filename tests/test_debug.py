@@ -44,9 +44,13 @@ def test_debug_task_needs_no_backend_role(conn):
     assert row["mode"] == "debug"
 
 
-def test_contract_task_still_requires_backend(conn):
-    with pytest.raises(ValueError, match="backend"):
+def test_contract_task_requires_two_roles_not_backend(conn):
+    # Model B: no 'backend' requirement — but a contract still needs >= 2 roles.
+    with pytest.raises(ValueError, match="at least two roles"):
         admin.create_task("x", title="x", roles=["web"])
+    # a 2-role contract with NO backend role is valid now
+    t = admin.create_task("ok", title="ok", roles=["web", "api"])
+    assert t["roles"] == ["web", "api"]
 
 
 # --- resolve is the debug terminal ------------------------------------------

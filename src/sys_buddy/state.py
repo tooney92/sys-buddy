@@ -25,7 +25,7 @@ import json
 import sqlite3
 import time
 
-from . import contracts, service, slack
+from . import config, contracts, service, slack
 from .identity import Identity
 
 # --- states -----------------------------------------------------------------
@@ -52,11 +52,23 @@ STATUS_RESOLVED = "resolved"        # debug task: the issue is fixed (terminal)
 
 TEST_STATUSES = frozenset({STATUS_TEST_PASSED, STATUS_TEST_FAILED})
 
+# Task-agnostic vocabulary: the canonical words agents should reach for. Each is a
+# pure ALIAS of an existing API/deploy-shaped status — same transition, same message,
+# same strike behavior — so nothing downstream needs to know these words exist.
+STATUS_READY = "ready"       # producer: my part is ready for the peer to build on
+STATUS_CHECKED = "checked"    # consumer: it works against the producer's side
+STATUS_BLOCKED = "blocked"    # consumer: it doesn't work (a strike)
+_STATUS_ALIASES = {
+    STATUS_READY: STATUS_DEPLOYED,
+    STATUS_CHECKED: STATUS_TEST_PASSED,
+    STATUS_BLOCKED: STATUS_TEST_FAILED,
+}
+
 MAX_STRIKES = 3  # SPEC §8: at 3 the broker force-transitions to stuck.
 
-# The role that owns deploys. Only this role may report `deployed`; only NON-this
-# roles may report test results (SPEC §7 role-scoped permissions).
-BACKEND_ROLE = "backend"
+# The producer is NOT a hardcoded role (model B): it is whichever role proposed the
+# current locked contract — see ``_producer_role``. Only the producer may report
+# `ready`; only the OTHER (consuming) roles may report checks.
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +159,20 @@ def _current_locked(conn, task_id: str) -> dict | None:
     }
 
 
+def _producer_role(conn, task_id: str) -> str | None:
+    """The PRODUCER role for a task — model B: whoever proposed the current locked
+    contract. That role is the one others build against: it reports ``ready``, and it
+    is the only role that may NOT report checks. ``None`` when no contract is locked
+    yet (so there is no producer to speak of). Nothing is hardcoded to 'backend'.
+    """
+    row = conn.execute(
+        "SELECT a.role AS role FROM contracts c JOIN agents a ON a.id = c.proposed_by "
+        "WHERE c.task_id = ? AND c.status = 'locked' ORDER BY c.version DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row["role"] if row else None
+
+
 # --------------------------------------------------------------------------- #
 # contract lifecycle
 # --------------------------------------------------------------------------- #
@@ -158,13 +184,34 @@ def propose_contract(conn, identity: Identity, spec: dict) -> dict:
     back to ``contract_proposed`` (SPEC §5 rule 1). Terminal tasks cannot be
     reopened without a human.
     """
-    errors = contracts.validate_spec(spec)
+    # staging_url strictness is mode-aware: remote peers are on another machine (real
+    # https domain + SSRF guard); locally the frontend just hits the backend on
+    # localhost, so any non-empty URL is fine. See contracts._validate_staging_url.
+    errors = contracts.validate_spec(spec, is_remote=config.get_config().is_remote)
     if errors:
         # Raise with joined errors so the agent gets every fix in one shot.
         raise ValueError("invalid contract:\n- " + "\n- ".join(errors))
 
     current = _state(conn, identity.task_id)
     _reject_if_terminal(current)
+
+    # Both parties must clear pre-flight before ANYONE can propose (owner rule): a
+    # contract negotiated with an agent that never proved it understands the protocol
+    # is worthless. Remote-only — local self-declared identities don't run pre-flight
+    # (the middleware readiness gate is remote-only too), so gating there would brick
+    # the whole local contract flow.
+    if config.get_config().is_remote:
+        not_ready = conn.execute(
+            "SELECT role FROM agents WHERE task_id = ? AND revoked_at IS NULL AND ready = 0 "
+            "ORDER BY role",
+            (identity.task_id,),
+        ).fetchall()
+        if not_ready:
+            waiting = ", ".join(r["role"] for r in not_ready)
+            raise ValueError(
+                "all parties must pass pre-flight before a contract can be proposed; "
+                f"waiting on: {waiting}"
+            )
 
     spec_json = json.dumps(spec)
     service.assert_content_size(spec_json, "contract spec")
@@ -191,6 +238,18 @@ def propose_contract(conn, identity: Identity, spec: dict) -> dict:
         raise ValueError("could not allocate a contract version — please retry")
     state = _transition(conn, identity.task_id, CONTRACT_PROPOSED)
     conn.commit()
+    # Tell the peer directly — a transition event alone is dashboard-only and would
+    # never reach the other agent's wait_for_message queue. This is what makes the
+    # negotiation actually flow: the peer hears "there's a proposal to assess."
+    n_endpoints = len(spec.get("endpoints", []))
+    service.post_message(
+        conn,
+        identity,
+        "contract_proposal",
+        f"Proposed contract v{version} ({n_endpoints} endpoint"
+        f"{'' if n_endpoints == 1 else 's'}). Review it with get_contract, then sign with "
+        f"lock_contract — or send a message to request changes before you sign.",
+    )
     return {"version": version, "state": state}
 
 
@@ -240,6 +299,14 @@ def lock_contract(conn, identity: Identity, version: int) -> dict:
     if remaining:
         # Partial signature is a normal, expected outcome — not an error.
         conn.commit()
+        # Let the peer know a signature landed and the ball is in their court.
+        service.post_message(
+            conn,
+            identity,
+            "contract_lock",
+            f"Signed contract v{version}. Waiting on {', '.join(remaining)} to sign before "
+            f"it locks.",
+        )
         return {
             "locked": False,
             "version": version,
@@ -267,7 +334,51 @@ def lock_contract(conn, identity: Identity, version: int) -> dict:
         f"[{identity.task_id}] Contract v{version} locked — signed by {', '.join(sorted(signed_set))}",
     )
     conn.commit()
+    service.post_message(
+        conn,
+        identity,
+        "contract_lock",
+        f"Contract v{version} is LOCKED — signed by all parties. This is the blueprint to "
+        f"build against; get the staging_url from get_contract.",
+    )
     return {"locked": True, "version": version, "signed": sorted(signed_set), "state": state}
+
+
+def reopen_negotiations(conn, identity: Identity, reason: str) -> dict:
+    """Drop a locked-or-later task back to ``contract_proposed`` (negotiations) so a
+    new contract version can be proposed and re-signed.
+
+    Non-destructive: the currently-locked contract keeps serving via ``get_contract``
+    until a NEW version locks — nothing is deleted. Either party may call it (the
+    "agreement" happens in chat first; a one-sided reopen is harmless — the peer just
+    won't propose/sign anything new). Rejected on terminal tasks, and on tasks that
+    haven't locked a contract yet (there's nothing to renegotiate — just keep talking
+    or propose a first version).
+    """
+    current = _state(conn, identity.task_id)
+    _reject_if_terminal(current)
+
+    if _current_locked(conn, identity.task_id) is None:
+        raise ValueError(
+            "nothing to reopen — no contract has locked yet. Keep negotiating, or "
+            "propose a first version with propose_contract."
+        )
+    if current in (OPEN, CONTRACT_PROPOSED):
+        raise ValueError(f"already in negotiations (state '{current}') — nothing to reopen")
+
+    detail = (reason or "").strip() or "(no reason given)"
+    service.assert_content_size(detail, "reopen reason")
+    state = _transition(conn, identity.task_id, CONTRACT_PROPOSED)
+    _event(conn, identity.task_id, "reopen", {"from": current, "reason": detail})
+    conn.commit()
+    service.post_message(
+        conn,
+        identity,
+        "renegotiation",
+        f"Reopened negotiations (was {current}): {detail}. The last locked contract still "
+        f"stands until a new version is proposed and re-signed.",
+    )
+    return {"state": state, "from": current, "reason": detail}
 
 
 def get_contract(conn, task_id: str) -> dict:
@@ -300,12 +411,18 @@ def report_status(conn, identity: Identity, status: str, detail: str) -> dict:
     agent-readable reason on any workflow or permission violation.
 
     Role-scoped permissions and state gates are enforced here, in code:
-      * ``deployed``      — backend role only; needs a locked contract; → backend_live
-      * ``test_passed/failed`` — non-backend roles only; only after backend_live
+      * ``ready``         — producer role only; needs a locked contract; → backend_live
+      * ``checked/blocked`` — consumer roles only; only after the producer is ready
       * ``verified``      — → terminal verified
       * ``stuck``         — → terminal stuck
+    The old API/deploy-shaped words (``deployed``/``test_passed``/``test_failed``) are
+    still accepted as aliases of ``ready``/``checked``/``blocked``.
     """
     service.assert_content_size(detail, "status detail")
+
+    # Task-agnostic words funnel into the existing paths: normalize before any
+    # dispatch or mode gate inspects the status, so all downstream logic is unchanged.
+    status = _STATUS_ALIASES.get(status, status)
 
     # Mode gate: debug tasks have a single 'resolved' status; contract tasks have
     # the full deploy/test/verified vocabulary. Keep the two vocabularies disjoint.
@@ -332,37 +449,42 @@ def report_status(conn, identity: Identity, status: str, detail: str) -> dict:
         return _report_resolved(conn, identity, detail)
     raise ValueError(
         f"unknown status {status!r}; expected one of: "
-        f"{STATUS_DEPLOYED}, {STATUS_TEST_PASSED}, {STATUS_TEST_FAILED}, "
+        f"{STATUS_READY}, {STATUS_CHECKED}, {STATUS_BLOCKED}, "
         f"{STATUS_VERIFIED}, {STATUS_STUCK}"
     )
 
 
 def _report_deployed(conn, identity: Identity, detail: str) -> dict:
-    """Backend announces the API is live. Gated on: caller is backend, task not
-    terminal, and a locked contract exists (SPEC §5 rule 3 — no contract, no
-    deploy). Resets strikes when this deploy carries a *newer* locked contract
-    version than the last one (SPEC §8 — a genuine new attempt, not the same loop).
+    """The producer signals its part is ready for the other side to build on. Gated
+    on: caller IS the producer (model B: the role that proposed the locked contract),
+    task not terminal, and a locked contract exists (SPEC §5 rule 3 — no contract, no
+    ready). Resets strikes when this carries a *newer* locked contract version than
+    the last one (SPEC §8 — a genuine new attempt, not the same loop).
     """
-    if identity.role != BACKEND_ROLE:
-        raise ValueError(
-            f"only the '{BACKEND_ROLE}' role may report 'deployed' (you are '{identity.role}')"
-        )
     state = _state(conn, identity.task_id)
     _reject_if_terminal(state)
 
-    # A proposal in flight means an unsigned newer version exists. Deploying now
-    # would advance the task on a contract that hasn't been re-signed by all roles
-    # (SPEC §5 rule 6). Even though an older version is still 'locked', refuse until
-    # the pending proposal is locked.
+    # A proposal in flight means an unsigned newer version exists. Advancing now would
+    # move the task on a contract that hasn't been re-signed by all roles (SPEC §5
+    # rule 6). Even though an older version is still 'locked', refuse until the pending
+    # proposal is locked.
     if state == CONTRACT_PROPOSED:
         raise ValueError(
-            "cannot deploy while a contract proposal is awaiting signatures; "
+            "cannot report 'ready' while a contract proposal is awaiting signatures; "
             "lock the current version first"
         )
 
     contract = _current_locked(conn, identity.task_id)
     if contract is None:
-        raise ValueError("cannot deploy: no locked contract exists yet")
+        raise ValueError("cannot report 'ready': no locked contract exists yet")
+
+    # Only the producer — the role that PROPOSED this locked contract — may report it.
+    producer = _producer_role(conn, identity.task_id)
+    if identity.role != producer:
+        raise ValueError(
+            f"only the role that proposed the contract may report 'ready' "
+            f"(the producer is '{producer}', you are '{identity.role}')"
+        )
 
     # Strike reset: if the current locked contract was locked *after* the previous
     # deploy, the backend is deploying a renegotiated version — a fresh attempt, so
@@ -391,21 +513,24 @@ def _report_deployed(conn, identity: Identity, detail: str) -> dict:
 
 
 def _report_test(conn, identity: Identity, status: str, detail: str) -> dict:
-    """A client role reports an e2e result. Gated on: caller is NOT backend, and
-    the backend is already live (SPEC §5 rule 4 — no tests before backend_live).
-    A failure is a broker-counted strike; the third one pulls the stuck cord.
+    """A consuming role reports a check result. Gated on: caller is NOT the producer
+    (model B: the role that proposed the locked contract runs no checks on its own
+    work), and the producer is already ready (SPEC §5 rule 4 — no checks before
+    backend_live). A failure is a broker-counted strike; the third pulls the stuck cord.
     """
-    if identity.role == BACKEND_ROLE:
-        raise ValueError(
-            f"the '{BACKEND_ROLE}' role may not report test results; "
-            f"tests are run by client roles"
-        )
     state = _state(conn, identity.task_id)
     _reject_if_terminal(state)
     if state not in (BACKEND_LIVE, TESTING):
         raise ValueError(
-            f"cannot run tests before the backend is live "
+            f"cannot report a check before the producer is ready "
             f"(task is '{state}', need '{BACKEND_LIVE}')"
+        )
+    # The producer doesn't check its own work; the consuming role(s) do.
+    producer = _producer_role(conn, identity.task_id)
+    if identity.role == producer:
+        raise ValueError(
+            f"the producer ('{producer}') doesn't report checks on its own work; "
+            f"the consuming role(s) do"
         )
 
     # First test after a deploy advances the task into the testing phase.

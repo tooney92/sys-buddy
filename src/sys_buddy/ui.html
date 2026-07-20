@@ -64,10 +64,13 @@ button{font-family:inherit}
 
 /* ---------- design maps (ported from the prototype Component) ---------- */
 var SK={open:'open',contract_proposed:'proposed',contract_locked:'locked',backend_live:'live',testing:'testing',verified:'verified',stuck:'stuck'};
-var SLAB={open:'open',contract_proposed:'contract proposed',contract_locked:'contract locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
+var SLAB={open:'open',contract_proposed:'negotiations',contract_locked:'contract locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
 var ORDER={open:0,contract_proposed:1,contract_locked:2,backend_live:3,testing:4,verified:5};
 var RL={backend:{i:'B',c:'var(--role-backend)',label:'backend'},frontend:{i:'F',c:'var(--role-frontend)',label:'frontend'},mobile:{i:'M',c:'var(--role-mobile)',label:'mobile'}};
-var STEPS=[['open','open'],['contract_proposed','proposed'],['contract_locked','locked'],['backend_live','backend live'],['testing','testing'],['verified','verified']];
+// The 'preflight' node has no matching task state — it's a sub-phase of 'open',
+// driven by per-agent readiness (see genSteps). ORDER above stays keyed on the REAL
+// task states; genSteps maps real→display indices around the inserted node.
+var STEPS=[['open','open'],['preflight','pre-flight assessments'],['contract_proposed','negotiations'],['contract_locked','locked'],['backend_live','backend live'],['testing','testing'],['verified','verified']];
 var MAX_STRIKES=3;
 var MONO="'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace";
 
@@ -76,7 +79,7 @@ function stateChip(s){ var k=SK[s]||'open'; return {label:SLAB[s]||s, bg:'var(--
 function methodChip(m){ var k=({GET:'proposed',POST:'live',PUT:'locked',PATCH:'testing',DELETE:'stuck'})[m]||'open'; return {bg:'var(--st-'+k+'-bg)', fg:'var(--st-'+k+'-fg)'}; }
 function typeChip(type,pass){
   var map={question:['question','open'],answer:['answer','proposed'],status_update:['status','open'],
-    contract_proposal:['contract proposal','locked'],contract_lock:['contract lock','locked'],
+    contract_proposal:['contract proposal','locked'],contract_lock:['contract lock','locked'],renegotiation:['renegotiation','proposed'],
     deploy_confirmed:['deploy confirmed','live'],verified:['verified','verified'],stuck:['stuck','stuck']};
   var label,key;
   if(type==='test_result'){ label=pass?'test · pass':'test · fail'; key=pass?'verified':'stuck'; }
@@ -97,7 +100,8 @@ var IC={
   lockSmall:'<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg>',
   doc:'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>',
   sun:svg(16,'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>'),
-  moon:svg(16,'<path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>')
+  moon:svg(16,'<path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>'),
+  link:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7l1.5-1.5"/></svg>'
 };
 function dividerIcon(kind){
   if(kind==='lock') return svg(13,'<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>');
@@ -182,30 +186,55 @@ function filterStyle(active){ return 'padding:3px 10px;border-radius:7px;border:
 function vBtnStyle(active){ return 'padding:4px 10px;border-radius:7px;border:none;cursor:pointer;font-size:12px;font-weight:600;font-family:'+MONO+';display:flex;align-items:center;gap:4px;background:'+(active?'var(--surface)':'transparent')+';color:'+(active?'var(--text)':'var(--text-2)')+';box-shadow:'+(active?'var(--shadow)':'none'); }
 
 /* ---------- stepper ---------- */
-function genSteps(stateName, times){
+/* Pre-flight is done once every live agent has passed (readiness_status), with a
+   fallback to the legacy `ready` bool. No agents yet → not done. */
+function preflightPassed(agents){
+  if(!agents||!agents.length) return false;
+  return agents.every(function(a){ return a.readiness_status==='passed' || a.ready; });
+}
+
+function genSteps(stateName, times, agents){
   times=times||{};
   var isStuck = stateName==='stuck';
-  var o = isStuck ? 4 : (ORDER[stateName]!=null?ORDER[stateName]:0);
+  var realO = ORDER[stateName]!=null?ORDER[stateName]:0;   // index into REAL task states
+  var preDone = preflightPassed(agents);
+  function disp(ri){ return ri===0?0:ri+1; }               // real index → display index
+  // Display frontier (into the 7-node STEPS incl. the inserted pre-flight at index 1).
+  var o = isStuck ? 5 : (stateName==='open' ? 1 : disp(realO));
   var last = STEPS.length-1;
-  return STEPS.map(function(s,i){
+  // Pass 1: resolve done/current/stuck per node (the pre-flight node is special-cased
+  // because it has no matching task state — it's driven by agent readiness).
+  var meta = STEPS.map(function(s,i){
     var key=s[0];
-    var stuckStep = isStuck && i===4;
-    var done = i<o || (stateName==='verified' && i===o);
-    var current = i===o && !isStuck && stateName!=='verified';
+    var stuckStep = isStuck && i===5;
+    var done, current;
+    if(key==='preflight'){
+      done = (stateName!=='open') || preDone;
+      current = stateName==='open' && !preDone && !isStuck;
+    } else {
+      done = i<o || (stateName==='verified' && i===o);
+      current = i===o && !isStuck && stateName!=='verified';
+    }
+    return {done:done, current:current, stuck:stuckStep};
+  });
+  var reached=function(m){ return m.done||m.current||m.stuck; };
+  return STEPS.map(function(s,i){
+    var key=s[0], m=meta[i];
+    var done=m.done, current=m.current, stuckStep=m.stuck;
     var node='width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;position:relative;z-index:2;';
     if(stuckStep) node+='background:var(--st-stuck-dot);';
     else if(done) node+='background:var(--st-verified-dot);';
     else if(current) node+='background:var(--accent);';
     else node+='background:var(--surface);border:2px solid var(--border-strong);';
-    var leftColor = i===0 ? 'transparent' : ((i<=o || (isStuck&&i<=4)) ? 'var(--st-verified-dot)' : 'var(--border-strong)');
-    var rightColor = i===last ? 'transparent' : ((i<o) ? 'var(--st-verified-dot)' : 'var(--border-strong)');
+    var leftColor = i===0 ? 'transparent' : (reached(m) ? 'var(--st-verified-dot)' : 'var(--border-strong)');
+    var rightColor = i===last ? 'transparent' : (reached(meta[i+1]) ? 'var(--st-verified-dot)' : 'var(--border-strong)');
     var labelColor = (done||current) ? 'var(--text)' : (stuckStep ? 'var(--st-stuck-fg)' : 'var(--text-3)');
     var inner='';
     if(done) inner='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2"><path d="M20 6L9 17l-5-5"/></svg>';
     else if(current) inner='<span style="width:8px;height:8px;border-radius:50%;background:#fff"></span><span style="position:absolute;inset:0;border-radius:50%;border:2px solid var(--accent);animation:ring 1.6s ease-out infinite"></span>';
     else if(stuckStep) inner='<span style="color:#fff;font-weight:700;font-size:14px">!</span>';
     else inner='<span style="width:6px;height:6px;border-radius:50%;background:var(--border-strong)"></span>';
-    return {label:s[1], time:(done||current||stuckStep)?(times[key]||''):'', nodeStyle:node, inner:inner, leftColor:leftColor, rightColor:rightColor, labelColor:labelColor};
+    return {key:key, label:s[1], time:(done||current||stuckStep)?(times[key]||''):'', nodeStyle:node, inner:inner, leftColor:leftColor, rightColor:rightColor, labelColor:labelColor};
   });
 }
 
@@ -218,12 +247,18 @@ function agentFor(role, name){
   for(var i=0;i<ags.length;i++){ if(ags[i].role===role || (name&&ags[i].name===name)) return ags[i]; }
   return null;
 }
-/* A small 🔒 badge on an agent that hasn't passed the pre-flight (ready===false);
-   '' when the agent is ready, unknown, or no agents list is present. */
+/* A small corner badge on an agent's avatar reflecting the pre-flight state:
+   green ✓ once they've passed (ready===true), amber 🔒 while they haven't.
+   '' only when the agent/readiness is unknown (no agents list). */
 var LOCK_TIP="Hasn't passed the pre-flight readiness check — can't send messages or change status yet.";
+var READY_TIP="Passed the pre-flight readiness check — action tools unlocked.";
 function lockBadge(role, name){
   var ag=agentFor(role, name);
-  if(!ag || ag.ready) return '';
+  if(!ag) return '';
+  if(ag.ready){
+    return '<span title="'+esc(READY_TIP)+'" style="position:absolute;bottom:-3px;right:-3px;width:13px;height:13px;border-radius:50%;background:var(--st-verified-bg);color:var(--st-verified-fg);border:1.5px solid var(--surface);display:flex;align-items:center;justify-content:center">'+
+      '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>';
+  }
   return '<span title="'+esc(LOCK_TIP)+'" style="position:absolute;bottom:-3px;right:-3px;width:13px;height:13px;border-radius:50%;background:var(--st-stuck-bg);color:var(--st-stuck-fg);border:1.5px solid var(--surface);display:flex;align-items:center;justify-content:center">'+
     '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg></span>';
 }
@@ -231,6 +266,76 @@ function avatarChip(role, size, fs){
   var a=av(role);
   var lock=lockBadge(role);
   return '<span title="'+esc(a.label)+'" style="position:relative;width:'+size+'px;height:'+size+'px;border-radius:7px;background:'+a.c+';color:#fff;font-size:'+fs+'px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+lock+'</span>';
+}
+
+/* ---------- pre-flight pills (under the pre-flight stepper node) ---------- */
+/* One tiny pill per agent — the host/buddy status shown right under the "pre-flight
+   assessments" node: green "passed", red "failed", grey "pending" (the default).
+   Reads readiness_status, falling back to the legacy `ready` bool. */
+function preflightStatus(ag){
+  if(ag.readiness_status) return ag.readiness_status;
+  return ag.ready ? 'passed' : 'pending';
+}
+function preflightPills(d){
+  var ags=(d&&d.agents)||[];
+  if(!ags.length) return '';
+  var pills=ags.map(function(ag){
+    var a=av(ag.role);
+    var s=preflightStatus(ag);
+    var cfg = s==='passed' ? {bg:'var(--st-verified-bg)',fg:'var(--st-verified-fg)',lbl:'passed'}
+           : s==='failed' ? {bg:'var(--st-stuck-bg)',fg:'var(--st-stuck-fg)',lbl:'failed'}
+           : {bg:'var(--st-open-bg)',fg:'var(--st-open-fg)',lbl:'pending'};
+    var ic = s==='passed' ? '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="M20 6L9 17l-5-5"/></svg>'
+           : s==='failed' ? '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="M18 6L6 18M6 6l12 12"/></svg>'
+           : '<span style="width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.7"></span>';
+    return '<span title="'+esc(a.label)+' — '+cfg.lbl+'" style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:999px;font-size:9.5px;font-weight:700;background:'+cfg.bg+';color:'+cfg.fg+';max-width:100%">'+
+      '<span style="width:12px;height:12px;border-radius:4px;background:'+a.c+';color:#fff;font-size:8px;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+ic+'</span>';
+  }).join('');
+  return '<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;margin-top:6px;max-width:120px">'+pills+'</div>';
+}
+
+/* A labeled pre-flight row (used in the debug view, which has no stepper): each
+   agent with its role label and a passed/failed/pending pill. */
+function preflightRow(d){
+  var ags=(d&&d.agents)||[];
+  if(!ags.length) return '';
+  var chips=ags.map(function(ag){
+    var a=av(ag.role), s=preflightStatus(ag);
+    var cfg = s==='passed' ? {bg:'var(--st-verified-bg)',fg:'var(--st-verified-fg)',lbl:'passed'}
+           : s==='failed' ? {bg:'var(--st-stuck-bg)',fg:'var(--st-stuck-fg)',lbl:'failed'}
+           : {bg:'var(--st-open-bg)',fg:'var(--st-open-fg)',lbl:'pending'};
+    return '<div style="display:flex;align-items:center;gap:8px;padding:5px 10px;background:var(--bg);border:1px solid var(--border);border-radius:9px">'+
+      avatarChip(ag.role,20,9)+'<span style="font-size:12px;font-weight:600;color:var(--text)">'+esc(a.label)+'</span>'+
+      '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:'+cfg.bg+';color:'+cfg.fg+'">'+cfg.lbl+'</span></div>';
+  }).join('');
+  return '<div style="margin-top:14px;padding-top:13px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+    '<span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">Pre-flight</span>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">'+chips+'</div></div>';
+}
+
+/* ---------- pre-flight fail report (coaching panel) ---------- */
+/* When an agent FAILED pre-flight, show the human exactly which questions it missed
+   and the broker's hint — so they can coach it, then the agent re-runs submit_readiness.
+   Rendered only when there's at least one failure; empty otherwise. */
+function readinessFailPanel(d){
+  var ags=((d&&d.agents)||[]).filter(function(a){ return preflightStatus(a)==='failed' && a.readiness_report; });
+  if(!ags.length) return '';
+  var blocks=ags.map(function(ag){
+    var a=av(ag.role);
+    var missed=(ag.readiness_report||[]).filter(function(r){ return !r.ok; });
+    var items=missed.map(function(r){
+      return '<li style="margin:0 0 6px"><span style="font-family:'+MONO+';font-size:10.5px;font-weight:700;color:var(--st-stuck-fg);background:var(--st-stuck-bg);padding:1px 6px;border-radius:5px">'+esc(r.id)+'</span> <span style="color:var(--text-2)">'+esc(r.hint||'')+'</span></li>';
+    }).join('');
+    return '<div style="margin:0 0 10px">'+
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">'+avatarChip(ag.role,20,9)+
+      '<span style="font-size:12.5px;font-weight:600;color:var(--text)">'+esc(a.label)+'</span>'+
+      '<span style="font-size:11px;font-weight:600;color:var(--st-stuck-fg)">failed '+missed.length+' question'+(missed.length===1?'':'s')+'</span></div>'+
+      '<ul style="margin:0;padding-left:2px;list-style:none;font-size:12px;line-height:1.45">'+items+'</ul></div>';
+  }).join('');
+  return '<details open style="margin:0 0 16px;background:var(--surface);border:1px solid var(--st-stuck-dot);border-radius:12px;box-shadow:var(--shadow);overflow:hidden">'+
+    '<summary style="list-style:none;cursor:pointer;padding:11px 16px;font-size:12.5px;font-weight:700;color:var(--st-stuck-fg);display:flex;align-items:center;gap:8px;user-select:none">'+
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>Pre-flight failures — coach & retry</summary>'+
+    '<div style="padding:4px 16px 14px"><p style="margin:0 0 12px;font-size:12px;color:var(--text-2)">Share the hint with the agent, then it re-runs <span style="font-family:'+MONO+'">submit_readiness</span>.</p>'+blocks+'</div></details>';
 }
 
 /* ---------- header ---------- */
@@ -268,6 +373,16 @@ function headerHTML(){
   /* mobile: header would overflow — drop the scope badge (list/subtitle already convey it) */
   if(m) scopeBadge='';
 
+  /* "+ New task" — host only, and only inside the desktop app (the pywebview bridge
+     exists). Never shown to buddy viewers or in a plain browser, so the dashboard
+     stays read-only for everyone who can't already start tasks. It deep-links back to
+     the app's Start-a-task screen (see gui._DashApi.new_task). */
+  var canAddTask = state.viewer && !buddy && !m &&
+    typeof window.pywebview !== 'undefined' && window.pywebview.api;
+  var newTaskBtn = canAddTask
+    ? '<button data-newtask="1" title="Start a new task" style="display:flex;align-items:center;gap:5px;padding:6px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text);flex:none">+ New task</button>'
+    : '';
+
   var refreshDot = 'var(--st-verified-dot)';
   return '<div style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:'+(m?'10px':'14px')+';padding:11px '+(m?'14px':'20px')+';background:var(--surface);border-bottom:1px solid var(--border)">'+
     '<div data-home="1" style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;flex:none">'+
@@ -283,6 +398,7 @@ function headerHTML(){
         '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(switcherLabel)+'</span>'+IC.caret+'</button>'+switcherMenu+
     '</div>'+
     '<div style="flex:1"></div>'+
+    newTaskBtn+
     scopeBadge+
     '<div style="display:flex;align-items:center;gap:7px;flex:none" title="'+esc(refreshText())+'">'+
       '<span id="sb-refresh-dot" style="width:7px;height:7px;border-radius:50%;background:'+refreshDot+';animation:pulsedot 2.4s ease-in-out infinite"></span>'+
@@ -299,6 +415,23 @@ function refreshText(){
   if(s<3) return 'Last refreshed just now';
   if(s<60) return 'Last refreshed '+s+'s ago';
   return 'Last refreshed '+Math.floor(s/60)+'m ago';
+}
+
+/* ---------- desktop-only gate ---------- */
+/* sys-buddy is a laptop/desktop tool; the dashboard is the only surface a phone can
+   reach (via a viewer link), so on a small screen we don't render a cramped mobile
+   layout — we ask the visitor to switch to a desktop. */
+function mobileGate(){
+  return '<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px 22px;gap:6px">'+
+    '<div style="display:flex;align-items:center;gap:4px;margin-bottom:14px">'+
+      '<span style="width:11px;height:11px;border-radius:50%;background:var(--accent);display:inline-block"></span>'+
+      '<span style="width:18px;height:2px;border-radius:2px;background:var(--border-strong);display:inline-block"></span>'+
+      '<span style="width:11px;height:11px;border-radius:50%;background:var(--role-backend);display:inline-block"></span>'+
+    '</div>'+
+    '<h1 style="font-size:21px;font-weight:700;letter-spacing:-.02em;margin:0;color:var(--text)">Please switch to a desktop</h1>'+
+    '<p style="font-size:14px;color:var(--text-2);margin:10px 0 0;max-width:340px;line-height:1.55">'+
+      'sys-buddy is built for the laptop where you run Claude Code. Open this dashboard link on your computer to follow the task.</p>'+
+  '</div>';
 }
 
 /* ---------- full-screen message ---------- */
@@ -502,10 +635,16 @@ function contractHTML(d){
     return '<div style="border:1px solid var(--border);border-radius:11px;margin:6px;overflow:hidden">'+head+detail+'</div>';
   }).join('');
 
+  // The base URL the consumer connects to. Load-bearing (SPEC §9) and previously
+  // invisible on the dashboard — surface it so the human can see exactly where the
+  // frontend will point.
+  var stagingBlock = data.staging_url
+    ? '<div style="margin-top:11px;display:flex;align-items:center;gap:9px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;min-width:0"><span style="display:flex;color:var(--text-3);flex:none">'+IC.link+'</span><span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);flex:none">Connect to</span><span style="font-family:'+MONO+';font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(data.staging_url)+'">'+esc(data.staging_url)+'</span></div>'
+    : '';
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
     '<div style="padding:14px 16px;border-bottom:1px solid var(--border)">'+
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span style="font-weight:600;font-size:14px;color:var(--text)">API contract</span>'+
-      '<div style="display:flex;gap:3px;background:var(--surface-2);padding:3px;border-radius:9px">'+vbtns+'</div></div>'+statusBlock+'</div>'+
+      '<div style="display:flex;gap:3px;background:var(--surface-2);padding:3px;border-radius:9px">'+vbtns+'</div></div>'+statusBlock+stagingBlock+'</div>'+
     '<div style="padding:6px">'+eps+'</div></div>';
 }
 
@@ -545,10 +684,12 @@ function debugChip(stateName){
 function debugTaskHTML(d){
   var chip=debugChip(d.state);
   var avs=(d.roles||[]).map(function(r){ return avatarChip(r,22,10); }).join('');
-  var statusHeader='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:15px 20px;margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
+  var statusHeader='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:15px 20px;margin-bottom:16px">'+
+    '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
     '<span style="display:inline-flex;align-items:center;gap:7px;padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:7px;height:7px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
     '<span style="font-size:12.5px;color:var(--text-2)">Debug session — collaborate, then mark resolved.</span>'+
-    '<div style="flex:1"></div><div style="display:flex;gap:4px">'+avs+'</div></div>';
+    '<div style="flex:1"></div><div style="display:flex;gap:4px">'+avs+'</div></div>'+
+    preflightRow(d)+'</div>';
   return '<div style="max-width:1200px;margin:0 auto;padding:20px 20px 80px">'+
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px">'+
       '<button data-home="1" style="display:inline-flex;align-items:center;gap:6px;padding:6px 11px;background:var(--surface);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;color:var(--text-2)">'+IC.back+'Tasks</button>'+
@@ -556,9 +697,11 @@ function debugTaskHTML(d){
       '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
     '</div>'+
     statusHeader+
+    readinessFailPanel(d)+
     threadHTML(d)+
     eventLogHTML(d)+
     readinessPreviewHTML(d)+
+    shortcodesHTML(d)+
     tipsHTML()+
   '</div>';
 }
@@ -578,6 +721,31 @@ function tipsHTML(){
         '<span>Roles are color-coded (backend · frontend · mobile).</span></div>'+
       '<div>Messages broadcast to everyone on the task by default.</div>'+
       '<div>A <span style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:999px;padding:1px 7px">→ role</span> chip means a private message directed to that one role.</div>'+
+    '</div></details>';
+}
+
+/* ---------- shorthand cheatsheet (collapsed-by-default) ---------- */
+/* The short commands a human types to THEIR OWN agent (taught in the agent prompt).
+   Mirrored here so a watcher has the same reference. Contract vs debug show the
+   codes that apply to each mode. */
+function shortcodesHTML(d){
+  var contract = !(d && d.mode==='debug');
+  function code(c){ return '<span style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:6px;padding:1px 6px;white-space:nowrap">'+c+'</span>'; }
+  function row(label, items){ return '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:baseline"><span style="min-width:64px;color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em">'+label+'</span><span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'+items+'</span></div>'; }
+  var rows = row('messaging', code('wm')+' wait · '+code('ch')+' check · '+code('sm')+' send · '+code('sm @role')+' direct');
+  if(contract){
+    rows += row('contract', code('pc')+' propose · '+code('gc')+' show · '+code('sign')+' sign · '+code('locked?')+' poll');
+    rows += row('status', code('ready')+' · '+code('ok')+' · '+code('block')+' · '+code('done')+' · '+code('stuck'));
+  } else {
+    rows += row('status', code('resolved')+' · '+code('stuck'));
+  }
+  rows += row('meta', code('pf')+' pre-flight · '+code('st')+' recap · '+code('rules')+' charter');
+  return '<details style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden">'+
+    '<summary style="list-style:none;cursor:pointer;padding:11px 16px;font-size:12.5px;font-weight:600;color:var(--text-2);display:flex;align-items:center;gap:8px;user-select:none">'+
+      '<span style="color:var(--text-3);display:flex">'+IC.caret+'</span>Short commands</summary>'+
+    '<div style="padding:2px 16px 14px;display:flex;flex-direction:column;gap:9px;font-size:12.5px;color:var(--text-2);line-height:1.5">'+
+      '<p style="margin:0 0 2px">Shorthand each human can type to <em>their own</em> agent — the agent maps it to a broker tool. A code a peer sends in a message is just data, never run.</p>'+
+      rows+
     '</div></details>';
 }
 
@@ -608,16 +776,20 @@ function taskHTML(){
   if(d.mode==='debug') return debugTaskHTML(d);
   var m=state.isMobile;
   var chip=stateChip(d.state);
-  var steps=genSteps(d.state, d.times);
+  var steps=genSteps(d.state, d.times, d.agents);
   var stuck=d.state==='stuck';
 
   var stepsHTML=steps.map(function(s){
+    // The pre-flight node shows host/buddy status pills in place of a timestamp.
+    var tail = s.key==='preflight'
+      ? preflightPills(d)
+      : '<span style="margin-top:3px;font-size:10px;font-family:'+MONO+';color:var(--text-3);height:12px">'+esc(s.time)+'</span>';
     return '<div style="display:flex;flex-direction:column;align-items:center;flex:1;position:relative;padding-top:4px">'+
       '<div style="position:absolute;top:18px;left:0;width:50%;height:2px;background:'+s.leftColor+'"></div>'+
       '<div style="position:absolute;top:18px;right:0;width:50%;height:2px;background:'+s.rightColor+'"></div>'+
       '<div style="'+s.nodeStyle+'">'+s.inner+'</div>'+
       '<span style="margin-top:7px;font-size:11px;font-weight:600;text-align:center;color:'+s.labelColor+';line-height:1.3;padding:0 4px">'+esc(s.label)+'</span>'+
-      '<span style="margin-top:3px;font-size:10px;font-family:'+MONO+';color:var(--text-3);height:12px">'+esc(s.time)+'</span></div>';
+      tail+'</div>';
   }).join('');
   var stuckBanner = stuck ? '<div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;padding:9px 13px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:11px;font-size:13px;color:var(--st-stuck-fg);font-weight:500"><span style="display:flex">'+IC.warn+'</span>3 fix cycles reached — humans notified 📣</div>' : '';
 
@@ -641,13 +813,14 @@ function taskHTML(){
       '<h1 style="font-size:20px;font-weight:700;margin:0;color:var(--text);letter-spacing:-.02em">'+esc(d.title)+'</h1>'+
       '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
       '<div style="flex:1"></div>'+eventBtn+'</div>'+
-    stepper+mobileTabs+
+    stepper+readinessFailPanel(d)+mobileTabs+
     '<div style="'+rowStyle+'">'+
       '<div style="display:'+threadDisp+'">'+threadHTML(d)+'</div>'+
       '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+contractHTML(d)+'</div>'+
     '</div>'+
     '<div style="display:'+logDisp+'">'+eventLogHTML(d)+'</div>'+
     readinessPreviewHTML(d)+
+    shortcodesHTML(d)+
     tipsHTML()+
   '</div>';
 }
@@ -669,7 +842,8 @@ function render(){
   if(s!==lastSig){
     lastSig=s;
     var html;
-    if(state.error==='no-token') html=messageScreen('<span style="font-size:22px">🔑</span>','No viewer token','This dashboard needs a viewer token. Open the link your host shared — it looks like /ui?v=sbv_… — to watch this task.');
+    if(state.isMobile) html=mobileGate();
+    else if(state.error==='no-token') html=messageScreen('<span style="font-size:22px">🔑</span>','No viewer token','This dashboard needs a viewer token. Open the link your host shared — it looks like /ui?v=sbv_… — to watch this task.');
     else if(state.error==='unauthorized') html=messageScreen('<span style="font-size:22px">🚫</span>','Access denied','This viewer token isn’t valid or has been revoked. Ask your host for a fresh dashboard link.');
     else if(state.error==='forbidden') html=headerHTML()+messageBody('Not your task','This token can only view its own task. '+ (state.viewer&&state.viewer.task_id?('You have access to “'+state.viewer.task_id+'”.'):''));
     else if(state.error==='not-found') html=headerHTML()+messageBody('Task not found','That task doesn’t exist (or was closed).');
@@ -704,6 +878,7 @@ function bind(){
   app.querySelectorAll('[data-home]').forEach(function(el){ el.onclick=function(){ goHome(); }; });
   var sw=app.querySelector('[data-switcher]'); if(sw) sw.onclick=function(e){ e.stopPropagation(); state.switcherOpen=!state.switcherOpen; render(); };
   var tt=app.querySelector('[data-theme-toggle]'); if(tt) tt.onclick=toggleTheme;
+  var nt=app.querySelector('[data-newtask]'); if(nt) nt.onclick=function(){ try{ window.pywebview.api.new_task(); }catch(e){} };
   app.querySelectorAll('[data-version]').forEach(function(el){ el.onclick=function(){ state.version[state.taskId]=el.getAttribute('data-version'); render(); }; });
   app.querySelectorAll('[data-ep]').forEach(function(el){ el.onclick=function(){ var k=el.getAttribute('data-ep'); state.expanded[k]=!state.expanded[k]; render(); }; });
   app.querySelectorAll('[data-filter]').forEach(function(el){ el.onclick=function(){ state.eventFilter=el.getAttribute('data-filter'); render(); }; });

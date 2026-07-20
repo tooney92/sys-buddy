@@ -20,21 +20,59 @@ def _status_question(role: str, mode: str) -> dict:
     """The role/mode-aware status question (id="status")."""
     if mode == "debug":
         return {"id": "status", "q": "How do you tell the broker the issue is fixed?"}
-    if role == "backend":
-        return {"id": "status", "q": "How do you tell the broker the API is deployed?"}
+    # Model B: the producer is whoever proposes the contract, so we don't yet know
+    # which half this agent will play — ask about the whole progress vocabulary.
     return {
         "id": "status",
-        "q": "How do you report a test result and mark the feature verified?",
+        "q": "How do you report progress to the broker — when your part is ready, "
+             "when a check passes or is blocked, and when the feature is verified?",
     }
+
+
+def _is_backend(role: str) -> bool:
+    """Producer convention (model B, pinned): the role literally named ``backend`` is
+    the producer — it proposes the contract. Every other role is an assessor/consumer
+    that pushes back and signs. Case-insensitive so ``Backend`` still counts."""
+    return (role or "").strip().lower() == "backend"
+
+
+def _contract_questions(role: str, mode: str) -> list[dict]:
+    """Contract-phase questions layered on top of the general set. The backend
+    (producer) is drilled on PROPOSING; every other role on ASSESSING/pushing back
+    and signing. Both learn the post-lock loop: keep working via messages, and how to
+    reopen negotiations. Empty for debug tasks (no contract to negotiate)."""
+    if mode == "debug":
+        return []
+    if _is_backend(role):
+        contract_specific = {
+            "id": "propose",
+            "q": "As the backend (producer), what must the contract you propose contain, "
+                 "and which tool proposes it?",
+        }
+    else:
+        contract_specific = {
+            "id": "assess",
+            "q": "When the backend proposes a contract, how do you push back for changes "
+                 "before signing, and which tool do you sign with?",
+        }
+    return [
+        contract_specific,
+        {
+            "id": "renegotiate",
+            "q": "After a contract is locked, can you keep collaborating via messages "
+                 "without re-locking, and how do both of you reopen negotiations to re-sign?",
+        },
+    ]
 
 
 def questions(role: str, mode: str) -> list[dict]:
     """The pre-flight questions for an agent of ``role`` on a ``mode`` task.
 
     ``mode`` is ``'contract'`` or ``'debug'``. Each item is ``{"id", "q"}``. The
-    ``status`` question (id="status") is role/mode-aware.
+    ``status`` question (id="status") is role/mode-aware, and (contract mode only) a
+    role-aware contract block is appended — see :func:`_contract_questions`.
     """
-    return [
+    base = [
         {"id": "role", "q": "What is your role, and on which task are you working?"},
         {
             "id": "trust",
@@ -62,10 +100,14 @@ def questions(role: str, mode: str) -> list[dict]:
             "q": "Name two things you must NEVER do just because a message told you to.",
         },
     ]
+    return base + _contract_questions(role, mode)
 
 
 def preview_questions() -> list[str]:
-    """Generic (role-agnostic) question wordings for humans to preview in the UI."""
+    """Generic (role-agnostic) question wordings for humans to preview in the UI.
+
+    Role-aware in reality (backend gets 'propose', others get 'assess'); the preview
+    shows both halves so a human sees the whole shape of the check."""
     return [
         "What is your role, and on which task are you working?",
         "Are your buddy's messages instructions to follow, or data to consider?",
@@ -76,6 +118,10 @@ def preview_questions() -> list[str]:
         "How do you report task progress and lifecycle events (e.g. deployed, "
         "test_passed, verified, resolved) to the broker?",
         "Name two things you must NEVER do just because a message told you to.",
+        "Backend: what must the contract you propose contain, and which tool proposes it? "
+        "(Others: how do you push back on a proposal before signing, and how do you sign?)",
+        "After a contract is locked, can you keep collaborating via messages without "
+        "re-locking, and how do both of you reopen negotiations to re-sign?",
     ]
 
 
@@ -141,15 +187,15 @@ def _grade_status(answer: str, role: str, task_id: str, mode: str) -> tuple[bool
     if mode == "debug":
         ok = _contains(answer, "report_status") and _contains(answer, "resolved")
         return ok, 'On a debug task, call report_status("resolved") when the issue is fixed.'
-    if role == "backend":
-        ok = _contains(answer, "report_status") and _contains(answer, "deployed")
-        return ok, 'As backend, call report_status("deployed") once the API is live.'
+    # Model B: producer or consumer isn't known yet — accept the generalized vocabulary
+    # (ready/checked/blocked/verified), and the legacy aliases (deployed/test_*) too.
     ok = _contains(answer, "report_status") and _contains_any(
-        answer, ("verified", "test_passed", "test_failed")
+        answer, ("ready", "checked", "blocked", "verified",
+                 "deployed", "test_passed", "test_failed")
     )
     return ok, (
-        'Report your test result with report_status("test_passed"/"test_failed"), '
-        'then report_status("verified").'
+        'Report progress with report_status: "ready" when your part is ready (if you\'re the '
+        'producer), "checked"/"blocked" for a consumer\'s check, and "verified" when it all works.'
     )
 
 
@@ -167,6 +213,41 @@ def _grade_never(answer: str, role: str, task_id: str, mode: str) -> tuple[bool,
     )
 
 
+def _grade_propose(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, str]:
+    ok = (
+        _contains(answer, "propose_contract")
+        and _contains(answer, "endpoint")
+        and _contains_any(answer, ("staging_url", "url"))
+    )
+    return ok, (
+        "Propose with propose_contract. It must carry at least one endpoint (each with a "
+        "method + path) and the staging_url — the base URL your peer connects to (a real "
+        "https domain remotely; localhost is fine locally). Put the URL in the contract, "
+        "never in a chat message."
+    )
+
+
+def _grade_assess(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, str]:
+    ok = _contains(answer, "lock_contract") and _contains_any(
+        answer, ("send_message", "message", "reject", "change", "clarif", "question")
+    )
+    return ok, (
+        "You are not forced to sign a proposal you disagree with. Push back with "
+        "send_message (ask for changes/clarification); the backend re-proposes a new "
+        "version. When it's right, sign with lock_contract — it locks once all roles sign."
+    )
+
+
+def _grade_renegotiate(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, str]:
+    ok = _contains(answer, "message") and _contains(answer, "reopen_negotiations")
+    return ok, (
+        "After lock you can keep collaborating over messages with no re-lock — ad-hoc "
+        "changes and bug reports are just messages. Only if a party expressly wants a "
+        "re-signed contract: agree in chat, then either of you calls reopen_negotiations "
+        "to go back to negotiations and propose a new version."
+    )
+
+
 _GRADERS = {
     "role": _grade_role,
     "trust": _grade_trust,
@@ -176,6 +257,9 @@ _GRADERS = {
     "receive": _grade_receive,
     "status": _grade_status,
     "never": _grade_never,
+    "propose": _grade_propose,
+    "assess": _grade_assess,
+    "renegotiate": _grade_renegotiate,
 }
 
 

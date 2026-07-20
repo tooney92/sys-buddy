@@ -15,6 +15,8 @@ that can be replayed.
 from __future__ import annotations
 
 import json
+import re
+import secrets
 import sqlite3
 import time
 
@@ -25,6 +27,24 @@ from .identity import new_invite_code, new_viewer_token, sha256_hex
 # Single-use invites live 15 minutes (SPEC §9). Short enough that a code lingering
 # in a Slack scrollback is dead by the time anyone scans for it.
 INVITE_TTL_SECONDS = 15 * 60
+
+# Cap on the slug part of an auto-derived id — keeps ids short enough to read and
+# type while still recognisably echoing the title.
+_SLUG_MAX = 40
+
+
+def new_task_id(title: str) -> str:
+    """Derive a task id from a human ``title``: a slug plus a short random suffix.
+
+    Humans should only have to type a Title; the id is machine-friendly and unique.
+    The slug is lowercase with non-alphanumerics collapsed to single hyphens (e.g.
+    "new API" → "new-api"); an empty slug (a title with no word characters) falls
+    back to a generic base. The 4-hex-char suffix (16 bits of entropy) keeps two
+    same-titled tasks apart without the caller having to invent an id.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:_SLUG_MAX].strip("-")
+    base = slug or "task"
+    return f"{base}-{secrets.token_hex(2)}"
 
 
 def _fmt_time(ts: float) -> str:
@@ -40,15 +60,17 @@ def _write_event(conn: sqlite3.Connection, task_id: str, kind: str, detail: dict
     )
 
 
-def create_task(id: str, *, title: str, roles: list[str], mode: str = "contract") -> dict:
+def create_task(id: str | None, *, title: str, roles: list[str], mode: str = "contract") -> dict:
     """Create a task in the ``open`` state with the given fixed cast of roles.
 
     ``mode`` selects the workflow: ``'contract'`` (the default) runs the full
     propose/lock/deploy state machine; ``'debug'`` is a lightweight mode where two
     buddies just fix a problem and mark it resolved, with no contract required.
 
-    Duplicate ids are rejected explicitly (rather than surfacing a raw sqlite
-    IntegrityError) so the CLI can print an actionable message.
+    ``id`` may be falsy (``None``/``""``): the id is then derived from ``title`` via
+    :func:`new_task_id`, so a human only has to supply a Title. An explicit id is
+    used verbatim, and a duplicate explicit id is rejected explicitly (rather than
+    surfacing a raw sqlite IntegrityError) so the CLI can print an actionable message.
     """
     if mode not in ("contract", "debug"):
         raise ValueError(f"unknown mode {mode!r}; expected 'contract' or 'debug'")
@@ -60,15 +82,21 @@ def create_task(id: str, *, title: str, roles: list[str], mode: str = "contract"
         raise ValueError("a task needs at least one non-empty role")
     if len(roles) != len(set(roles)):
         raise ValueError("task roles must be unique (no duplicates)")
-    if mode == "contract" and "backend" not in roles:
-        # The state machine designates 'backend' as the role that deploys (SPEC §7);
-        # a contract task without it can lock a contract but never reach backend_live,
-        # so the workflow would deadlock. Reject at creation rather than strand it
-        # later. Debug tasks skip the state machine, so they need no backend seat.
-        raise ValueError("roles must include 'backend' (the role that deploys)")
+    if mode == "contract" and len(roles) < 2:
+        # Model B: the producer is whoever proposes the contract (no hardcoded role).
+        # A contract still needs at least two roles — one to produce and one to build
+        # against it — else the workflow can never reach a check/verify. Debug tasks
+        # skip the state machine, so a single role is fine there.
+        raise ValueError("a contract task needs at least two roles (a producer and someone who builds against it)")
     conn = connect()
     try:
-        if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (id,)).fetchone() is not None:
+        if not id:
+            # Derive from the title. Regenerate on the (vanishingly unlikely) suffix
+            # collision so an auto-id never fails the way an explicit duplicate does.
+            id = new_task_id(title)
+            while conn.execute("SELECT 1 FROM tasks WHERE id = ?", (id,)).fetchone() is not None:
+                id = new_task_id(title)
+        elif conn.execute("SELECT 1 FROM tasks WHERE id = ?", (id,)).fetchone() is not None:
             raise ValueError(f"task '{id}' already exists")
         now = time.time()
         conn.execute(

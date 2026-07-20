@@ -32,12 +32,20 @@ VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 MAX_ENDPOINTS = 100
 
 
-def validate_spec(spec: dict) -> list[str]:
+def validate_spec(spec: dict, is_remote: bool = True) -> list[str]:
     """Return a list of human-fixable error strings; empty list means valid.
 
     We collect *all* errors in one pass rather than failing on the first, so an
     agent can correct a proposal in a single revision instead of round-tripping
     through the broker once per mistake.
+
+    ``is_remote`` controls how strict the ``staging_url`` check is. Remotely the
+    peer's test-runner is on ANOTHER machine, so the URL must be a reachable,
+    globally-routable ``https`` domain (the SSRF guard below). Locally both agents
+    are on the same box — the frontend just hits the backend on ``localhost`` — so
+    there is nothing to deploy and no cross-machine SSRF surface; any non-empty URL
+    (``http://localhost:3000`` etc.) is accepted. Defaults to the strict remote
+    rules so a caller that forgets to pass the mode fails safe.
     """
     if not isinstance(spec, dict):
         return ["spec must be a JSON object"]
@@ -61,7 +69,7 @@ def validate_spec(spec: dict) -> list[str]:
     if "staging_url" not in spec:
         errors.append("missing required key 'staging_url'")
     else:
-        errors.extend(_validate_staging_url(spec["staging_url"]))
+        errors.extend(_validate_staging_url(spec["staging_url"], is_remote))
 
     # --- version (optional, but if present must be a plain int) -------------
     if "version" in spec and not _is_int(spec["version"]):
@@ -110,15 +118,21 @@ def _validate_endpoint(index: int, endpoint: object) -> list[str]:
     return errors
 
 
-def _validate_staging_url(url: object) -> list[str]:
+def _validate_staging_url(url: object, is_remote: bool = True) -> list[str]:
     """The staging URL is the security-load-bearing field: the test-runner agent will
     hit it (SPEC §9). It must be an absolute https URL, and — crucially — must NOT
     point at internal infrastructure. A backend that set it to http://169.254.169.254
     (cloud metadata → IAM creds) or http://127.0.0.1/admin would turn the buddy's
     test-runner into an SSRF gadget, so private/reserved/loopback/link-local targets
-    and known-internal hostnames are rejected here (OWASP SSRF Prevention)."""
+    and known-internal hostnames are rejected here (OWASP SSRF Prevention).
+
+    Locally (``is_remote=False``) that whole threat model collapses — the frontend
+    and backend are the same person on one machine, so ``localhost``/``http`` is the
+    normal, correct target and we require only a non-empty string."""
     if not isinstance(url, str) or not url.strip():
         return ["'staging_url' must be a non-empty string"]
+    if not is_remote:
+        return []  # local: any non-empty URL is fine (localhost, http, a bare host…)
     parsed = urlparse(url)
     if parsed.scheme != "https":
         return [

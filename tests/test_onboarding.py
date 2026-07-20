@@ -85,6 +85,62 @@ def test_role_prompt_frontend_mentions_verified():
     assert "verified" in text
 
 
+@pytest.mark.parametrize("role", ["backend", "frontend"])
+@pytest.mark.parametrize("mode", ["contract", "debug"])
+def test_role_prompt_is_task_agnostic(role, mode):
+    """The prompt teaches the sys-buddy protocol only — never a concrete build task.
+
+    The old prompt hardcoded a `POST /auth/login` demo; a prompt that leaks WHAT to
+    build (the humans decide that) is a regression.
+    """
+    low = onboarding.role_prompt(role, "signin", mode).lower()
+    assert "login" not in low
+    assert "/auth/" not in low
+    # Still names the task and front-loads the pre-flight, whatever the mode/role.
+    assert "signin" in low
+    assert "readiness_check" in low and "rules" in low
+
+
+def test_role_prompt_is_role_aware_backend_vs_consumer():
+    """Producer convention (pinned): the `backend` role is drilled on PROPOSING; every
+    other role on ASSESSING/pushing back and signing — so the two prompts differ."""
+    backend = onboarding.role_prompt("backend", "signin")
+    frontend = onboarding.role_prompt("frontend", "signin")
+    assert backend != frontend.replace("`frontend`", "`backend`")
+    # Backend is the producer; consumer assesses and can push back.
+    assert "producer" in backend.lower()
+    assert "propose_contract" in backend
+    low_f = frontend.lower()
+    assert "assess" in low_f or "push back" in low_f
+    assert "not forced to sign" in low_f
+
+
+def test_role_prompt_teaches_negotiations_and_reopen():
+    """Both roles learn the phase name, the post-lock messaging rule, and reopen."""
+    for role in ("backend", "frontend"):
+        low = onboarding.role_prompt(role, "signin").lower()
+        assert "negotiation" in low
+        assert "reopen_negotiations" in low
+        # after lock: keep working via messages, no re-lock needed for ad-hoc changes
+        assert "no re-lock" in low or "without" in low
+
+
+def test_role_prompt_consumer_mentions_optional_playwright():
+    """The consumer gets the optional Playwright-MCP setup nudge; the backend doesn't."""
+    frontend = onboarding.role_prompt("frontend", "signin").lower()
+    backend = onboarding.role_prompt("backend", "signin").lower()
+    assert "playwright" in frontend
+    assert "optional" in frontend  # never a gate
+    assert "playwright" not in backend
+
+
+def test_role_prompt_debug_has_no_contract():
+    text = onboarding.role_prompt("backend", "signin", mode="debug")
+    assert "debug task" in text
+    assert "no contract to negotiate" in text
+    assert "propose_contract" not in text
+
+
 # --- claude_add_command -----------------------------------------------------
 def test_claude_add_command_shape():
     cmd = onboarding.claude_add_command("https://abc.ngrok.app/mcp", "sbk_tok", name="sys-buddy")
@@ -243,24 +299,72 @@ def test_host_setup_success(conn):
     assert "/ui?v=" in r["dashboard_url"]
 
 
-def test_host_setup_rejects_missing_backend(conn):
+def test_host_setup_rejects_single_role_contract(conn):
+    # Model B: no 'backend' requirement, but a contract still needs >= 2 roles.
     r = onboarding.host_setup("x", ["frontend"], "http://h")
-
     assert r["ok"] is False
     assert isinstance(r["error"], str) and r["error"]
 
 
+def test_host_setup_contract_without_backend_succeeds(conn):
+    # A 2-role contract with NO 'backend' role is fine now — producer = whoever proposes.
+    r = onboarding.host_setup("noback", ["frontend", "mobile"], "http://h")
+    assert r["ok"] is True
+    assert {i["role"] for i in r["invites"]} == {"frontend", "mobile"}
+
+
 def test_host_setup_rejects_duplicate_task(conn):
-    first = onboarding.host_setup("dup", ["backend"], "http://h")
+    first = onboarding.host_setup("dup", ["backend", "frontend"], "http://h")
     assert first["ok"] is True
 
-    r = onboarding.host_setup("dup", ["backend"], "http://h")
+    r = onboarding.host_setup("dup", ["backend", "frontend"], "http://h")
     assert r["ok"] is False
     assert "already exists" in r["error"]
 
 
-def test_gui_start_host_rejects_http_public_url_without_trusted():
-    """Host GUI must refuse a cleartext public_url unless it's a trusted overlay."""
+def test_host_setup_seats_host_role(conn):
+    """With host_role set, the host gets its OWN agent seat and invite links go only
+    to the other roles."""
+    r = onboarding.host_setup(
+        "signin", ["backend", "frontend"], "http://127.0.0.1:8787", host_role="backend"
+    )
+    assert r["ok"] is True
+
+    # Invite links exclude the host's own role.
+    invite_roles = {i["role"] for i in r["invites"]}
+    assert invite_roles == {"frontend"}
+
+    seat = r["host_seat"]
+    assert set(seat) == {"role", "mcp_url", "agent_token", "prompt", "config_command"}
+    assert seat["role"] == "backend"
+    assert seat["mcp_url"] == "http://127.0.0.1:8787/mcp"
+    assert seat["agent_token"]
+    assert "signin" in seat["prompt"]
+    # config_command is the ready-to-run claude mcp add line carrying the token.
+    assert "claude mcp add" in seat["config_command"]
+    assert seat["agent_token"] in seat["config_command"]
+
+
+def test_host_setup_without_host_role_seats_nobody(conn):
+    """Back-compat: no host_role → invite link per role and no host_seat key."""
+    r = onboarding.host_setup("plain", ["backend", "frontend"], "http://h")
+    assert r["ok"] is True
+    assert {i["role"] for i in r["invites"]} == {"backend", "frontend"}
+    assert "host_seat" not in r
+
+
+def test_host_setup_derives_task_id_from_title(conn):
+    """No task_id → id derived from the title; the derived id is returned."""
+    r = onboarding.host_setup(None, ["backend", "frontend"], "http://h", title="New Login API")
+    assert r["ok"] is True
+    assert r["task_id"].startswith("new-login-api-")
+
+
+def test_gui_start_host_rejects_http_public_url():
+    """Host GUI must refuse a cleartext public_url — both remote paths (ngrok /
+    `tailscale serve`) present https, so the GUI requires it."""
     from sys_buddy import gui
-    r = gui.GuiApi().start_host("t", ["backend"], "", "http://insecure.example", False)
+    r = gui.GuiApi().start_host(
+        "My Task", ["backend", "frontend"], host_role="", public_url="http://insecure.example"
+    )
     assert r.get("ok") is False and "https" in r["error"].lower()

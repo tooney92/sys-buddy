@@ -23,3 +23,9 @@ packages = ["src/sys_buddy"]
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so tests can `from tests.conftest import ...`
+# under a plain `uv run pytest` (not just `python -m pytest`).
+pythonpath = ["."]
+testpaths = ["tests"]

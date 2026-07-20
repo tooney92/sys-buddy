@@ -65,7 +65,9 @@ CREATE TABLE IF NOT EXISTS agents (
     created_at  REAL NOT NULL,
     revoked_at  REAL,
     expires_at  REAL,                     -- optional TTL; NULL = never expires
-    ready       INTEGER NOT NULL DEFAULT 0 -- 0 = not yet passed the pre-flight
+    ready       INTEGER NOT NULL DEFAULT 0, -- 0 = not yet passed the pre-flight
+    readiness_status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'passed' | 'failed'
+    readiness_report TEXT              -- JSON of the last attempt's per-question results
 );
 
 -- Fixed cast: at most one *live* agent per role. A partial index (not a plain
@@ -157,6 +159,15 @@ def init_db(db_path: Path | str | None = None) -> Path:
         # Migration: add agents.ready to a db created before pre-flight readiness existed.
         if "ready" not in cols:
             conn.execute("ALTER TABLE agents ADD COLUMN ready INTEGER NOT NULL DEFAULT 0")
+        # Migration: add readiness_status/report so a failed pre-flight is distinguishable
+        # from "not attempted yet" (ready alone can't tell them apart) and the human can
+        # read WHY it failed to coach the agent.
+        if "readiness_status" not in cols:
+            conn.execute(
+                "ALTER TABLE agents ADD COLUMN readiness_status TEXT NOT NULL DEFAULT 'pending'"
+            )
+        if "readiness_report" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN readiness_report TEXT")
         # Migration: add tasks.mode to a db created before debug tasks existed.
         task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "mode" not in task_cols:

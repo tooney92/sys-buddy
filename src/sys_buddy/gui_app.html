@@ -154,6 +154,7 @@ body{
 
 /* ---------- forms ---------- */
 .form{margin-top:clamp(22px,4vh,34px);max-width:560px;display:flex;flex-direction:column;gap:18px}
+[hidden]{display:none!important}  /* beat .field/.blk display:flex so the `hidden` attr actually hides */
 .field{display:flex;flex-direction:column;gap:7px}
 .field label{font-size:.82rem;font-weight:600;color:var(--text-2);letter-spacing:.01em}
 .input{
@@ -327,8 +328,45 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   padding:8px 20px;border-radius:8px;
   transition:color .16s ease,background .16s ease;
 }
-.seg input:checked ~ .seg-tag{color:var(--text);background:var(--surface-2)}
+.seg input:checked ~ .seg-tag{color:#fff;background:var(--accent)}
 .seg input:focus-visible ~ .seg-tag{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- host: form section dividers ---------- */
+.section-label{
+  display:flex;align-items:center;gap:12px;
+  font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--text-3);margin:4px 0 -2px;
+}
+.section-label::after{content:"";flex:1;height:1px;background:var(--border)}
+
+/* ---------- host: compound role chip (add to task + mark "you") ---------- */
+.role-combo{display:inline-flex;align-items:stretch;border-radius:10px;overflow:hidden;
+  border:1px solid var(--border-strong);background:var(--surface);
+  transition:border-color .16s ease,background .16s ease}
+.role-combo.on{border-color:var(--rc);background:var(--surface-2)}
+.role-main{display:inline-flex;align-items:center;gap:8px;cursor:pointer;
+  font-family:inherit;font-size:.9rem;font-weight:500;color:var(--text-2);
+  background:transparent;border:none;padding:9px 14px}
+.role-combo.on .role-main{color:var(--text)}
+.role-main .role-pip{width:10px;height:10px;border-radius:50%;flex:none;background:var(--rc);
+  opacity:.28;transition:opacity .16s ease,box-shadow .16s ease}
+.role-combo.on .role-main .role-pip{opacity:1;box-shadow:0 0 0 3px color-mix(in srgb,var(--rc) 22%,transparent)}
+.role-you{display:none;align-items:center;cursor:pointer;font-family:inherit;
+  font-size:.72rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--text-3);background:transparent;border:none;
+  border-left:1px solid var(--border-strong);padding:0 12px}
+.role-combo.on .role-you{display:inline-flex}
+.role-combo.on .role-you:hover{color:var(--text-2)}
+.role-combo.is-you .role-you{background:var(--rc);color:#fff;border-left-color:transparent}
+.role-main:focus-visible,.role-you:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- host: connection card ---------- */
+.conn-card{border:1px solid var(--border);background:var(--surface);border-radius:14px;
+  padding:18px;display:flex;flex-direction:column;gap:11px}
+.conn-card .seg{width:100%}
+.conn-card .seg label{flex:1}
+.conn-card .seg .seg-tag{width:100%}
+.gate-hint{font-size:.85rem;color:var(--text-3)}
 
 /* ---------- numbered step badge (buddy result) ---------- */
 .step-lbl{display:flex;align-items:center;gap:0}
@@ -464,25 +502,13 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     </div>
 
     <div class="form" id="host-form">
-      <div class="field">
-        <label for="in-task-id">Task id</label>
-        <input class="input" type="text" id="in-task-id" autocomplete="off" spellcheck="false"
-               placeholder="signin">
-      </div>
+      <div class="section-label">The task</div>
+
       <div class="field">
         <label for="in-title">Title</label>
         <input class="input" type="text" id="in-title" autocomplete="off" spellcheck="false"
-               placeholder="Optional — a human-friendly name">
-      </div>
-      <div class="field">
-        <label for="in-public-url">Public URL <span style="opacity:.6;font-weight:400">(buddy on another machine)</span></label>
-        <input class="input" type="text" id="in-public-url" autocomplete="off" spellcheck="false"
-               placeholder="Leave blank for same machine — else your https tunnel, e.g. https://abc.ngrok.app">
-        <p class="hint">Run <code>ngrok http 8787</code> and paste the https URL so a remote buddy's invite link reaches you.</p>
-        <label class="role-chk" style="margin-top:8px">
-          <input type="checkbox" id="in-trusted-net">
-          <span class="role-tag" style="--rc:var(--role-mobile)"><span class="role-pip"></span>Private network (Tailscale/WireGuard) — max security, allows http</span>
-        </label>
+               placeholder="e.g. Sign-in &amp; session API">
+        <p class="hint">A human-friendly name. We generate the task id for you.</p>
       </div>
 
       <div class="field">
@@ -497,29 +523,46 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
             <span class="seg-tag">Debug</span>
           </label>
         </div>
-        <p class="hint" id="mode-hint">Contract = full negotiate / lock / deploy / verify workflow. Debug = collaborate freely then mark resolved (no contract, no backend required).</p>
+        <p class="hint" id="mode-hint">Contract = negotiate → lock → build → verify. Agents agree a shared interface, sign it, then build against it.</p>
       </div>
 
       <div class="field">
         <span class="label-txt" id="roles-label">Roles</span>
-        <div class="roles" role="group" aria-labelledby="roles-label">
-          <label class="role-chk">
-            <input type="checkbox" id="role-backend" value="backend" checked disabled>
-            <span class="role-tag" style="--rc:var(--role-backend)"><span class="role-pip"></span>backend</span>
-          </label>
-          <label class="role-chk">
-            <input type="checkbox" id="role-frontend" value="frontend" checked>
-            <span class="role-tag" style="--rc:var(--role-frontend)"><span class="role-pip"></span>frontend</span>
-          </label>
-          <label class="role-chk">
-            <input type="checkbox" id="role-mobile" value="mobile">
-            <span class="role-tag" style="--rc:var(--role-mobile)"><span class="role-pip"></span>mobile</span>
-          </label>
-        </div>
-        <p class="hint" id="roles-note">backend is always required</p>
+        <p class="hint" id="roles-help" style="margin:0">Pick every role on this task — a contract needs at least two. Tap <strong>“you”</strong> on the one you’ll drive.</p>
+        <!-- compound role chips are rendered by JS into here -->
+        <div class="roles" id="roles-row" role="group" aria-labelledby="roles-label"></div>
+        <p class="hint" id="roles-note"></p>
       </div>
 
-      <button type="button" class="btn primary" id="btn-host">Create &amp; start broker</button>
+      <div class="section-label">Connection</div>
+
+      <div class="conn-card">
+        <span class="label-txt" id="conn-label">How does your buddy connect?</span>
+        <div class="seg" role="radiogroup" aria-labelledby="conn-label">
+          <label>
+            <input type="radio" name="conn-mode" id="conn-local" value="local" checked>
+            <span class="seg-tag">Same machine</span>
+          </label>
+          <label>
+            <input type="radio" name="conn-mode" id="conn-ngrok" value="ngrok">
+            <span class="seg-tag">Public tunnel</span>
+          </label>
+          <label>
+            <input type="radio" name="conn-mode" id="conn-tailscale" value="tailscale">
+            <span class="seg-tag">Private network</span>
+          </label>
+        </div>
+        <p class="hint" id="conn-hint"></p>
+        <div class="field" id="conn-url-wrap" hidden>
+          <input class="input" type="text" id="in-public-url" autocomplete="off" spellcheck="false"
+                 placeholder="https://…">
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:2px">
+        <button type="button" class="btn primary" id="btn-host" disabled>Create &amp; start broker</button>
+        <span class="gate-hint" id="host-gate"></span>
+      </div>
       <p class="hint" id="host-note" hidden></p>
 
       <div class="pairing" id="host-starting" role="status" aria-live="polite">
@@ -534,7 +577,20 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     <div class="result" id="host-result" aria-live="polite">
       <p class="paired" id="host-running-line"></p>
 
-      <div class="blk">
+      <!-- the host's OWN agent seat (populated when they picked a role for themselves) -->
+      <div id="host-seat" hidden>
+        <p class="paired" id="host-seat-line"></p>
+        <div class="blk" id="host-seat-cfg"><!-- Step 1: connect command injected here --></div>
+        <div class="blk">
+          <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your Claude session:</span>
+          <textarea class="prompt" id="host-seat-prompt" readonly rows="10" aria-label="Your agent briefing prompt"></textarea>
+          <div class="copy-row">
+            <button type="button" class="btn copy" data-copy="host-seat-prompt">Copy prompt</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="blk" id="host-invites-blk">
         <span class="lbl">Send each buddy their link:</span>
         <div class="invites" id="host-invites"></div>
       </div>
@@ -652,6 +708,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   Array.prototype.forEach.call(document.querySelectorAll('[data-nav]'), function(el){
     el.addEventListener('click', function(){ showView(el.getAttribute('data-nav')); });
   });
+
+  // deep-link target for the dashboard window's "+ New task" bridge (see gui._DashApi)
+  window.__sbGotoHost = function(){ showView('host'); };
 
   // ---- copy-to-clipboard helper ---------------------------------------
   Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function(btn){
@@ -816,15 +875,17 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   });
 
   // ---- host start flow -------------------------------------------------
-  var taskIdEl   = document.getElementById('in-task-id');
   var titleEl    = document.getElementById('in-title');
-  var roleBe     = document.getElementById('role-backend');
-  var roleFe     = document.getElementById('role-frontend');
-  var roleMo     = document.getElementById('role-mobile');
   var modeContract = document.getElementById('mode-contract');
   var modeDebug    = document.getElementById('mode-debug');
-  var rolesNote    = document.getElementById('roles-note');
+  var rolesRow   = document.getElementById('roles-row');
+  var rolesNote  = document.getElementById('roles-note');
+  var connRadios   = Array.prototype.slice.call(document.querySelectorAll('input[name="conn-mode"]'));
+  var connHint     = document.getElementById('conn-hint');
+  var connUrlWrap  = document.getElementById('conn-url-wrap');
+  var publicUrlEl  = document.getElementById('in-public-url');
   var hostBtn    = document.getElementById('btn-host');
+  var hostGate   = document.getElementById('host-gate');
   var hostNote   = document.getElementById('host-note');
   var hostStart  = document.getElementById('host-starting');
   var hostErr    = document.getElementById('host-error');
@@ -834,21 +895,99 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var openDash   = document.getElementById('btn-open-dash');
   var dashFall   = document.getElementById('host-dash-fallback');
 
-  // session-type toggle: Debug frees the backend role (no contract, no backend
-  // required); Contract keeps backend checked+disabled with the "required" note.
-  function applyMode(){
-    if (modeDebug.checked) {
-      roleBe.disabled = false;
-      rolesNote.hidden = true;
-    } else {
-      roleBe.checked = true;
-      roleBe.disabled = true;
-      rolesNote.hidden = false;
-    }
+  // --- role model: which roles are ON the task + which one is "you" (the host's seat).
+  // No role is special (model B: producer = whoever proposes). One control does both:
+  // tap a role to add/remove it; tap "you" on the one you'll drive.
+  var ALL_ROLES = ['backend','frontend','mobile'];
+  var cast = { backend:true };   // roles on the task; user adds more
+  var youRole = 'backend';       // the seat the host takes
+
+  function castRoles(){ return ALL_ROLES.filter(function(r){ return cast[r]; }); }
+
+  function renderRoles(){
+    rolesRow.innerHTML = '';
+    ALL_ROLES.forEach(function(role){
+      var on = !!cast[role];
+      var isYou = on && youRole === role;
+      var combo = document.createElement('div');
+      combo.className = 'role-combo' + (on ? ' on' : '') + (isYou ? ' is-you' : '');
+      combo.style.setProperty('--rc', 'var(--role-' + role + ')');
+      combo.innerHTML =
+        '<button type="button" class="role-main"><span class="role-pip"></span>' + role + '</button>' +
+        '<button type="button" class="role-you" aria-label="I am the ' + role + '">' + (isYou ? '✓ you' : 'you') + '</button>';
+      combo.querySelector('.role-main').addEventListener('click', function(){ toggleRole(role); });
+      combo.querySelector('.role-you').addEventListener('click', function(){ if (cast[role]) setYou(role); });
+      rolesRow.appendChild(combo);
+    });
+    refreshGate();
   }
+  function toggleRole(role){
+    if (cast[role]) {
+      delete cast[role];
+      if (youRole === role) youRole = castRoles()[0] || null;  // hand the seat to another role
+    } else {
+      cast[role] = true;
+      if (!youRole) youRole = role;
+    }
+    renderRoles();
+  }
+  function setYou(role){ youRole = role; renderRoles(); }
+
+  // session type only changes the min-role rule (contract needs 2, debug needs 1).
+  function applyMode(){ refreshGate(); }
   modeContract.addEventListener('change', applyMode);
   modeDebug.addEventListener('change', applyMode);
-  applyMode();
+
+  // Gate the Create button on a valid form, and say what's still missing.
+  function refreshGate(){
+    var title = (titleEl.value || '').trim();
+    var roles = castRoles();
+    var contract = !modeDebug.checked;
+    var minRoles = contract ? 2 : 1;
+    if (roles.length < minRoles) {
+      rolesNote.textContent = contract
+        ? 'Add at least one more role — a contract needs two agents.'
+        : 'Add at least one role.';
+    } else if (!youRole) {
+      rolesNote.textContent = 'Tap “you” on the role you’ll drive.';
+    } else {
+      rolesNote.textContent = '';
+    }
+    var msg = '';
+    if (!title) msg = 'Add a title to continue.';
+    else if (roles.length < minRoles) msg = 'Add ' + (roles.length ? 'another' : 'a') + ' role to continue.';
+    else if (!youRole) msg = 'Mark which role is you.';
+    hostGate.textContent = msg;
+    hostBtn.disabled = !!msg;
+  }
+  titleEl.addEventListener('input', refreshGate);
+
+  // connectivity: same-machine needs nothing; ngrok and Tailscale each show their own
+  // one-command setup + an https URL field (tailscale serve gives https too).
+  var CONN = {
+    local: {
+      hint: 'Same machine — your buddy’s agent runs on this computer. Nothing to set up.',
+      url: false
+    },
+    ngrok: {
+      hint: 'Public tunnel — a public https URL points at your broker, guarded by tokens. Run <code>ngrok http 8787</code>, then paste the URL it prints. Port <code>8787</code> is the default — use any port you like, just point the tunnel at the one the broker runs on.',
+      url: true, placeholder: 'https://abc-123.ngrok-free.app'
+    },
+    tailscale: {
+      hint: 'Private network — nothing is exposed to the public internet. You and your buddy must both be on the same Tailscale network. Run <code>tailscale serve 8787</code>, then paste your <code>https://…ts.net</code> URL.',
+      url: true, placeholder: 'https://your-machine.tailnet.ts.net'
+    }
+  };
+  function applyConn(){
+    var mode = (connRadios.filter(function(r){ return r.checked; })[0] || {}).value || 'local';
+    var c = CONN[mode] || CONN.local;
+    connHint.innerHTML = c.hint;
+    connUrlWrap.hidden = !c.url;
+    if (c.url) publicUrlEl.setAttribute('placeholder', c.placeholder || 'https://…');
+  }
+  connRadios.forEach(function(r){ r.addEventListener('change', applyConn); });
+  applyConn();
+  renderRoles();  // initial paint + gate
 
   hostBtn.addEventListener('click', function(){
     // reset transient UI
@@ -862,36 +1001,21 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       return;
     }
 
-    var taskId = (taskIdEl.value || '').trim();
-    var title  = (titleEl.value || '').trim();
-    if (!taskId) {
-      hostErr.textContent = 'Give the task an id first.';
-      hostErr.classList.add('show');
-      taskIdEl.focus();
-      return;
-    }
-
-    // session mode + roles. Contract forces backend; Debug sends whatever's checked.
+    // The button is gated on a valid form (see refreshGate), so just read the model.
+    var title = (titleEl.value || '').trim();
     var mode = modeDebug.checked ? 'debug' : 'contract';
-    var roles = [];
-    if (mode === 'debug') {
-      if (roleBe.checked) roles.push('backend');
-    } else {
-      roles.push('backend'); // always required in contract mode
-    }
-    if (roleFe.checked) roles.push('frontend');
-    if (roleMo.checked) roles.push('mobile');
+    var roles = castRoles();
+    var hostRole = youRole || '';
 
-    var publicUrlEl = document.getElementById('in-public-url');
-    var publicUrl = (publicUrlEl && publicUrlEl.value || '').trim();
-    var trustedEl = document.getElementById('in-trusted-net');
-    var trusted = !!(trustedEl && trustedEl.checked);
+    // connectivity → public URL (only for the remote modes)
+    var connMode = (connRadios.filter(function(r){ return r.checked; })[0] || {}).value || 'local';
+    var publicUrl = connMode === 'local' ? '' : (publicUrlEl && publicUrlEl.value || '').trim();
 
     // starting state
     hostBtn.disabled = true;
     hostStart.classList.add('show');
 
-    Promise.resolve(api.start_host(taskId, roles, title, publicUrl, trusted, mode)).then(function(res){
+    Promise.resolve(api.start_host(title, roles, hostRole, publicUrl, mode)).then(function(res){
       hostStart.classList.remove('show');
       hostBtn.disabled = false;
       handleHostResult(res || {});
@@ -915,9 +1039,13 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       '✓ Broker running · task “<span class="tid">' + esc(res.task_id) + '</span>”' +
       (res.base_url ? '<span class="base-url">' + esc(res.base_url) + '</span>' : '');
 
+    // the host's OWN seat (only when they picked a role for themselves)
+    renderHostSeat(res.host_seat || null);
+
     // invites — one row per role, link readonly + copy
     hostInv.innerHTML = '';
     var invites = res.invites || [];
+    document.getElementById('host-invites-blk').hidden = invites.length === 0;
     invites.forEach(function(inv){
       var col  = roleColor(inv.role);
       var link = inv.link || '';
@@ -953,6 +1081,43 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
     hostResult.classList.add('show');
     hostErr.classList.remove('show');
+  }
+
+  // The host's own agent seat — same Step 1 (connect) + Step 2 (brief) the buddy gets.
+  function renderHostSeat(seat){
+    var wrap = document.getElementById('host-seat');
+    if (!seat) { wrap.hidden = true; return; }
+
+    var col = roleColor(seat.role);
+    document.getElementById('host-seat-line').innerHTML =
+      'You’re the <span class="role" style="color:' + col + '">' + esc(seat.role) + '</span>' +
+      ' — set up your own agent:';
+
+    var cmd = seat.config_command || '';
+    var note;
+    if (seat.config_ok) {
+      note =
+        '<p class="hint" style="margin-top:2px">We tried to run this for you. ' +
+        'If <code>claude mcp list</code> doesn’t show <strong>sys-buddy</strong>, run the command ' +
+        'above in the terminal where you start Claude (same folder/profile).</p>';
+    } else {
+      note =
+        '<div class="alert amber show" role="status" style="margin-top:2px">' +
+          '<strong>Couldn’t auto-configure — run the command above in your terminal.</strong>' +
+        '</div>' +
+        (seat.config_detail ? '<p class="hint" style="margin-top:8px">' + esc(seat.config_detail) + '</p>' : '');
+    }
+    var cfg = document.getElementById('host-seat-cfg');
+    cfg.innerHTML =
+      '<span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your Claude to sys-buddy</span>' +
+      '<pre class="code">' + esc(cmd) + '</pre>' +
+      '<div class="copy-row"><button type="button" class="btn copy" id="host-seat-copy">Copy command</button></div>' +
+      note;
+    var cmdBtn = cfg.querySelector('#host-seat-copy');
+    cmdBtn.addEventListener('click', function(){ copyText(cmd, cmdBtn); });
+
+    document.getElementById('host-seat-prompt').value = seat.prompt || '';
+    wrap.hidden = false;
   }
 
   function showDashFallback(url){
