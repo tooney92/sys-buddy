@@ -1,0 +1,6 @@
+# Code owners for sys-buddy.
+# Every pull request touching these paths requires review from an owner listed
+# here before it can be merged. The catch-all below makes @tooney92 the required
+# reviewer for ALL changes — combined with branch protection on `main`, nothing
+# reaches main without the owner's approval.
+* @tooney92
