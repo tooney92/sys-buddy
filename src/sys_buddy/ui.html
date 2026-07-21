@@ -6,8 +6,8 @@
 <title>sys-buddy</title>
 <!-- sys-buddy dashboard — single-file vanilla rebuild of the design prototype (SPEC §12).
      Served at /ui. Auth rides an HttpOnly sb_view cookie (set by /ui from the ?v=
-     bootstrap link); fetches the read-only /api/* and polls every ~3s. No framework,
-     no build step. -->
+     bootstrap link); fetches the read-only /api/* and receives live change
+     notifications over an SSE stream (GET /api/stream). No framework, no build step. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -900,15 +900,90 @@ window.addEventListener('resize', function(){
   if(mob!==state.isMobile){ state.isMobile=mob; render(); }
 });
 
-/* ---------- boot + poll ---------- */
-function poll(){
+/* ---------- boot + live stream (SSE) ---------- */
+/* Replaces the old 3s poll: the broker pushes change notifications over
+   GET /api/stream (see SSE contract v1). We refetch via the existing helpers
+   when told — we never reload the page, and tokens stay opaque to the client. */
+var es=null;                     // active EventSource, or null while paused
+var idleTimer=null;
+var IDLE_MS=15*60*1000;          // ~15 min of no activity -> pause
+var liveBanner=null;
+
+/* one round of "get me current state" using the existing fetch helpers */
+function catchUp(){
   fetchTasks();
   if(state.view==='task' && state.taskId) fetchDetail(state.taskId);
 }
+
+function ensureBanner(){
+  if(liveBanner) return liveBanner;
+  var b=document.createElement('div');
+  b.id='sb-live-banner';
+  b.setAttribute('role','button');
+  b.setAttribute('title','Resume live updates');
+  b.style.cssText='position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:9999;'+
+    'display:none;align-items:center;gap:8px;padding:9px 14px;border-radius:10px;cursor:pointer;'+
+    'font-family:inherit;font-size:13px;font-weight:500;color:var(--text-2);'+
+    'background:var(--surface);border:1px solid var(--border-strong);box-shadow:var(--shadow)';
+  b.innerHTML='<span style="width:8px;height:8px;border-radius:50%;background:var(--st-open-dot);display:inline-block"></span>'+
+    '<span>Live updates paused — click to resume</span>';
+  b.onclick=function(){ resumeStream(); };
+  document.body.appendChild(b);
+  liveBanner=b;
+  return b;
+}
+function showBanner(){ ensureBanner().style.display='flex'; }
+function hideBanner(){ if(liveBanner) liveBanner.style.display='none'; }
+
+/* open (or re-open) the stream. Always starts with a catch-up fetch so a
+   resume is never stale, then relies on EventSource auto-reconnect for blips. */
+function openStream(){
+  catchUp();
+  if(es) return;                 // already streaming
+  try{
+    es=new EventSource('/api/stream');
+    es.addEventListener('tasks', function(){ fetchTasks(); });
+    es.addEventListener('task', function(e){
+      try{ var d=JSON.parse(e.data); if(d && d.id===state.taskId) fetchDetail(d.id); }catch(err){}
+    });
+    /* onerror: EventSource reconnects itself on server-side drops (ngrok/proxy
+       idle timeouts). We only force a true pause via pauseStream() below. */
+  }catch(err){ es=null; }
+}
+/* client-side close = no auto-reconnect = a genuine pause */
+function pauseStream(){
+  if(es){ es.close(); es=null; }
+  showBanner();
+}
+function resumeStream(){
+  hideBanner();
+  openStream();
+  armIdle();
+}
+
+/* ---- inactivity gate: pause after IDLE_MS of no user activity ---- */
+function armIdle(){
+  if(idleTimer) clearTimeout(idleTimer);
+  idleTimer=setTimeout(function(){ pauseStream(); }, IDLE_MS);
+}
+function onActivity(){
+  armIdle();
+  if(!es) resumeStream();         // any activity wakes a paused stream
+}
+['mousemove','keydown','scroll','click','touchstart'].forEach(function(ev){
+  window.addEventListener(ev, onActivity, {passive:true});
+});
+
+/* ---- visibility gate: pause when hidden, resume (+catch-up) when shown ---- */
+document.addEventListener('visibilitychange', function(){
+  if(document.hidden) pauseStream();
+  else resumeStream();
+});
+
 render();
-poll();  // the cookie carries auth; a missing/invalid token surfaces as a 401
-setInterval(poll, 3000);
-setInterval(patchVolatile, 1000); // keep "refreshed Ns ago" ticking
+openStream();  // begins with a catch-up fetch; cookie carries auth, a bad token surfaces as 401
+armIdle();
+setInterval(patchVolatile, 1000); // keep "refreshed Ns ago" ticking (local only)
 })();
 </script>
 </body>
