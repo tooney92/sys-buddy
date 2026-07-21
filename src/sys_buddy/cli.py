@@ -9,6 +9,7 @@ is the one network client: it runs on the *buddy's* machine and POSTs to /pair.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -19,10 +20,16 @@ from .config import DEFAULT_DB_PATH, DEFAULT_PORT, Config, set_config
 def _cfg_from_args(args: argparse.Namespace, mode: str = "local") -> Config:
     from .db import init_db
 
+    # public_url makes every host-side command (invite, host-viewer, …) emit links
+    # that point at the tunnel origin, not loopback. It's a process-local setting —
+    # `serve --public-url` only configures the serving process, so the *other*
+    # commands learn it from the --public-url flag (where they have one) or the
+    # SYS_BUDDY_PUBLIC_URL env var. Export the env var once and they all agree.
     cfg = set_config(
         Config(
             mode=mode,
             db_path=Path(getattr(args, "db", None) or DEFAULT_DB_PATH),
+            public_url=getattr(args, "public_url", None) or os.environ.get("SYS_BUDDY_PUBLIC_URL"),
         )
     )
     # Ensure the schema exists once per invocation (idempotent, cheap) so host-side
@@ -80,11 +87,12 @@ def cmd_invite(args: argparse.Namespace) -> int:
 
 def cmd_host_viewer(args: argparse.Namespace) -> int:
     from . import admin
+    from .config import get_config
 
     _cfg_from_args(args)
     token = admin.issue_host_viewer(args.label)
     print(f"Host viewer token (all tasks): {token}")
-    print("Open the dashboard at:  <broker-url>/ui?v=" + token)
+    print(f"Open the dashboard at:  {get_config().base_url}/ui?v={token}")
     return 0
 
 
@@ -273,6 +281,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("invite", help="Mint a single-use invite for a role")
     sp.add_argument("--task", required=True)
     sp.add_argument("--role", required=True)
+    sp.add_argument(
+        "--public-url",
+        help="Tunnel origin for the links (e.g. https://abc123.ngrok.app). "
+        "Defaults to $SYS_BUDDY_PUBLIC_URL, else loopback.",
+    )
     sp.set_defaults(func=cmd_invite)
 
     sp = sub.add_parser("host-viewer", help="Issue an all-tasks host viewer token")
