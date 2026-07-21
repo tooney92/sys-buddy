@@ -2,18 +2,19 @@
 
 # sys-buddy
 
-**Let your AI coding agent talk to your teammate's AI coding agent.**
+**Let your AI coding agent talk to your teammates' agents.**
 
-*Two buddies, one task. Their agents negotiate the contract, build, and ship — you just watch.*
+*One task, your agents on it — they negotiate the contract, build, and ship while you just watch.*
 
 </div>
 
 ---
 
-> **Status: backend built, dogfooding.** The broker, MCP tools, enforced state
-> machine, pairing, dashboard API, Slack, and dashboard UI are implemented and
-> covered by 100+ tests plus a live end-to-end. See the [Quickstart](#quickstart)
-> to run it. Design/spec live in `SPEC.md`, `KICKOFF.md`, and `DECISIONS.md`.
+> **Status: built and dogfooding.** The broker, MCP tools, enforced state
+> machine, pairing (CLI + browser onboarding), dashboard API, live-updating
+> dashboard UI, and Slack are implemented and covered by 260+ tests plus a live
+> end-to-end. See the [Quickstart](#quickstart) to run it. Design/spec live in
+> `SPEC.md`, `KICKOFF.md`, and `DECISIONS.md`.
 
 ---
 
@@ -61,7 +62,13 @@ Nobody relayed a message.
 ```bash
 git clone https://github.com/tooney92/sys-buddy && cd sys-buddy
 uv sync                      # creates .venv with everything
-# `uv run sys-buddy ...`  — or activate the venv and call `sys-buddy` directly
+```
+
+The CLI runs as `uv run sys-buddy ...`. The examples below drop that prefix — so
+**alias it once** (or activate the venv) and the commands work as written:
+
+```bash
+alias sys-buddy="uv run sys-buddy"     # add to ~/.zshrc / ~/.bashrc to keep it
 ```
 
 ### Local — 60 seconds, no auth (solo dev, many repos on one machine)
@@ -71,6 +78,7 @@ uv sync                      # creates .venv with everything
 sys-buddy local                                    # → http://127.0.0.1:8787
 
 # 2. register it with Claude Code in each repo
+#    (re-pairing later? run `claude mcp remove sys-buddy` first — a name can't be overwritten)
 claude mcp add --transport http sys-buddy http://127.0.0.1:8787/mcp
 
 # 3. watch it happen (optional)
@@ -87,16 +95,30 @@ coordination automatic.
 ```bash
 # ── HOST ─────────────────────────────────────────────
 ngrok http 8787                                    # or Tailscale / real infra
-sys-buddy serve --public-url https://abc123.ngrok.app
+
+# tell every command the tunnel origin — serve AND invite/host-viewer read this,
+# so the links they print point at the tunnel, not loopback:
+export SYS_BUDDY_PUBLIC_URL=https://abc123.ngrok.app
+
+sys-buddy serve                                    # binds 0.0.0.0, auth enforced
 sys-buddy task create signin --roles backend,frontend
-sys-buddy invite --task signin --role frontend     # → signin-J7fK2mQx  (single use, 15 min)
-# share the URL + code with your buddy over Slack/Signal
+sys-buddy invite --task signin --role frontend     # → prints the buddy's https://…/join link + code
+# send your buddy that /join link over Slack/Signal (or the sb1_ blob for CLI/desktop)
 
 # ── BUDDY ────────────────────────────────────────────
 sys-buddy join https://abc123.ngrok.app signin-J7fK2mQx --name dave-frontend
 # → prints the agent token + the exact `claude mcp add ... --header "Authorization: Bearer sbk_..."`
 #   command to run, plus a read-only dashboard link
 ```
+
+`--name` is your agent's **alias** — the label that stamps every message and Slack
+ping (e.g. `dave-frontend`). Pick something recognizable; it's how the other humans
+tell whose agent said what.
+
+**No CLI required for the buddy.** The invite doubles as a browser link — the host can
+send it straight over Slack/Signal. Opening it lands on `/join`, which walks the buddy
+through the Claude setup command, the briefing prompt, and their dashboard link. Cloning
+the repo is optional (only needed if they want to run their own broker).
 
 Slack pings (optional): set `SLACK_WEBHOOK_URL` before `sys-buddy serve` and both
 humans get a message on contract-lock, verified, and stuck.
@@ -134,7 +156,7 @@ reference/   ← agent_bus.py: working local-only predecessor + its ops guide
 
 ```bash
 uv sync                        # install deps into .venv
-uv run pytest -q               # the full spec suite (100+ tests)
+uv run pytest -q               # the full spec suite (260+ tests)
 uv run sys-buddy --help        # the CLI surface
 ```
 
