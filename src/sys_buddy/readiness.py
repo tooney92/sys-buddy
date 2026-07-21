@@ -40,7 +40,7 @@ def _contract_questions(role: str, mode: str) -> list[dict]:
     """Contract-phase questions layered on top of the general set. The backend
     (producer) is drilled on PROPOSING; every other role on ASSESSING/pushing back
     and signing. Both learn the post-lock loop: keep working via messages, and how to
-    reopen negotiations. Empty for debug tasks (no contract to negotiate)."""
+    reopen planning. Empty for debug tasks (no contract to plan)."""
     if mode == "debug":
         return []
     if _is_backend(role):
@@ -60,7 +60,7 @@ def _contract_questions(role: str, mode: str) -> list[dict]:
         {
             "id": "renegotiate",
             "q": "After a contract is locked, can you keep collaborating via messages "
-                 "without re-locking, and how do both of you reopen negotiations to re-sign?",
+                 "without re-locking, and how do both of you reopen planning to re-sign?",
         },
     ]
 
@@ -121,7 +121,7 @@ def preview_questions() -> list[str]:
         "Backend: what must the contract you propose contain, and which tool proposes it? "
         "(Others: how do you push back on a proposal before signing, and how do you sign?)",
         "After a contract is locked, can you keep collaborating via messages without "
-        "re-locking, and how do both of you reopen negotiations to re-sign?",
+        "re-locking, and how do both of you reopen planning to re-sign?",
     ]
 
 
@@ -244,7 +244,7 @@ def _grade_renegotiate(answer: str, role: str, task_id: str, mode: str) -> tuple
         "After lock you can keep collaborating over messages with no re-lock — ad-hoc "
         "changes and bug reports are just messages. Only if a party expressly wants a "
         "re-signed contract: agree in chat, then either of you calls reopen_negotiations "
-        "to go back to negotiations and propose a new version."
+        "to go back to planning and propose a new version."
     )
 
 

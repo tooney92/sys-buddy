@@ -141,7 +141,7 @@ def _roles(conn, task_id: str) -> list[str]:
 def _current_locked(conn, task_id: str) -> dict | None:
     """The highest-version locked contract for the task, or None.
 
-    'Current' is the *newest* locked version: a v2 renegotiation supersedes v1
+    'Current' is the *newest* locked version: a v2 replanning supersedes v1
     the moment v2 locks, even though v1's row stays 'locked' for the audit trail.
     """
     row = conn.execute(
@@ -177,10 +177,10 @@ def _producer_role(conn, task_id: str) -> str | None:
 # contract lifecycle
 # --------------------------------------------------------------------------- #
 def propose_contract(conn, identity: Identity, spec: dict) -> dict:
-    """Validate and record a contract proposal, (re)opening negotiation.
+    """Validate and record a contract proposal, (re)opening planning.
 
     A proposal is valid from ``open`` or any later non-terminal state — a v2+
-    proposal from, say, ``backend_live`` reopens negotiation and drops the task
+    proposal from, say, ``backend_live`` reopens planning and drops the task
     back to ``contract_proposed`` (SPEC §5 rule 1). Terminal tasks cannot be
     reopened without a human.
     """
@@ -196,7 +196,7 @@ def propose_contract(conn, identity: Identity, spec: dict) -> dict:
     _reject_if_terminal(current)
 
     # Both parties must clear pre-flight before ANYONE can propose (owner rule): a
-    # contract negotiated with an agent that never proved it understands the protocol
+    # contract agreed with an agent that never proved it understands the protocol
     # is worthless. Remote-only — local self-declared identities don't run pre-flight
     # (the middleware readiness gate is remote-only too), so gating there would brick
     # the whole local contract flow.
@@ -239,8 +239,8 @@ def propose_contract(conn, identity: Identity, spec: dict) -> dict:
     state = _transition(conn, identity.task_id, CONTRACT_PROPOSED)
     conn.commit()
     # Tell the peer directly — a transition event alone is dashboard-only and would
-    # never reach the other agent's wait_for_message queue. This is what makes the
-    # negotiation actually flow: the peer hears "there's a proposal to assess."
+    # never reach the other agent's wait_for_message queue. This is what makes
+    # planning actually flow: the peer hears "there's a proposal to assess."
     n_endpoints = len(spec.get("endpoints", []))
     service.post_message(
         conn,
@@ -345,14 +345,14 @@ def lock_contract(conn, identity: Identity, version: int) -> dict:
 
 
 def reopen_negotiations(conn, identity: Identity, reason: str) -> dict:
-    """Drop a locked-or-later task back to ``contract_proposed`` (negotiations) so a
+    """Drop a locked-or-later task back to ``contract_proposed`` (planning) so a
     new contract version can be proposed and re-signed.
 
     Non-destructive: the currently-locked contract keeps serving via ``get_contract``
     until a NEW version locks — nothing is deleted. Either party may call it (the
     "agreement" happens in chat first; a one-sided reopen is harmless — the peer just
     won't propose/sign anything new). Rejected on terminal tasks, and on tasks that
-    haven't locked a contract yet (there's nothing to renegotiate — just keep talking
+    haven't locked a contract yet (there's nothing to re-plan — just keep talking
     or propose a first version).
     """
     current = _state(conn, identity.task_id)
@@ -360,11 +360,11 @@ def reopen_negotiations(conn, identity: Identity, reason: str) -> dict:
 
     if _current_locked(conn, identity.task_id) is None:
         raise ValueError(
-            "nothing to reopen — no contract has locked yet. Keep negotiating, or "
+            "nothing to reopen — no contract has locked yet. Keep planning, or "
             "propose a first version with propose_contract."
         )
     if current in (OPEN, CONTRACT_PROPOSED):
-        raise ValueError(f"already in negotiations (state '{current}') — nothing to reopen")
+        raise ValueError(f"already in planning (state '{current}') — nothing to reopen")
 
     detail = (reason or "").strip() or "(no reason given)"
     service.assert_content_size(detail, "reopen reason")
@@ -375,7 +375,7 @@ def reopen_negotiations(conn, identity: Identity, reason: str) -> dict:
         conn,
         identity,
         "renegotiation",
-        f"Reopened negotiations (was {current}): {detail}. The last locked contract still "
+        f"Reopened planning (was {current}): {detail}. The last locked contract still "
         f"stands until a new version is proposed and re-signed.",
     )
     return {"state": state, "from": current, "reason": detail}
@@ -487,7 +487,7 @@ def _report_deployed(conn, identity: Identity, detail: str) -> dict:
         )
 
     # Strike reset: if the current locked contract was locked *after* the previous
-    # deploy, the backend is deploying a renegotiated version — a fresh attempt, so
+    # deploy, the backend is deploying a re-planned version — a fresh attempt, so
     # the ping-pong counter starts over. Same contract redeployed = same loop, keep
     # the count. This needs no extra column: locked_at vs the last deploy event time.
     last_deploy = conn.execute(

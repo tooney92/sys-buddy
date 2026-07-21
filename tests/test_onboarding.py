@@ -132,11 +132,11 @@ def test_role_prompt_is_role_aware_backend_vs_consumer():
     assert "not forced to sign" in low_f
 
 
-def test_role_prompt_teaches_negotiations_and_reopen():
+def test_role_prompt_teaches_planning_and_reopen():
     """Both roles learn the phase name, the post-lock messaging rule, and reopen."""
     for role in ("backend", "frontend"):
         low = onboarding.role_prompt(role, "signin").lower()
-        assert "negotiation" in low
+        assert "planning" in low
         assert "reopen_negotiations" in low
         # after lock: keep working via messages, no re-lock needed for ad-hoc changes
         assert "no re-lock" in low or "without" in low
@@ -154,7 +154,7 @@ def test_role_prompt_consumer_mentions_optional_playwright():
 def test_role_prompt_debug_has_no_contract():
     text = onboarding.role_prompt("backend", "signin", mode="debug")
     assert "debug task" in text
-    assert "no contract to negotiate" in text
+    assert "no contract to plan" in text
     assert "propose_contract" not in text
 
 
