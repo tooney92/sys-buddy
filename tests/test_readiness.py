@@ -144,11 +144,11 @@ def test_submit_readiness_persists_status_and_report(conn):
     assert failed["ready"] is False
     assert failed["readiness_report"] and any(not r["ok"] for r in failed["readiness_report"])
 
-    # Correct answers → passed, ready, and negotiation guidance handed back.
+    # Correct answers → passed, ready, and planning guidance handed back.
     good = _correct_answers("backend", "signin", "contract")
     res = tools._op_submit_readiness(ident, good)
     assert res["passed"] is True
-    assert "negotiation" in res.get("next", "").lower()
+    assert "planning" in res.get("next", "").lower()
     passed = next(a for a in api._agents_for(conn, "signin") if a["role"] == "backend")
     assert passed["readiness_status"] == "passed"
     assert passed["ready"] is True

@@ -225,7 +225,7 @@ def _op_submit_readiness(ident: Identity, answers: dict) -> dict:
         audit.event("agent_ready", task=ident.task_id, role=ident.role, name=ident.name)
         if mode != "debug":
             result["next"] = (
-                "Passed ✓ — your action tools are unlocked. Next is NEGOTIATIONS: talk with "
+                "Passed ✓ — your action tools are unlocked. Next is PLANNING: talk with "
                 "your peer (send_message) and pull the task's scope from your human. Your "
                 "human decides who proposes the contract — both parties must clear pre-flight "
                 "before anyone can propose. If you're the backend, propose_contract when your "
@@ -289,7 +289,7 @@ def _register_remote(mcp: FastMCP) -> None:
         """Propose a structured API contract for your task (SPEC §6).
 
         `spec` must contain `endpoints` (list; each with a valid `method` and a
-        non-empty `path`) and an absolute https `staging_url`. Reopens negotiation
+        non-empty `path`) and an absolute https `staging_url`. Reopens planning
         if a contract already exists. Returns the new `version`, or raises with the
         exact validation errors to fix."""
         return _op_propose(require_current(), spec)
@@ -309,8 +309,8 @@ def _register_remote(mcp: FastMCP) -> None:
 
     @mcp.tool
     def reopen_negotiations(reason: str) -> dict:
-        """Reopen NEGOTIATIONS on a task whose contract is already locked (or later),
-        dropping it back to the negotiation phase so a new contract version can be
+        """Reopen PLANNING on a task whose contract is already locked (or later),
+        dropping it back to the planning phase so a new contract version can be
         proposed and re-signed. Non-destructive: the currently-locked contract keeps
         serving via get_contract until a new version locks. Ad-hoc changes DON'T need
         this — just keep messaging. Use it only when a party expressly wants a
@@ -416,8 +416,8 @@ def _register_local(mcp: FastMCP) -> None:
 
     @mcp.tool
     def reopen_negotiations(task: str, agent: str, reason: str) -> dict:
-        """Reopen NEGOTIATIONS on `task` (contract already locked or later), dropping it
-        back to the negotiation phase so a new version can be proposed and re-signed.
+        """Reopen PLANNING on `task` (contract already locked or later), dropping it
+        back to the planning phase so a new version can be proposed and re-signed.
         `agent` is your name. Non-destructive: the locked contract keeps serving via
         get_contract until a new version locks. Ad-hoc changes don't need this — just
         keep messaging; use it only when a party expressly wants a re-signed contract."""

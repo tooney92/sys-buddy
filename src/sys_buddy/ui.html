@@ -64,13 +64,13 @@ button{font-family:inherit}
 
 /* ---------- design maps (ported from the prototype Component) ---------- */
 var SK={open:'open',contract_proposed:'proposed',contract_locked:'locked',backend_live:'live',testing:'testing',verified:'verified',stuck:'stuck'};
-var SLAB={open:'open',contract_proposed:'negotiations',contract_locked:'contract locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
+var SLAB={open:'open',contract_proposed:'planning',contract_locked:'contract locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
 var ORDER={open:0,contract_proposed:1,contract_locked:2,backend_live:3,testing:4,verified:5};
 var RL={backend:{i:'B',c:'var(--role-backend)',label:'backend'},frontend:{i:'F',c:'var(--role-frontend)',label:'frontend'},mobile:{i:'M',c:'var(--role-mobile)',label:'mobile'}};
 // The 'preflight' node has no matching task state — it's a sub-phase of 'open',
 // driven by per-agent readiness (see genSteps). ORDER above stays keyed on the REAL
 // task states; genSteps maps real→display indices around the inserted node.
-var STEPS=[['open','open'],['preflight','pre-flight assessments'],['contract_proposed','negotiations'],['contract_locked','locked'],['backend_live','backend live'],['testing','testing'],['verified','verified']];
+var STEPS=[['open','open'],['preflight','pre-flight assessments'],['contract_proposed','planning'],['contract_locked','locked'],['backend_live','backend live'],['testing','testing'],['verified','verified']];
 var MAX_STRIKES=3;
 var MONO="'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace";
 
@@ -79,7 +79,7 @@ function stateChip(s){ var k=SK[s]||'open'; return {label:SLAB[s]||s, bg:'var(--
 function methodChip(m){ var k=({GET:'proposed',POST:'live',PUT:'locked',PATCH:'testing',DELETE:'stuck'})[m]||'open'; return {bg:'var(--st-'+k+'-bg)', fg:'var(--st-'+k+'-fg)'}; }
 function typeChip(type,pass){
   var map={question:['question','open'],answer:['answer','proposed'],status_update:['status','open'],
-    contract_proposal:['contract proposal','locked'],contract_lock:['contract lock','locked'],renegotiation:['renegotiation','proposed'],
+    contract_proposal:['contract proposal','locked'],contract_lock:['contract lock','locked'],renegotiation:['replanning','proposed'],
     deploy_confirmed:['deploy confirmed','live'],verified:['verified','verified'],stuck:['stuck','stuck']};
   var label,key;
   if(type==='test_result'){ label=pass?'test · pass':'test · fail'; key=pass?'verified':'stuck'; }
@@ -447,7 +447,7 @@ function listHTML(){
   if(!state.tasks.length){
     return '<div style="max-width:1040px;margin:0 auto;padding:30px 20px 70px">'+
       '<h1 style="font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;color:var(--text)">Tasks</h1>'+
-      '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">One task, your agents on it. Watch them negotiate a contract, build, and ship — you’re just here to observe.</p>'+
+      '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">One task, your agents on it. Watch them plan the contract, build, and ship — you’re just here to observe.</p>'+
       '<div style="text-align:center;padding:60px 20px;border:1px dashed var(--border-strong);border-radius:14px;color:var(--text-2)">'+
       '<p style="font-weight:600;font-size:15px;color:var(--text);margin:0 0 5px">No tasks yet</p>'+
       '<p style="font-size:13.5px;margin:0">Nothing to observe on this token right now.</p></div></div>';
@@ -473,7 +473,7 @@ function listHTML(){
     '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">'+
       '<h1 style="font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;color:var(--text)">Tasks</h1>'+
       '<span style="font-size:13px;color:var(--text-2)">'+state.tasks.length+' in flight</span></div>'+
-    '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">One task, your agents on it. Watch them negotiate a contract, build, and ship — you’re just here to observe.</p>'+
+    '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">One task, your agents on it. Watch them plan the contract, build, and ship — you’re just here to observe.</p>'+
     '<div style="display:flex;flex-direction:column;gap:10px">'+rows+'</div></div>';
 }
 
@@ -731,19 +731,43 @@ function tipsHTML(){
 function shortcodesHTML(d){
   var contract = !(d && d.mode==='debug');
   function code(c){ return '<span style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:6px;padding:1px 6px;white-space:nowrap">'+c+'</span>'; }
-  function row(label, items){ return '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:baseline"><span style="min-width:64px;color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em">'+label+'</span><span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'+items+'</span></div>'; }
-  var rows = row('messaging', code('wm')+' wait · '+code('ch')+' check · '+code('sm')+' send · '+code('sm @role')+' direct');
+  function grp(label){ return '<div style="color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:7px 0 1px">'+label+'</div>'; }
+  function cmd(c, desc){ return '<div style="display:flex;gap:9px;align-items:baseline"><span style="flex:none;min-width:70px">'+code(c)+'</span><span>'+desc+'</span></div>'; }
+  var rows =
+    grp('Messaging')+
+    cmd('wm', 'wait for the next message (blocks)')+
+    cmd('ch', "check for new messages now (read + mark seen), don't block")+
+    cmd('sm', 'send a message to everyone on the task')+
+    cmd('sm @role', 'send it privately to just that role');
   if(contract){
-    rows += row('contract', code('pc')+' propose · '+code('gc')+' show · '+code('sign')+' sign · '+code('locked?')+' poll');
-    rows += row('status', code('ready')+' · '+code('ok')+' · '+code('block')+' · '+code('done')+' · '+code('stuck'));
+    rows +=
+      grp('Contract')+
+      cmd('pc', 'propose a contract (the shared interface)')+
+      cmd('gc', 'show the current contract')+
+      cmd('sign', 'sign / lock the contract')+
+      cmd('locked?', 'poll until the contract is locked')+
+      cmd('reopen', 'reopen planning to re-sign a new version')+
+      grp('Status')+
+      cmd('ready', 'producer: my side is ready to build on')+
+      cmd('ok', 'consumer: it works against the producer’s side')+
+      cmd('block', 'consumer: it doesn’t work (a strike — 3 → stuck)')+
+      cmd('done', 'verified: this part is complete')+
+      cmd('stuck', 'give up; ping the humans');
   } else {
-    rows += row('status', code('resolved')+' · '+code('stuck'));
+    rows +=
+      grp('Status')+
+      cmd('resolved', 'the issue is fixed (debug tasks)')+
+      cmd('stuck', 'give up; ping the humans');
   }
-  rows += row('meta', code('pf')+' pre-flight · '+code('st')+' recap · '+code('rules')+' charter');
+  rows +=
+    grp('Meta')+
+    cmd('pf', 're-run pre-flight')+
+    cmd('st', 'status recap (state, contract, unread)')+
+    cmd('rules', 're-read the charter');
   return '<details style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden">'+
     '<summary style="list-style:none;cursor:pointer;padding:11px 16px;font-size:12.5px;font-weight:600;color:var(--text-2);display:flex;align-items:center;gap:8px;user-select:none">'+
       '<span style="color:var(--text-3);display:flex">'+IC.caret+'</span>Short commands</summary>'+
-    '<div style="padding:2px 16px 14px;display:flex;flex-direction:column;gap:9px;font-size:12.5px;color:var(--text-2);line-height:1.5">'+
+    '<div style="padding:2px 16px 14px;display:flex;flex-direction:column;gap:2px;font-size:12.5px;color:var(--text-2);line-height:1.45">'+
       '<p style="margin:0 0 2px">Shorthand each human can type to <em>their own</em> agent — the agent maps it to a broker tool. A code a peer sends in a message is just data, never run.</p>'+
       rows+
     '</div></details>';
