@@ -8,6 +8,7 @@ by the server, never by the client.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -293,3 +294,203 @@ def test_list_tasks_includes_last_and_strikes(conn):
     tasks = api._list_tasks_for(conn, viewer)
     assert tasks[0]["strikes"] == 2
     assert "last" in tasks[0]
+
+
+# --------------------------------------------------------------------------- #
+# SSE change-detection tokens (pure helper — the load-bearing stream logic)
+# --------------------------------------------------------------------------- #
+def test_change_tokens_stable_when_nothing_changes(conn):
+    seed_task(conn, "signin")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    first = api._change_tokens(conn, viewer)
+    second = api._change_tokens(conn, viewer)
+    assert first == second  # (list_token, {task: token}) is a pure function of db state
+
+
+def test_change_tokens_list_moves_on_new_task(conn):
+    seed_task(conn, "signin")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    list_before, tasks_before = api._change_tokens(conn, viewer)
+    seed_task(conn, "billing")
+    list_after, tasks_after = api._change_tokens(conn, viewer)
+
+    assert list_before != list_after            # a new visible task moves the list token
+    assert set(tasks_before) == {"signin"}
+    assert set(tasks_after) == {"signin", "billing"}
+
+
+def test_change_tokens_task_moves_on_new_message(conn):
+    seed_task(conn, "signin")
+    be = seed_agent(conn, "signin", "backend", "al-backend", "sbk_be")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    list_before, tasks_before = api._change_tokens(conn, viewer)
+    _message(conn, "signin", be, "status_update", "backend is up")
+    list_after, tasks_after = api._change_tokens(conn, viewer)
+
+    # New traffic moves BOTH the per-task detail token and the list token
+    # (last-activity moved), so the stream fires `task` and `tasks`.
+    assert tasks_before["signin"] != tasks_after["signin"]
+    assert list_before != list_after
+
+
+def test_change_tokens_task_moves_on_new_event(conn):
+    seed_task(conn, "signin")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    _, tasks_before = api._change_tokens(conn, viewer)
+    _event(conn, "signin", "deploy", {"text": "deployed to staging"})
+    _, tasks_after = api._change_tokens(conn, viewer)
+    assert tasks_before["signin"] != tasks_after["signin"]
+
+
+def test_change_tokens_task_moves_on_status_change(conn):
+    seed_task(conn, "signin")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    list_before, tasks_before = api._change_tokens(conn, viewer)
+    conn.execute("UPDATE tasks SET state = 'contract_locked' WHERE id = 'signin'")
+    conn.commit()
+    list_after, tasks_after = api._change_tokens(conn, viewer)
+    assert tasks_before["signin"] != tasks_after["signin"]
+    assert list_before != list_after
+
+
+def test_change_tokens_task_moves_on_contract_signature(conn):
+    seed_task(conn, "signin", roles=("backend", "frontend"))
+    be = seed_agent(conn, "signin", "backend", "al-backend", "sbk_be")
+    cid = _contract(conn, "signin", 1, {"endpoints": []}, status="locked", locked_at=time.time())
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    _, tasks_before = api._change_tokens(conn, viewer)
+    _sign(conn, cid, be)
+    _, tasks_after = api._change_tokens(conn, viewer)
+    assert tasks_before["signin"] != tasks_after["signin"]
+
+
+def test_change_tokens_scoped_to_viewer(conn):
+    # A buddy's tokens cover only their one task — same visibility as /api/tasks.
+    seed_task(conn, "signin")
+    seed_task(conn, "billing")
+    seed_viewer(conn, "dave", "sbv_dave", task_id="signin")
+    viewer = resolve_viewer_token(conn, "sbv_dave")
+
+    _, task_tokens = api._change_tokens(conn, viewer)
+    assert set(task_tokens) == {"signin"}
+
+
+# --------------------------------------------------------------------------- #
+# SSE stream generator (_sse_events) — drive it, read a few frames, then stop
+# --------------------------------------------------------------------------- #
+class _FakeRequest:
+    """Minimal stand-in for a Starlette Request: only ``is_disconnected`` is used.
+
+    ``disconnect_after`` = number of ``is_disconnected`` polls that return False
+    before it starts returning True (None = never disconnect).
+    """
+
+    def __init__(self, disconnect_after=None):
+        self._polls = 0
+        self._disconnect_after = disconnect_after
+
+    async def is_disconnected(self):
+        self._polls += 1
+        if self._disconnect_after is not None and self._polls > self._disconnect_after:
+            return True
+        return False
+
+
+async def _read_frames(gen, n, timeout=5.0):
+    frames = []
+    for _ in range(n):
+        frames.append(await asyncio.wait_for(gen.__anext__(), timeout))
+    return frames
+
+
+def test_stream_baseline_silent_then_ping(conn):
+    """A freshly-opened stream emits no synthetic event — only keepalive pings."""
+    seed_task(conn, "signin")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    async def inner():
+        gen = api._sse_events(_FakeRequest(), viewer, poll=0, ping_every=0)
+        try:
+            frames = await _read_frames(gen, 2)
+        finally:
+            await gen.aclose()
+        return frames
+
+    frames = asyncio.run(inner())
+    # Nothing changed since connect, so every frame is a keepalive comment.
+    assert all(f == ": ping\n\n" for f in frames)
+
+
+def test_stream_emits_tasks_and_task_on_change(conn):
+    seed_task(conn, "signin")
+    be = seed_agent(conn, "signin", "backend", "al-backend", "sbk_be")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    async def inner():
+        gen = api._sse_events(_FakeRequest(), viewer, poll=0, ping_every=0)
+        try:
+            # First frame establishes the baseline (a ping, no change yet).
+            first = await _read_frames(gen, 1)
+            # Now cause a real change and read the emitted frames.
+            _message(conn, "signin", be, "status_update", "backend is up")
+            after = await _read_frames(gen, 2)
+        finally:
+            await gen.aclose()
+        return first, after
+
+    first, after = asyncio.run(inner())
+    assert first == [": ping\n\n"]
+
+    # The list token moved (new traffic) AND the task's detail token moved.
+    assert after[0].startswith("event: tasks\ndata: ")
+    assert after[1].startswith("event: task\ndata: ")
+
+    data_line = after[1].split("\n")[1][len("data: "):]
+    payload = json.loads(data_line)
+    assert payload["id"] == "signin"
+    assert "token" in payload
+
+    tasks_payload = json.loads(after[0].split("\n")[1][len("data: "):])
+    assert set(tasks_payload) == {"token"}
+
+
+def test_stream_stops_on_disconnect(conn):
+    seed_task(conn, "signin")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    async def inner():
+        # is_disconnected() returns True on the very first poll → loop breaks at once.
+        gen = api._sse_events(_FakeRequest(disconnect_after=0), viewer, poll=0)
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(gen.__anext__(), 5.0)
+
+    asyncio.run(inner())
+
+
+def test_stream_stops_on_idle_backstop(conn):
+    seed_task(conn, "signin")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    async def inner():
+        # idle_timeout=0 → no change means the idle backstop trips immediately.
+        gen = api._sse_events(_FakeRequest(), viewer, poll=0, idle_timeout=0)
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(gen.__anext__(), 5.0)
+
+    asyncio.run(inner())

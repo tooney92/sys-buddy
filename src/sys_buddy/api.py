@@ -14,11 +14,17 @@ resolve the viewer token, enforce scope, open/close a connection, and serialise.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
 
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 
 from . import identity, readiness
 from .config import Config
@@ -370,6 +376,133 @@ def _task_detail(conn, task_id: str) -> dict | None:
 
 
 # --------------------------------------------------------------------------- #
+# live-stream change detection (SSE — see the /api/stream route)
+# --------------------------------------------------------------------------- #
+def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
+    """Opaque change-detection tokens for the SSE stream, scoped to the viewer.
+
+    Returns ``(list_token, {task_id: task_token})``:
+
+    * ``list_token`` fingerprints the viewer's VISIBLE task list — its membership
+      plus each task's state/strikes and latest activity — so it moves whenever a
+      task appears, changes state, or gains new traffic (drives the ``tasks`` event).
+    * each ``task_token`` fingerprints one task's DETAIL — state/strikes, latest
+      activity, message/event/agent counts, agent readiness, and contract
+      version/lock/signature state — so it moves whenever that task's detail
+      changes (drives the ``task`` event).
+
+    Pure and connection-taking like the sibling ``_``-helpers, and built ONLY from
+    the existing query helpers so the viewer scoping/visibility matches the JSON
+    routes exactly (no duplicated query logic). Tokens are opaque strings; only
+    this module ever computes or compares them.
+    """
+    list_parts: list[str] = []
+    task_tokens: dict[str, str] = {}
+    for t in _list_tasks_for(conn, viewer):
+        tid = t["id"]
+        row = conn.execute("SELECT created_at FROM tasks WHERE id = ?", (tid,)).fetchone()
+        created_at = row["created_at"] if row else 0.0
+        last = _last_activity(conn, tid, created_at)
+
+        # List-level fingerprint: membership + coarse per-task state (NOT the
+        # wall-clock "last ago" string, which would churn every second).
+        list_parts.append(f"{tid}|{t['state']}|{t['strikes']}|{last!r}")
+
+        # Detail-level fingerprint: reuse the same helpers the /api/task route
+        # composes from, then reduce to counts + the fields the UI actually renders.
+        contract = _contract_for(conn, tid)
+        fingerprint = {
+            "state": t["state"],
+            "strikes": t["strikes"],
+            "last": last,
+            "messages": len(_messages_for(conn, tid)),
+            "events": len(_events_for(conn, tid)),
+            "agents": [
+                [a["role"], a["ready"], a["readiness_status"]] for a in _agents_for(conn, tid)
+            ],
+            "contract": [
+                [v["id"], v["locked"], len(contract["data"][v["id"]]["signed"])]
+                for v in contract["versions"]
+            ],
+        }
+        task_tokens[tid] = json.dumps(fingerprint, sort_keys=True)
+
+    return json.dumps(sorted(list_parts)), task_tokens
+
+
+async def _sse_events(
+    request,
+    viewer: ViewerIdentity,
+    *,
+    poll: float = 1.0,
+    ping_every: float = 15.0,
+    idle_timeout: float = 30 * 60.0,
+):
+    """Async generator of SSE frames for one viewer's ``/api/stream`` connection.
+
+    Each iteration reads the viewer's current change tokens from the LOCAL db
+    (cheap; never crosses the tunnel), diffs against the last-seen set, and yields
+    one frame per changed channel::
+
+        event: tasks\\n
+        data: {"token": "..."}\\n\\n              # visible list changed
+
+        event: task\\n
+        data: {"id": "...", "token": "..."}\\n\\n  # one task's detail changed
+
+    plus a bare ``: ping`` comment roughly every ``ping_every`` seconds so idle
+    proxies/tunnels don't drop the socket. The current tokens are captured as the
+    baseline on entry and are NOT emitted, so a freshly-opened stream stays silent
+    until something actually changes (the client does its own catch-up fetch on
+    open — SSE contract §"send nothing until the first real change"). The loop
+    exits when the client disconnects, or after ``idle_timeout`` seconds with no
+    emitted change (a still-present browser just auto-reconnects). ``poll`` /
+    ``ping_every`` / ``idle_timeout`` are keyword knobs so the loop can be driven
+    deterministically under test.
+    """
+    conn = connect()
+    try:
+        last_list, last_tasks = _change_tokens(conn, viewer)
+    finally:
+        conn.close()
+
+    last_ping = time.monotonic()
+    last_change = time.monotonic()
+    while True:
+        if await request.is_disconnected():
+            break
+        now = time.monotonic()
+        if now - last_change >= idle_timeout:
+            break
+
+        conn = connect()
+        try:
+            list_token, task_tokens = _change_tokens(conn, viewer)
+        finally:
+            conn.close()
+
+        changed = False
+        if list_token != last_list:
+            last_list = list_token
+            changed = True
+            yield f"event: tasks\ndata: {json.dumps({'token': list_token})}\n\n"
+        for tid, tok in task_tokens.items():
+            if last_tasks.get(tid) != tok:
+                changed = True
+                yield f"event: task\ndata: {json.dumps({'id': tid, 'token': tok})}\n\n"
+        # Reassigning (rather than updating) drops tokens for tasks that vanished.
+        last_tasks = task_tokens
+
+        if changed:
+            last_change = now
+        if now - last_ping >= ping_every:
+            last_ping = now
+            yield ": ping\n\n"
+
+        await asyncio.sleep(poll)
+
+
+# --------------------------------------------------------------------------- #
 # HTTP plumbing
 # --------------------------------------------------------------------------- #
 def _request_token(request) -> str:
@@ -451,6 +584,30 @@ def register_api_routes(mcp, cfg: Config) -> None:
             return JSONResponse(_events_for(conn, task_id, filter))
         finally:
             conn.close()
+
+    @mcp.custom_route("/api/stream", methods=["GET"])
+    async def api_stream(request):
+        """Server-Sent-Events feed of change notifications for the dashboard.
+
+        Same viewer-cookie auth as the other ``/api/*`` routes — an unauthenticated
+        request gets the SAME 401, never an open stream. Once authorised, hand back
+        a long-lived ``text/event-stream`` whose frames tell the client *what* to
+        refetch (``tasks`` / ``task``), never the data itself; the actual reads still
+        go through the token-scoped JSON routes. See ``_sse_events`` for the frame
+        format and the connection lifecycle.
+        """
+        conn = connect()
+        try:
+            viewer = _resolve(request, conn)
+        finally:
+            conn.close()
+        if viewer is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return StreamingResponse(
+            _sse_events(request, viewer),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @mcp.custom_route("/ui", methods=["GET"])
     async def ui(request):
