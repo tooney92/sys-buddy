@@ -34,6 +34,10 @@ def _correct_answers(role: str, task_id: str, mode: str) -> dict:
             answers["assess"] = (
                 "push back with send_message to request changes, then sign with lock_contract"
             )
+        answers["visibility"] = (
+            "review the proposed shape with get_contract; the staging_url is withheld until "
+            "everyone signs, then it appears once locked"
+        )
         answers["renegotiate"] = (
             "keep collaborating via messages; to re-sign, agree then call reopen_negotiations"
         )
@@ -109,6 +113,30 @@ def test_uppercase_answer_still_passes():
     by_id = {r["id"]: r for r in result["results"]}
     assert by_id["url"]["ok"] is True
     assert result["passed"] is True
+
+
+def test_visibility_asked_for_both_contract_roles():
+    for role in ("backend", "frontend", "mobile"):
+        ids = {q["id"] for q in readiness.questions(role, "contract")}
+        assert "visibility" in ids, f"{role} should be assessed on proposal visibility"
+    # Not a debug-mode question (no contract to plan there).
+    assert "visibility" not in {q["id"] for q in readiness.questions("backend", "debug")}
+
+
+def test_visibility_grading():
+    # Passing: reviews the proposal via get_contract AND knows the staging_url is withheld.
+    good = (
+        "review the proposed shape with get_contract; the staging_url is withheld there "
+        "until every role signs, then sign the version with lock_contract"
+    )
+    ok, _ = readiness._grade_visibility(good, "frontend", "signin", "contract")
+    assert ok is True
+
+    # Failing: doesn't mention reviewing via get_contract or the withheld url.
+    bad = "the backend just tells me the shape in chat and I sign whenever"
+    ok, hint = readiness._grade_visibility(bad, "frontend", "signin", "contract")
+    assert ok is False
+    assert "get_contract" in hint
 
 
 def test_preview_questions_nonempty():

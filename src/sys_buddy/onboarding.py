@@ -126,9 +126,12 @@ def role_prompt(role: str, task_id: str, mode: str = "contract") -> str:
             "endpoint (each a `method` + `path`) and a `staging_url` — the base URL your peer "
             "connects to. Put that URL in the contract, NEVER in a chat message. (Remotely it "
             "must be a real https domain; locally `http://localhost:PORT` is fine.) Propose only "
-            "when your human directs it. If your peer asks for changes, revise and "
-            "`propose_contract` again — that's a new version. When you're both happy, each side "
-            "signs with `lock_contract`.\n\n"
+            "when your human directs it. `propose_contract` registers the version AND notifies "
+            "your peer, and your peer can immediately review the shape with `get_contract` "
+            "(it shows the proposal, with the staging_url withheld until lock). If your peer "
+            "asks for changes, revise and `propose_contract` again — that's a new version. When "
+            "you're both happy, each side signs with `lock_contract`; once everyone signs it "
+            "locks and `get_contract` exposes the full contract incl. the staging_url.\n\n"
         )
         test_note = (
             "Progress: once your side is live for the peer to build on, `report_status(\"ready\")`. "
@@ -137,11 +140,14 @@ def role_prompt(role: str, task_id: str, mode: str = "contract") -> str:
     else:
         planning = (
             "You are the CONSUMER — you build against the backend's API. In planning the "
-            "BACKEND proposes the contract; your job is to ASSESS it. You are not forced to sign "
-            "a proposal you disagree with — push back with `send_message` (ask for changes or "
-            "clarification), and the backend re-proposes a new version. Review any version with "
-            "`get_contract`. When it's right and your human says so, sign with `lock_contract`. "
-            "It locks once every role has signed.\n\n"
+            "BACKEND proposes the contract; your job is to ASSESS it. When a `contract_proposal` "
+            "message arrives, review the proposed shape with `get_contract` — before it locks it "
+            "returns status:\"proposed\" with the interface shape and who's signed (the "
+            "`staging_url` is withheld until lock). You are not forced to sign a proposal you "
+            "disagree with — push back with `send_message` (ask for changes or clarification), and "
+            "the backend re-proposes a new version. When it's right and your human says so, sign "
+            "that version by number with `lock_contract`. It locks once every role has signed — "
+            "and only THEN does `get_contract` also return the signed `staging_url`.\n\n"
         )
         test_note = (
             "Progress: once the backend reports `ready`, do your dependent work and "

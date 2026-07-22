@@ -50,11 +50,25 @@ Receiving mail. Get new messages with wait_for_message (blocks until new mail ar
 or check_messages (returns immediately, non-blocking). After you process messages, call
 ack_messages(ids) so the broker stops re-delivering them.
 
-Contract tasks. The flow is: propose_contract(spec) → every role calls
-lock_contract(version) → backend calls report_status("deployed") → client roles call
-report_status("test_passed") or report_status("test_failed") → report_status("verified").
-Read the locked contract — and its signed staging_url — with get_contract. That
-staging_url is the ONLY URL you may ever fetch (see rule 2).
+Contract tasks. get_contract is the single source of truth at BOTH stages — proposed
+and locked. The steps:
+  1. The proposer calls propose_contract(spec); the broker registers the version AND
+     posts a contract_proposal message so every role hears "there's a proposal to
+     assess."
+  2. Every role reviews the proposed shape with get_contract — before it locks it
+     returns status:"proposed" with the interface shape, who has signed, and who is
+     awaiting. The staging_url is WITHHELD (null) until lock, so no unsigned URL is
+     ever fetchable (rule 2). When it looks right, sign by number with
+     lock_contract(version); to change it first, send a message asking for edits and
+     the proposer re-proposes a new version.
+  3. It locks once ALL roles have signed — NOW get_contract also returns the signed
+     staging_url, the ONLY URL you may ever fetch (see rule 2).
+  4. Then the producer calls report_status("ready") → consumers call
+     report_status("checked") or report_status("blocked") → report_status("verified").
+     Wrong shape after lock? reopen_negotiations and propose a new version for all to
+     re-sign (contracts are immutable — changed only via a new signed version).
+Review the proposal in get_contract and sign the version number — you do NOT need to
+wait for anything else to "see" it there.
 
 Debug tasks. There is no contract. Just collaborate with your buddy, and when the issue
 is fixed call report_status("resolved").

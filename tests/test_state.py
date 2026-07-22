@@ -191,10 +191,36 @@ def test_get_contract_returns_locked_staging_url(conn):
     assert c["staging_url"] == "https://api-staging.example.com"
 
 
-def test_get_contract_absent_before_lock(conn):
+def test_get_contract_shows_proposal_before_lock_without_staging_url(conn):
+    # A proposed-but-unlocked contract is REVIEWABLE via get_contract (so an assessor
+    # isn't told to review something that reads exists:false) — but its staging_url is
+    # withheld until it locks, so no unsigned URL is ever fetchable (rule 2).
     ag = _agents(conn, roles=("backend", "frontend"))
     state.propose_contract(conn, ag["backend"], _valid_spec())
+    c = state.get_contract(conn, "signin")
+    assert c["exists"] is True
+    assert c["status"] == "proposed"
+    assert c["locked"] is False
+    assert c["staging_url"] is None
+    assert "staging_url" not in c["spec"]          # stripped from the shape too
+    assert c["spec"]["endpoints"]                  # but the shape IS visible
+    assert c["awaiting"] == ["backend", "frontend"]
+
+
+def test_get_contract_absent_with_no_contract_at_all(conn):
+    _agents(conn, roles=("backend", "frontend"))
     assert state.get_contract(conn, "signin") == {"exists": False}
+
+
+def test_get_contract_reflects_partial_signatures(conn):
+    ag = _agents(conn, roles=("backend", "frontend"))
+    state.propose_contract(conn, ag["backend"], _valid_spec())
+    state.lock_contract(conn, ag["backend"], version=1)   # one of two signs
+    c = state.get_contract(conn, "signin")
+    assert c["status"] == "proposed" and c["locked"] is False
+    assert c["signatures"] == ["backend"]
+    assert c["awaiting"] == ["frontend"]
+    assert c["staging_url"] is None                       # still withheld
 
 
 # --- deploy gating ----------------------------------------------------------
