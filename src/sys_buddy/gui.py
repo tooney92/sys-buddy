@@ -239,4 +239,7 @@ def run_gui() -> None:
         height=720,
         min_size=(720, 560),
     )
-    webview.start()
+    # debug=True enables the native web inspector (right-click → Inspect Element),
+    # so a JS error that would otherwise make a click silently "do nothing" surfaces
+    # in the console. Gate on SYS_BUDDY_GUI_DEBUG so shipping builds stay clean.
+    webview.start(debug=bool(os.environ.get("SYS_BUDDY_GUI_DEBUG")))
