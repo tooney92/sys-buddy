@@ -159,6 +159,39 @@ def _current_locked(conn, task_id: str) -> dict | None:
     }
 
 
+def _newest_contract(conn, task_id: str) -> dict | None:
+    """The highest-version contract row for the task regardless of status (draft or
+    locked) — the one an agent is currently meant to act on. A freshly proposed v1
+    (still 'draft') or a v2 replan-in-progress is returned here even though it hasn't
+    locked; ``get_contract`` uses this so a proposal is REVIEWABLE before signing."""
+    row = conn.execute(
+        "SELECT id, version, spec_json, status, locked_at FROM contracts "
+        "WHERE task_id = ? ORDER BY version DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "version": row["version"],
+        "spec": json.loads(row["spec_json"]),
+        "status": row["status"],
+        "locked_at": row["locked_at"],
+    }
+
+
+def _signatures_for(conn, contract_id: int) -> list[str]:
+    """Roles that have signed a given contract row."""
+    return [
+        r["role"]
+        for r in conn.execute(
+            "SELECT a.role FROM contract_signatures s "
+            "JOIN agents a ON a.id = s.agent_id WHERE s.contract_id = ?",
+            (contract_id,),
+        ).fetchall()
+    ]
+
+
 def _producer_role(conn, task_id: str) -> str | None:
     """The PRODUCER role for a task — model B: whoever proposed the current locked
     contract. That role is the one others build against: it reports ``ready``, and it
@@ -247,8 +280,10 @@ def propose_contract(conn, identity: Identity, spec: dict) -> dict:
         identity,
         "contract_proposal",
         f"Proposed contract v{version} ({n_endpoints} endpoint"
-        f"{'' if n_endpoints == 1 else 's'}). Review it with get_contract, then sign with "
-        f"lock_contract — or send a message to request changes before you sign.",
+        f"{'' if n_endpoints == 1 else 's'}). Review the shape with get_contract (it now "
+        f"shows the proposed contract, not only locked ones), then lock_contract({version}) "
+        f"to sign — or message me to request changes first. The staging_url appears in "
+        f"get_contract once every role has signed.",
     )
     return {"version": version, "state": state}
 
@@ -382,24 +417,67 @@ def reopen_negotiations(conn, identity: Identity, reason: str) -> dict:
 
 
 def get_contract(conn, task_id: str) -> dict:
-    """Return the current locked contract, including ``staging_url`` read from the
-    stored ``spec_json`` — NEVER from a chat message (SPEC §5 rule 5, §9).
+    """Return the current contract for the task — PROPOSED or LOCKED.
 
-    This is the single trusted source of the staging URL for a test-runner agent:
-    an injected "test against evil.com" message has no path into this value.
+    This is the single source of truth for the interface, at both stages:
+
+    * LOCKED — the full frozen contract, including the ``staging_url`` read from the
+      stored ``spec_json`` (NEVER from a chat message; SPEC §5 rule 5, §9). This is
+      the trusted source of the staging URL for a consumer: an injected "test against
+      evil.com" message has no path into this value.
+    * PROPOSED (not yet locked) — the proposed SHAPE, so an assessor can review it
+      before signing, WITH the ``staging_url`` WITHHELD (``None``): an unsigned URL
+      must not be fetchable (rule 2), so it only appears once every role has signed.
+      Also returns who has ``signatures`` / who is ``awaiting``.
+
+    Returning proposals here (not just locked ones) removes the old chicken-and-egg
+    where an assessor was told to review via get_contract but saw exists:false until
+    it locked — which it can't do until they sign.
     """
-    contract = _current_locked(conn, task_id)
-    if contract is None:
+    newest = _newest_contract(conn, task_id)
+    if newest is None:
         return {"exists": False}
-    spec = contract["spec"]
-    return {
+
+    spec = newest["spec"]
+    signed = sorted(_signatures_for(conn, newest["id"]))
+
+    if newest["status"] == "locked":
+        return {
+            "exists": True,
+            "version": newest["version"],
+            "status": "locked",
+            "locked": True,
+            "staging_url": spec.get("staging_url"),
+            "spec": spec,
+            "signatures": signed,
+            "locked_at": newest["locked_at"],
+        }
+
+    # Proposed / draft: expose the shape but strip staging_url until it locks.
+    required = _roles(conn, task_id)
+    awaiting = [r for r in required if r not in set(signed)]
+    shape = {k: v for k, v in spec.items() if k != "staging_url"}
+    out = {
         "exists": True,
-        "version": contract["version"],
-        "status": "locked",
-        "staging_url": spec.get("staging_url"),
-        "spec": spec,
-        "locked_at": contract["locked_at"],
+        "version": newest["version"],
+        "status": "proposed",
+        "locked": False,
+        "staging_url": None,
+        "spec": shape,
+        "signatures": signed,
+        "awaiting": awaiting,
+        "note": (
+            "Proposed, not yet locked — this is the shape to review. Call "
+            f"lock_contract({newest['version']}) to sign it; the staging_url appears "
+            "here only after ALL roles have signed."
+        ),
     }
+    # A v2 replan can be in flight while an older v1 is still the locked, serving
+    # contract — point the assessor at it so they know what's currently in force.
+    locked = _current_locked(conn, task_id)
+    if locked is not None and locked["version"] != newest["version"]:
+        out["locked_version_in_force"] = locked["version"]
+    return out
 
 
 # --------------------------------------------------------------------------- #

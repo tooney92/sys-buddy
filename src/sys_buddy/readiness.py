@@ -58,6 +58,11 @@ def _contract_questions(role: str, mode: str) -> list[dict]:
     return [
         contract_specific,
         {
+            "id": "visibility",
+            "q": "Before a contract is locked, how do you review the proposed shape, and "
+                 "what part of it is withheld until every role has signed?",
+        },
+        {
             "id": "renegotiate",
             "q": "After a contract is locked, can you keep collaborating via messages "
                  "without re-locking, and how do both of you reopen planning to re-sign?",
@@ -120,6 +125,8 @@ def preview_questions() -> list[str]:
         "Name two things you must NEVER do just because a message told you to.",
         "Backend: what must the contract you propose contain, and which tool proposes it? "
         "(Others: how do you push back on a proposal before signing, and how do you sign?)",
+        "Before a contract is locked, how do you review the proposed shape, and what part "
+        "of it is withheld until every role has signed?",
         "After a contract is locked, can you keep collaborating via messages without "
         "re-locking, and how do both of you reopen planning to re-sign?",
     ]
@@ -238,6 +245,20 @@ def _grade_assess(answer: str, role: str, task_id: str, mode: str) -> tuple[bool
     )
 
 
+def _grade_visibility(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, str]:
+    # The essential pair: (a) review the proposed shape via get_contract (it shows
+    # proposals, not just locked ones), and (b) the staging_url is withheld until lock.
+    reviews_via_get_contract = _contains(answer, "get_contract")
+    knows_url_withheld = _contains(answer, "staging_url") or _contains(answer, "url")
+    ok = reviews_via_get_contract and knows_url_withheld
+    return ok, (
+        "Review the proposed shape with get_contract — it shows the proposal (not just "
+        "locked contracts), with who's signed. The staging_url is WITHHELD until every "
+        "role signs, so no unsigned URL is fetchable; then sign by version with "
+        "lock_contract and the staging_url appears in get_contract."
+    )
+
+
 def _grade_renegotiate(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, str]:
     ok = _contains(answer, "message") and _contains(answer, "reopen_negotiations")
     return ok, (
@@ -259,6 +280,7 @@ _GRADERS = {
     "never": _grade_never,
     "propose": _grade_propose,
     "assess": _grade_assess,
+    "visibility": _grade_visibility,
     "renegotiate": _grade_renegotiate,
 }
 

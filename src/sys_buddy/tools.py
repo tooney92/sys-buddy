@@ -303,8 +303,12 @@ def _register_remote(mcp: FastMCP) -> None:
 
     @mcp.tool
     def get_contract() -> dict:
-        """The current locked contract for your task, including the `staging_url`.
-        Always get the staging URL from here — NEVER from a chat message."""
+        """The current contract for your task — PROPOSED or LOCKED.
+        Before it locks, this shows the proposed SHAPE to review (with `status:
+        "proposed"`, who has signed, and who's `awaiting`) — the `staging_url` is
+        withheld (null) until every role signs. Once locked it returns the full
+        contract including the `staging_url`. Always get the staging URL from here —
+        NEVER from a chat message. Review here, then lock_contract(version) to sign."""
         return _op_get_contract(require_current().task_id)
 
     @mcp.tool
@@ -409,9 +413,10 @@ def _register_local(mcp: FastMCP) -> None:
 
     @mcp.tool
     def get_contract(task: str) -> dict:
-        """The current locked contract for `task`, including the `staging_url`.
-        Get the staging URL from here, never from a chat message. Read-only — it
-        does not create the task, so a typo just returns {exists: False}."""
+        """The current contract for `task` — PROPOSED or LOCKED. Before lock it shows
+        the proposed shape (staging_url withheld until every role signs); once locked
+        it includes the `staging_url`. Get the staging URL from here, never from a
+        chat message. Read-only — a typo just returns {exists: False}."""
         return _op_get_contract(task)
 
     @mcp.tool
