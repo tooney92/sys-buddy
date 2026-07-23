@@ -1,9 +1,13 @@
 """``sys-buddy`` command-line interface.
 
-Host-side commands (init, task create, invite, revoke-*, close) operate on the
+Host-side commands (init, task create, invite, revoke-*, close, todo) operate on the
 local SQLite file directly — they run on the same machine as the broker. ``join``
 is the one network client: it runs on the *buddy's* machine and POSTs to /pair.
 ``local`` and ``serve`` start the server.
+
+This is also where the HOST's own writes live, and deliberately not on the dashboard
+(D11): ``todo drop`` is the escape hatch for a todo hanging on a party whose human
+went offline, and a host running ``sys-buddy serve`` headless has no GUI to click.
 """
 
 from __future__ import annotations
@@ -163,6 +167,66 @@ def cmd_tasks(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_todo_list(args: argparse.Namespace) -> int:
+    from . import admin
+
+    _cfg_from_args(args)
+    rows, roll = admin.list_todos(args.task)
+    if not rows:
+        print(f"No todos on task '{args.task}'. Agents propose them with propose_todo().")
+        return 0
+    if roll:
+        print(
+            f"  {roll['verified']}/{roll['total']} verified"
+            f"  ·  {roll['pending']} awaiting acceptance"
+            f"  ·  {roll['stuck']} stuck"
+            f"  ·  task state: {roll['state']}"
+        )
+    for t in rows:
+        # `⚠` marks the only rows a HUMAN can unblock: a pending todo is waiting on
+        # someone's acceptance, a stuck one on someone's help.
+        flag = "⚠" if t["status"] == "pending" or t["stuck"] else " "
+        # One note, most-final first: a dropped todo's stale "awaiting mobile" would read
+        # as an outstanding ask when the ask is what was abandoned.
+        note = ""
+        if t["status"] == "dropped":
+            note = f"dropped by {t['dropped_by']}: {t['drop_reason']}"
+        elif t["stuck"]:
+            note = f"stuck: {t['stuck_reason']}"
+        elif t["declined_by"]:
+            note = f"declined by: {', '.join(t['declined_by'])}"
+        elif t["awaiting"]:
+            note = f"awaiting: {', '.join(t['awaiting'])}"
+        print(
+            f"  {flag} #{t['id']:<4} {t['status']:<11} {','.join(t['parties']):<24} "
+            f"{t['title']}"
+        )
+        if note:
+            print(f"      {note}")
+    print(
+        "\nA todo hanging on a party whose human went offline is the host's to drop:\n"
+        f"  sys-buddy todo drop {args.task} <id> --reason \"...\""
+    )
+    return 0
+
+
+def cmd_todo_drop(args: argparse.Namespace) -> int:
+    from . import admin
+
+    _cfg_from_args(args)
+    t, roll = admin.host_drop_todo(args.task, args.todo, args.reason)
+    print(f"Dropped todo #{t['id']} '{t['title']}' on task '{args.task}'.")
+    print(f"  bound:  {', '.join(t['parties'])}")
+    print(f"  reason: {t['drop_reason']}")
+    print(
+        "\nPosted to the task thread as 'broker' (a human decision, not a peer's), so "
+        "the\nabsent party's agent finds an explanation rather than vanished work."
+    )
+    if roll:
+        print(f"\nTask rollup is now {roll['verified']}/{roll['total']} verified · state {roll['state']}.")
+    return 0
+
+
 def cmd_local(args: argparse.Namespace) -> int:
     from .server import run_server
 
@@ -277,6 +341,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("tasks", help="List tasks")
     sp.set_defaults(func=cmd_tasks)
+
+    # The host's todo surface. `drop` is a WRITE and deliberately lives here rather than
+    # on the dashboard (D11): it is the escape hatch for a party whose human went offline
+    # and will never accept, and many hosts run `sys-buddy serve` with no GUI at all.
+    todo = sub.add_parser("todo", help="Todos on a task (host view, and the host's drop)")
+    tosub = todo.add_subparsers(dest="todo_command", required=True)
+    tl = tosub.add_parser("list", help="List a task's todos, with the rollup")
+    tl.add_argument("task")
+    tl.set_defaults(func=cmd_todo_list)
+    td = tosub.add_parser(
+        "drop", help="Drop a todo unilaterally (for a party who went offline)"
+    )
+    td.add_argument("task")
+    td.add_argument("todo", help="Todo id, as shown by `sys-buddy todo list <task>`")
+    td.add_argument(
+        "--reason", required=True,
+        help="Why — posted to the task thread, and the only thing the agents will see.",
+    )
+    td.set_defaults(func=cmd_todo_drop)
 
     sp = sub.add_parser("invite", help="Mint a single-use invite for a role")
     sp.add_argument("--task", required=True)

@@ -60,6 +60,38 @@ def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
     return Identity(agent_id=agent["id"], task_id=agent["task_id"], name=agent["name"], role=agent["role"])
 
 
+def ensure_broker_identity(conn, task_id: str) -> Identity:
+    """A synthetic, permanently-revoked seat the BROKER posts as on ``task_id``.
+
+    Some broker notifications have no triggering agent at all — the host dropping a
+    todo from the CLI is the case that forces this. ``messages.from_agent_id`` is NOT
+    NULL, and ``_fetch`` excludes ``from_agent_id = me``, so attributing a host action
+    to any real agent would both misattribute it AND silently withhold it from that
+    very agent. So the broker gets its own row:
+
+    * ``role = BROKER_ROLE`` — a name ``admin.create_task`` already refuses for a real
+      seat, so it can never collide with a participant;
+    * ``token_hash = NULL`` and ``revoked_at`` set at birth — it can never
+      authenticate, never shows up in ``/api`` agent lists, never counts toward the
+      pre-flight gate, and never occupies the live-role unique index. It exists only
+      to be a message author.
+    """
+    row = conn.execute(
+        "SELECT id, name, role FROM agents WHERE task_id = ? AND role = ? ORDER BY id LIMIT 1",
+        (task_id, BROKER_ROLE),
+    ).fetchone()
+    if row is not None:
+        return Identity(agent_id=row["id"], task_id=task_id, name=row["name"], role=row["role"])
+    now = time.time()
+    cur = conn.execute(
+        "INSERT INTO agents (task_id, name, role, token_hash, created_at, revoked_at) "
+        "VALUES (?,?,?,NULL,?,?)",
+        (task_id, BROKER_NAME, BROKER_ROLE, now, now),
+    )
+    conn.commit()
+    return Identity(agent_id=cur.lastrowid, task_id=task_id, name=BROKER_NAME, role=BROKER_ROLE)
+
+
 # --------------------------------------------------------------------------- #
 # messaging
 # --------------------------------------------------------------------------- #
@@ -82,7 +114,12 @@ ALLOWED_SEND_TYPES = frozenset({"question", "answer", "status_update", "contract
 #     (see _wrap_broker) — the framing must never claim a peer said this;
 #   * no agent can ever send one (assert_sendable rejects them, and they're outside
 #     ALLOWED_SEND_TYPES), so a lock notification cannot be forged.
-BROKER_TYPES = frozenset({"contract_locked"})
+#
+# `todo_dropped` joins it for the HOST's unilateral drop (todos.host_drop_todo): the
+# escape hatch for a party who went offline and will never consent. Nobody's agent
+# authored it, and the absent party's agent MUST find an explanation rather than
+# vanished work — so it is broker-authored and pushed to every seat on the task.
+BROKER_TYPES = frozenset({"contract_locked", "todo_dropped"})
 BROKER_NAME = "sys-buddy"   # the author shown for a broker-authored notification
 BROKER_ROLE = "broker"      # …and its role, in both the agent view and the dashboard
 
@@ -128,7 +165,14 @@ def _count_other_agents(conn, task_id: str, exclude_id: int) -> int:
     ).fetchone()["n"]
 
 
-def post_message(conn, identity: Identity, mtype: str, body: str, to_role: str | None = None) -> dict:
+def post_message(
+    conn,
+    identity: Identity,
+    mtype: str,
+    body: str,
+    to_role: str | None = None,
+    todo_id: int | None = None,
+) -> dict:
     """Store a message from ``identity`` on its task. Returns a small receipt.
 
     Delivery rows are created lazily on fetch, so an agent that pairs later still
@@ -137,6 +181,10 @@ def post_message(conn, identity: Identity, mtype: str, body: str, to_role: str |
     ``to_role`` directs the message at a single role; None/empty broadcasts to all
     other agents on the task (the unchanged default). A non-empty ``to_role`` must
     name a role declared on the task.
+
+    ``todo_id`` records which deliverable the message belongs to, so the dashboard's
+    ⟨todo⟩ chip keys on a real id rather than a string scraped from the body. None
+    (the default) is a task-level message — every message before todos existed.
     """
     task = conn.execute(
         "SELECT state, closed_at, roles_json FROM tasks WHERE id = ?", (identity.task_id,)
@@ -156,9 +204,9 @@ def post_message(conn, identity: Identity, mtype: str, body: str, to_role: str |
     state_at_send = task["state"]
     now = time.time()
     cur = conn.execute(
-        "INSERT INTO messages (task_id, from_agent_id, type, body_json, to_role, state_at_send, created_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (identity.task_id, identity.agent_id, mtype, json.dumps(body), to_role, state_at_send, now),
+        "INSERT INTO messages (task_id, from_agent_id, type, body_json, to_role, todo_id, state_at_send, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (identity.task_id, identity.agent_id, mtype, json.dumps(body), to_role, todo_id, state_at_send, now),
     )
     conn.commit()
     recipients = _count_other_agents(conn, identity.task_id, identity.agent_id)

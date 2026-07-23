@@ -25,7 +25,7 @@ import time
 
 from fastmcp import FastMCP
 
-from . import audit, readiness, service, slack, state
+from . import audit, readiness, service, slack, state, todos
 from .config import Config, get_config
 from .db import connect
 from .identity import Identity, new_agent_token, require_current, sha256_hex
@@ -134,42 +134,102 @@ def _op_history(task_id: str, limit: int) -> list[dict]:
 
 
 # --- contract / status ops (state machine lives in state.py) --------------- #
-def _op_propose(ident: Identity, spec: dict) -> dict:
+# `todo` threads through the four contract/status ops as an OPTIONAL selector: 0 (the
+# tool default) means "not given", which is the pre-todo behaviour every existing task
+# keeps. state.py decides where it is required — the broker enforces, the tool asks.
+def _op_propose(ident: Identity, spec: dict, todo: int | None = None) -> dict:
     conn = connect()
     try:
-        return state.propose_contract(conn, ident, spec)
+        return state.propose_contract(conn, ident, spec, todo)
     finally:
         conn.close()
 
 
-def _op_lock(ident: Identity, version: int) -> dict:
+def _op_lock(ident: Identity, version: int, todo: int | None = None) -> dict:
     conn = connect()
     try:
-        return state.lock_contract(conn, ident, version)
+        return state.lock_contract(conn, ident, version, todo)
     finally:
         conn.close()
 
 
-def _op_reopen(ident: Identity, reason: str) -> dict:
+def _op_reopen(ident: Identity, reason: str, todo: int | None = None) -> dict:
     conn = connect()
     try:
-        return state.reopen_negotiations(conn, ident, reason)
+        return state.reopen_negotiations(conn, ident, reason, todo)
     finally:
         conn.close()
 
 
-def _op_get_contract(task_id: str) -> dict:
+def _op_get_contract(task_id: str, todo: int | None = None) -> dict:
     conn = connect()
     try:
-        return state.get_contract(conn, task_id)
+        return state.get_contract(conn, task_id, todo)
     finally:
         conn.close()
 
 
-def _op_report_status(ident: Identity, status: str, detail: str) -> dict:
+def _op_report_status(
+    ident: Identity, status: str, detail: str, todo: int | None = None
+) -> dict:
     conn = connect()
     try:
-        return state.report_status(conn, ident, status, detail)
+        return state.report_status(conn, ident, status, detail, todo)
+    finally:
+        conn.close()
+
+
+# --- todo ops (agreement on WHAT; the module owns the rules) ---------------- #
+def _op_get_todos(task_id: str) -> list[dict]:
+    conn = connect()
+    try:
+        return todos.get_todos(conn, task_id)
+    finally:
+        conn.close()
+
+
+def _op_propose_todo(ident: Identity, title: str, scope: str, parties: list[str]) -> dict:
+    conn = connect()
+    try:
+        return todos.propose_todo(conn, ident, title, scope, parties)
+    finally:
+        conn.close()
+
+
+def _op_accept_todo(ident: Identity, todo: int) -> dict:
+    conn = connect()
+    try:
+        return todos.accept_todo(conn, ident, todo)
+    finally:
+        conn.close()
+
+
+def _op_decline_todo(ident: Identity, todo: int, reason: str) -> dict:
+    conn = connect()
+    try:
+        return todos.decline_todo(conn, ident, todo, reason)
+    finally:
+        conn.close()
+
+
+def _op_repropose_todo(
+    ident: Identity,
+    todo: int,
+    title: str | None = None,
+    scope: str | None = None,
+    parties: list[str] | None = None,
+) -> dict:
+    conn = connect()
+    try:
+        return todos.repropose_todo(conn, ident, todo, title, scope, parties)
+    finally:
+        conn.close()
+
+
+def _op_drop_todo(ident: Identity, todo: int, reason: str) -> dict:
+    conn = connect()
+    try:
+        return todos.drop_todo(conn, ident, todo, reason)
     finally:
         conn.close()
 
@@ -297,51 +357,164 @@ def _register_remote(mcp: FastMCP) -> None:
         return _op_history(require_current().task_id, limit)
 
     @mcp.tool
-    def propose_contract(spec: dict) -> dict:
+    def propose_contract(spec: dict, todo: int = 0) -> dict:
         """Propose a structured API contract for your task (SPEC §6).
 
         `spec` must contain `endpoints` (list; each with a valid `method` and a
         non-empty `path`) and an absolute https `staging_url`. Reopens planning
         if a contract already exists. Returns the new `version`, or raises with the
-        exact validation errors to fix."""
-        return _op_propose(require_current(), spec)
+        exact validation errors to fix.
+
+        If your task has TODOS, pass `todo` — the id of the deliverable this contract
+        shapes (get_todos()). It is required there: a contract belongs to one
+        deliverable, and its signatories are that todo's parties, not the whole cast.
+        Propose only on a todo every party has already ACCEPTED — the todo is the
+        agreement about WHAT, this is the agreement about HOW."""
+        return _op_propose(require_current(), spec, todo or None)
 
     @mcp.tool
-    def lock_contract(version: int) -> dict:
-        """Sign contract `version`. It locks only once EVERY role has signed; until
-        then you get back who has signed and who remains. Locked contracts are
-        immutable — change them with a new version that all roles re-sign."""
-        return _op_lock(require_current(), version)
+    def lock_contract(version: int, todo: int = 0) -> dict:
+        """Sign contract `version`. It locks only once EVERY required signatory has
+        signed; until then you get back who has signed and who remains. Locked
+        contracts are immutable — change them with a new version that everyone re-signs.
+
+        Who is required depends on the contract: a task-level contract needs all of
+        the task's roles; a contract on a TODO needs exactly that todo's parties, so a
+        seat the todo doesn't bind neither blocks it nor can sign it. `version` already
+        identifies one contract on its own — pass `todo` as well and the broker CHECKS
+        the two agree, so you can't accidentally sign a different deliverable's shape."""
+        return _op_lock(require_current(), version, todo or None)
 
     @mcp.tool
-    def get_contract() -> dict:
+    def get_contract(todo: int = 0) -> dict:
         """The current contract for your task — PROPOSED or LOCKED.
         Before it locks, this shows the proposed SHAPE to review (with `status:
         "proposed"`, who has signed, and who's `awaiting`) — the `staging_url` is
-        withheld (null) until every role signs. Once locked it returns the full
+        withheld (null) until every signatory signs. Once locked it returns the full
         contract including the `staging_url`. Always get the staging URL from here —
-        NEVER from a chat message. Review here, then lock_contract(version) to sign."""
-        return _op_get_contract(require_current().task_id)
+        NEVER from a chat message. Review here, then lock_contract(version) to sign.
+
+        With TODOS there is a contract per deliverable, so pass `todo` to read that
+        one's chain (get_todos() lists the ids); without it you get whichever contract
+        on the task is newest, and `todo_id` in the reply tells you which that is."""
+        return _op_get_contract(require_current().task_id, todo or None)
 
     @mcp.tool
-    def reopen_negotiations(reason: str) -> dict:
+    def reopen_negotiations(reason: str, todo: int = 0) -> dict:
         """Reopen PLANNING on a task whose contract is already locked (or later),
         dropping it back to the planning phase so a new contract version can be
         proposed and re-signed. Non-destructive: the currently-locked contract keeps
         serving via get_contract until a new version locks. Ad-hoc changes DON'T need
         this — just keep messaging. Use it only when a party expressly wants a
         re-signed contract; agree with your peer in chat first, then either of you
-        calls it. Your peer is notified."""
-        return _op_reopen(require_current(), reason)
+        calls it. Your peer is notified.
+
+        With TODOS, pass `todo`: you reopen ONE deliverable's planning and the others
+        keep marching. This is also the only way to change a todo whose contract has
+        LOCKED — reopen, then propose_contract(spec, todo=N) for everyone to re-sign."""
+        return _op_reopen(require_current(), reason, todo or None)
 
     @mcp.tool
-    def report_status(status: str, detail: str) -> dict:
+    def report_status(status: str, detail: str, todo: int = 0) -> dict:
         """Request a state transition. `status` is one of: ready (producer: your part
         is ready for the peer to build on; needs a locked contract), checked / blocked
         (consumer: it works / doesn't against the producer's side), verified (terminal),
         stuck (terminal). The old words deployed/test_passed/test_failed still work as
-        aliases. Rejected with a reason if the workflow or your role doesn't permit it."""
-        return _op_report_status(require_current(), status, detail)
+        aliases. Rejected with a reason if the workflow or your role doesn't permit it.
+
+        If your task has TODOS, ready/checked/blocked/verified are per-DELIVERABLE and
+        `todo` is REQUIRED — "ready" on which one? Call get_todos() for the ids. The
+        task's own state is then DERIVED from its todos (you never set it), and the task
+        concludes when the LAST todo verifies, so `verified` on one todo ends that
+        deliverable only. `stuck` works both ways on purpose: with `todo` it flags that
+        one deliverable and the rest carry on; without it you escalate the WHOLE
+        collaboration and everything freezes until a human steps in — so only do that
+        for a task-wide problem (expired token, no idea what the goal is)."""
+        return _op_report_status(require_current(), status, detail, todo or None)
+
+    @mcp.tool
+    def get_todos() -> list[dict]:
+        """Every todo on your task — the deliverables it is broken into.
+
+        One task can carry N deliverables, each with its own scope, its own contract
+        and its own march to verified. Each entry carries `status` (pending → accepted
+        → contracted → verified, or dropped), `parties` (the seats it BINDS), who has
+        `accepted_by`/`declined_by`, the version, its `state`/`strikes`, and its
+        contract versions. Nothing is hidden by stage.
+
+        Read this before you report anything: `report_status` and `propose_contract`
+        need the todo id, and the todos you are a party to are the ones you owe work
+        on. You can see todos that don't name you — you are simply not bound by them
+        and cannot act on them."""
+        return _op_get_todos(require_current().task_id)
+
+    @mcp.tool
+    def propose_todo(title: str, scope: str, parties: list[str]) -> dict:
+        """Propose a DELIVERABLE under your task: "we also need api123".
+
+        `parties` names which of the task's existing seats this binds (at least two,
+        including YOU) — you pair once at the task, never per todo, and a seat you
+        leave out can read the todo but is not bound by it and won't be asked to sign
+        its contract. `scope` is what's in and out; the others accept the SCOPE, not
+        the title.
+
+        Proposing IS your own consent, so it starts with you accepted and the others
+        pending. Propose only when your human directs it — same rule as a contract.
+        Then talk it through with send_message; once every party has accept_todo'd it,
+        one of you proposes the contract with propose_contract(spec, todo=<id>)."""
+        return _op_propose_todo(require_current(), title, scope, parties)
+
+    @mcp.tool
+    def accept_todo(todo: int) -> dict:
+        """Agree to WHAT a todo is — read its scope in get_todos() first.
+
+        This is not a lock and not a signature: it means "yes, let's do this piece of
+        work". The HOW comes later, when its contract is proposed and the same parties
+        sign it. If the scope is wrong, don't accept and then argue — decline_todo with
+        a reason, or message the proposer to reshape it."""
+        return _op_accept_todo(require_current(), todo)
+
+    @mcp.tool
+    def decline_todo(todo: int, reason: str) -> dict:
+        """Bounce a todo back to whoever proposed it. `reason` is required — it is the
+        only thing they have to work with.
+
+        Nothing is deleted: your decline is recorded beside the acceptances, and the
+        proposer reshapes and calls repropose_todo, which issues a new version everyone
+        (including you) re-accepts. Use it for "this scope is wrong", not for "not
+        yet" — for timing, just say so in a message."""
+        return _op_decline_todo(require_current(), todo, reason)
+
+    @mcp.tool
+    def repropose_todo(
+        todo: int,
+        title: str = "",
+        scope: str = "",
+        parties: list[str] | None = None,
+    ) -> dict:
+        """Issue a NEW VERSION of a todo after a decline or a rethink. Omitted fields
+        keep their current value; `parties` may change (you must stay one of them).
+
+        Every earlier acceptance is RESET — nobody is held to a scope they didn't read
+        — and if a contract on this todo was proposed but not locked, its signatures
+        reset too: the others signed a shape that bound two parties and it may now bind
+        three. Once a contract has LOCKED this is refused (a locked contract is
+        immutable): call reopen_negotiations(reason, todo=N) and propose a new version
+        instead."""
+        return _op_repropose_todo(require_current(), todo, title or None, scope or None, parties)
+
+    @mcp.tool
+    def drop_todo(todo: int, reason: str) -> dict:
+        """"We don't need this after all." MUTUAL: every party on the todo must call it
+        before it drops, and your call records your consent and tells the others.
+
+        You cannot remove a peer from a todo, and there is no tool that does — if the
+        other party objects to a shape, that is a disagreement to resolve in chat, not
+        a person to delete. A party who has gone silent will never consent, so that
+        deadlock is a HUMAN's to break: their host drops the todo from the CLI or the
+        desktop app, and everyone gets told who did it and why. Refused once the todo
+        is verified — abandoning finished work would make the task's count a lie."""
+        return _op_drop_todo(require_current(), todo, reason)
 
     @mcp.tool
     def notify_human(message: str) -> str:
@@ -411,34 +584,42 @@ def _register_local(mcp: FastMCP) -> None:
         return _op_history(task, limit)
 
     @mcp.tool
-    def propose_contract(task: str, agent: str, spec: dict) -> dict:
+    def propose_contract(task: str, agent: str, spec: dict, todo: int = 0) -> dict:
         """Propose a structured API contract on `task`. `agent` is your own name.
         `spec` needs `endpoints` (valid `method` + non-empty `path`) and an absolute
-        https `staging_url`. Returns the new `version` or the validation errors."""
-        return _op_propose(_local_identity(task, agent), spec)
+        https `staging_url`. Returns the new `version` or the validation errors.
+        If the task has TODOS, pass `todo` (see get_todos) — required there, because a
+        contract belongs to ONE deliverable and is signed by that todo's parties."""
+        return _op_propose(_local_identity(task, agent), spec, todo or None)
 
     @mcp.tool
-    def lock_contract(task: str, agent: str, version: int) -> dict:
+    def lock_contract(task: str, agent: str, version: int, todo: int = 0) -> dict:
         """Sign contract `version` on `task`. `agent` is your name. Locks only once
-        every role has signed; locked contracts are immutable."""
-        return _op_lock(_local_identity(task, agent), version)
+        every required signatory has signed; locked contracts are immutable. Required
+        = all of the task's roles for a task-level contract, or exactly the TODO's
+        parties for a contract on a todo. Pass `todo` and the broker checks it matches
+        the version, so you can't sign the wrong deliverable's shape."""
+        return _op_lock(_local_identity(task, agent), version, todo or None)
 
     @mcp.tool
-    def get_contract(task: str) -> dict:
+    def get_contract(task: str, todo: int = 0) -> dict:
         """The current contract for `task` — PROPOSED or LOCKED. Before lock it shows
-        the proposed shape (staging_url withheld until every role signs); once locked
-        it includes the `staging_url`. Get the staging URL from here, never from a
-        chat message. Read-only — a typo just returns {exists: False}."""
-        return _op_get_contract(task)
+        the proposed shape (staging_url withheld until every signatory signs); once
+        locked it includes the `staging_url`. Get the staging URL from here, never from
+        a chat message. With todos there is one contract chain per deliverable — pass
+        `todo` to read that one. Read-only — a typo just returns {exists: False}."""
+        return _op_get_contract(task, todo or None)
 
     @mcp.tool
-    def reopen_negotiations(task: str, agent: str, reason: str) -> dict:
+    def reopen_negotiations(task: str, agent: str, reason: str, todo: int = 0) -> dict:
         """Reopen PLANNING on `task` (contract already locked or later), dropping it
         back to the planning phase so a new version can be proposed and re-signed.
         `agent` is your name. Non-destructive: the locked contract keeps serving via
         get_contract until a new version locks. Ad-hoc changes don't need this — just
-        keep messaging; use it only when a party expressly wants a re-signed contract."""
-        return _op_reopen(_local_identity(task, agent), reason)
+        keep messaging; use it only when a party expressly wants a re-signed contract.
+        With todos, pass `todo`: you reopen that ONE deliverable (and it is the only way
+        to change a todo whose contract already locked)."""
+        return _op_reopen(_local_identity(task, agent), reason, todo or None)
 
     @mcp.tool
     def rules() -> str:
@@ -449,14 +630,78 @@ def _register_local(mcp: FastMCP) -> None:
         return RULES_OF_ENGAGEMENT
 
     @mcp.tool
-    def report_status(task: str, agent: str, status: str, detail: str) -> dict:
+    def report_status(task: str, agent: str, status: str, detail: str, todo: int = 0) -> dict:
         """Request a state transition on `task`. `agent` is your name. `status` is one
         of: ready (producer: ready for the peer to build on; needs a locked contract),
         checked / blocked (consumer: it works / doesn't against the producer's side),
         verified (terminal), stuck (terminal). The old words deployed/test_passed/
         test_failed still work as aliases. Rejected with a reason if the workflow or
-        your role doesn't permit it."""
-        return _op_report_status(_local_identity(task, agent), status, detail)
+        your role doesn't permit it.
+
+        With TODOS, ready/checked/blocked/verified are per-DELIVERABLE and `todo` is
+        REQUIRED (get_todos for the ids); the task's state is then derived from its
+        todos and concludes when the LAST one verifies. `stuck` works at both levels:
+        with `todo` it flags that deliverable, without one it freezes the whole task
+        for a human."""
+        return _op_report_status(_local_identity(task, agent), status, detail, todo or None)
+
+    @mcp.tool
+    def get_todos(task: str) -> list[dict]:
+        """Every todo on `task` — the deliverables it is broken into, with each one's
+        scope, `parties` (the seats it BINDS), status (pending → accepted → contracted
+        → verified, or dropped), who accepted/declined, and its contract versions.
+        Read this before reporting anything: report_status and propose_contract need
+        the todo id. Read-only."""
+        return _op_get_todos(task)
+
+    @mcp.tool
+    def propose_todo(task: str, agent: str, title: str, scope: str, parties: list[str]) -> dict:
+        """Propose a DELIVERABLE under `task`. `agent` is your name. `parties` names
+        which of the task's existing seats it binds (at least two, including you) — a
+        seat you leave out can read it but is not bound and won't sign its contract.
+        `scope` is what's in and out; the others accept the SCOPE, not the title.
+        Proposing IS your consent; the other parties then accept_todo. Propose only
+        when your human directs it."""
+        return _op_propose_todo(_local_identity(task, agent), title, scope, parties)
+
+    @mcp.tool
+    def accept_todo(task: str, agent: str, todo: int) -> dict:
+        """Agree to WHAT a todo on `task` is (read its scope in get_todos first).
+        `agent` is your name. Not a lock and not a signature — the HOW is its contract,
+        agreed later by the same parties."""
+        return _op_accept_todo(_local_identity(task, agent), todo)
+
+    @mcp.tool
+    def decline_todo(task: str, agent: str, todo: int, reason: str) -> dict:
+        """Bounce a todo back to its proposer with a required `reason`. `agent` is your
+        name. Nothing is deleted: they reshape it and repropose_todo issues a new
+        version everyone re-accepts."""
+        return _op_decline_todo(_local_identity(task, agent), todo, reason)
+
+    @mcp.tool
+    def repropose_todo(
+        task: str,
+        agent: str,
+        todo: int,
+        title: str = "",
+        scope: str = "",
+        parties: list[str] | None = None,
+    ) -> dict:
+        """Issue a NEW VERSION of a todo on `task`. `agent` is your name; omitted
+        fields keep their current value and you must stay a party. Resets every
+        acceptance (and an unlocked contract's signatures). Refused once a contract on
+        the todo has LOCKED — reopen_negotiations(reason, todo=N) instead."""
+        return _op_repropose_todo(
+            _local_identity(task, agent), todo, title or None, scope or None, parties
+        )
+
+    @mcp.tool
+    def drop_todo(task: str, agent: str, todo: int, reason: str) -> dict:
+        """Abandon a todo on `task` — MUTUAL: every party must call it, and your call
+        records your consent. `agent` is your name. No tool removes a peer from a todo;
+        if a party has gone silent, their human drops it from the CLI/desktop app.
+        Refused once the todo is verified."""
+        return _op_drop_todo(_local_identity(task, agent), todo, reason)
 
     @mcp.tool
     def notify_human(task: str, agent: str, message: str) -> str:
