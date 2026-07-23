@@ -26,7 +26,7 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import identity, readiness
+from . import identity, readiness, service
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -327,12 +327,19 @@ def _agents_for(conn, task_id: str) -> list[dict]:
     FAILED attempt from a not-yet-attempted one — ``ready`` alone can't — and
     ``readiness_report`` carries the per-question results (parsed) so the human can see
     WHY it failed and coach the agent to retry.
+
+    ``listening`` is presence: the agent is parked in ``wait_for_message`` right now.
+    It's computed here (``listening_until > now``) rather than stored as a boolean, so
+    a broker crash that never cleared the stamp lapses on its own. ``listening_since``
+    is the streak start, for the dashboard's "listening — 42m".
     """
     rows = conn.execute(
-        "SELECT name, role, ready, readiness_status, readiness_report "
+        "SELECT name, role, ready, readiness_status, readiness_report, "
+        "listening_until, listening_since "
         "FROM agents WHERE task_id = ? AND revoked_at IS NULL ORDER BY id",
         (task_id,),
     ).fetchall()
+    now = time.time()
     out = []
     for r in rows:
         try:
@@ -345,6 +352,8 @@ def _agents_for(conn, task_id: str) -> list[dict]:
             "ready": bool(r["ready"]),
             "readiness_status": r["readiness_status"] or "pending",
             "readiness_report": report,
+            "listening": service.is_listening(r["listening_until"], now),
+            "listening_since": r["listening_since"],
         })
     return out
 
@@ -419,8 +428,12 @@ def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
             "last": last,
             "messages": len(_messages_for(conn, tid)),
             "events": len(_events_for(conn, tid)),
+            # `listening` is in the fingerprint (the bool, never the raw expiry) so the
+            # live presence dot flips over SSE. It moves only on a start/stop — unlike
+            # the timestamp, which would churn the token every tick.
             "agents": [
-                [a["role"], a["ready"], a["readiness_status"]] for a in _agents_for(conn, tid)
+                [a["role"], a["ready"], a["readiness_status"], a["listening"]]
+                for a in _agents_for(conn, tid)
             ],
             "contract": [
                 [v["id"], v["locked"], len(contract["data"][v["id"]]["signed"])]

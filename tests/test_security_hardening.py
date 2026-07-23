@@ -245,6 +245,16 @@ def test_rules_charter_states_the_hard_prohibitions():
     assert "never read local files" in r
 
 
+def test_rules_charter_forbids_a_listener_acking_or_paraphrasing():
+    """A background listener shares the seat, so its wake spends the new-flag. If it
+    also acked, the mail would be gone before the main agent ever read it; if it
+    paraphrased, peer content would arrive stripped of the trust envelope."""
+    r = RULES_OF_ENGAGEMENT.lower()
+    assert "never call ack_messages" in r
+    assert "paraphrase" in r
+    assert "check_messages" in r
+
+
 # --- Tier 2: DB at rest, resource caps, audit -------------------------------
 def test_db_file_is_owner_only(tmp_path):
     import os

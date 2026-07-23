@@ -78,6 +78,12 @@ async def _op_wait(ident: Identity, timeout_seconds: int) -> list[dict]:
     # One connection reused across the whole poll loop (not one per 2s tick).
     conn = connect()
     try:
+        # Presence for the dashboard: stamp an EXPIRY the moment we're really parked
+        # (after the cap check — a backed-off call never listened). _active_waits above
+        # stays process memory on purpose: it guards connections held by THIS process,
+        # and in the db it would survive a restart and lock out a seat whose
+        # connections all died with the old process.
+        service.mark_listening(conn, ident, timeout_seconds, WAIT_CAP)
         deadline = asyncio.get_event_loop().time() + min(timeout_seconds, WAIT_CAP)
         while asyncio.get_event_loop().time() < deadline:
             # Revocation must be effectively instant, even for an agent parked in a
@@ -96,6 +102,12 @@ async def _op_wait(ident: Identity, timeout_seconds: int) -> list[dict]:
             await asyncio.sleep(POLL_INTERVAL)
         return []
     finally:
+        # Stop advertising presence as soon as the wait ends — best-effort: if this
+        # never runs (crash), the stamped expiry above lets the signal lapse on its own.
+        try:
+            service.clear_listening(conn, ident)
+        except Exception:  # noqa: BLE001 — presence must never fail a tool call
+            pass
         conn.close()
         remaining = _active_waits.get(ident.agent_id, 1) - 1
         if remaining <= 0:

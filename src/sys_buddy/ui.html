@@ -247,15 +247,48 @@ function agentFor(role, name){
   for(var i=0;i<ags.length;i++){ if(ags[i].role===role || (name&&ags[i].name===name)) return ags[i]; }
   return null;
 }
-/* A small corner badge on an agent's avatar reflecting the pre-flight state:
-   green ✓ once they've passed (ready===true), amber 🔒 while they haven't.
-   '' only when the agent/readiness is unknown (no agents list). */
+/* ---------- live presence (agent parked in wait_for_message) ---------- */
+/* The broker stores an EXPIRY and the API hands us the already-computed booleans.
+   DEFENSIVE: ui.html is served fresh from disk while api.py runs from memory, so a
+   broker restarted mid-upgrade can serve this file against an older API with no
+   `listening` fields at all. Missing → "not listening", and every badge falls back
+   to exactly what shipped before (same precedent as the 1.0.1 thread-ordering fix). */
+function isListening(ag){ return !!(ag && ag.listening); }
+/* "42m" for the streak start; '' when the API is stale or the value is nonsense. */
+function listenAgo(ag){
+  var since = ag && ag.listening_since;
+  if(!since) return '';
+  var secs = Math.floor(Date.now()/1000 - since);
+  if(!isFinite(secs) || secs < 0) return '';
+  if(secs < 60) return secs+'s';
+  if(secs < 3600) return Math.floor(secs/60)+'m';
+  var h=Math.floor(secs/3600), m=Math.floor((secs%3600)/60);
+  return m ? h+'h '+m+'m' : h+'h';
+}
+function listenLabel(ag){ var d=listenAgo(ag); return d ? 'listening — '+d : 'listening'; }
+var LISTEN_TIP="Parked in wait_for_message right now — new mail wakes it immediately.";
+/* The same signal spelled out, for rows with room for words. '' when not listening
+   (and always '' against an older API, since isListening is then false). */
+function listenPill(ag){
+  if(!isListening(ag)) return '';
+  return '<span title="'+esc(LISTEN_TIP)+'" style="display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--st-verified-bg);color:var(--st-verified-fg);white-space:nowrap">'+
+    '<span style="width:6px;height:6px;border-radius:50%;background:var(--st-verified-dot);animation:pulsedot 1.8s ease-in-out infinite;flex:none"></span>'+esc(listenLabel(ag))+'</span>';
+}
+
+/* A small corner badge on an agent's avatar. Pre-flight state first — amber 🔒 while
+   they haven't passed — then it HANDS OFF: once an agent is through pre-flight the
+   badge carries the live signal, a pulsing green dot while it's listening and the
+   static green ✓ when it isn't. '' only when the agent is unknown (no agents list). */
 var LOCK_TIP="Hasn't passed the pre-flight readiness check — can't send messages or change status yet.";
 var READY_TIP="Passed the pre-flight readiness check — action tools unlocked.";
 function lockBadge(role, name){
   var ag=agentFor(role, name);
   if(!ag) return '';
   if(ag.ready){
+    if(isListening(ag)){
+      return '<span title="'+esc(listenLabel(ag)+' · '+LISTEN_TIP)+'" style="position:absolute;bottom:-3px;right:-3px;width:13px;height:13px;border-radius:50%;background:var(--surface);border:1.5px solid var(--surface);display:flex;align-items:center;justify-content:center">'+
+        '<span style="width:8px;height:8px;border-radius:50%;background:var(--st-verified-dot);animation:pulsedot 1.8s ease-in-out infinite"></span></span>';
+    }
     return '<span title="'+esc(READY_TIP)+'" style="position:absolute;bottom:-3px;right:-3px;width:13px;height:13px;border-radius:50%;background:var(--st-verified-bg);color:var(--st-verified-fg);border:1.5px solid var(--surface);display:flex;align-items:center;justify-content:center">'+
       '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>';
   }
@@ -306,7 +339,8 @@ function preflightRow(d){
            : {bg:'var(--st-open-bg)',fg:'var(--st-open-fg)',lbl:'pending'};
     return '<div style="display:flex;align-items:center;gap:8px;padding:5px 10px;background:var(--bg);border:1px solid var(--border);border-radius:9px">'+
       avatarChip(ag.role,20,9)+'<span style="font-size:12px;font-weight:600;color:var(--text)">'+esc(a.label)+'</span>'+
-      '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:'+cfg.bg+';color:'+cfg.fg+'">'+cfg.lbl+'</span></div>';
+      '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:'+cfg.bg+';color:'+cfg.fg+'">'+cfg.lbl+'</span>'+
+      listenPill(ag)+'</div>';
   }).join('');
   return '<div style="margin-top:14px;padding-top:13px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
     '<span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">Pre-flight</span>'+
@@ -575,10 +609,13 @@ function threadHTML(d){
     inner=items.map(threadItemHTML).join('');
   }
   var avs=(d.roles||[]).map(function(r){ return avatarChip(r,22,10); }).join('');
+  // Spell the presence out next to the avatars — one pill per listening agent (none
+  // when nobody is parked, or when the API predates the field).
+  var lps=((d&&d.agents)||[]).filter(isListening).map(listenPill).join('');
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
-    '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">'+
+    '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">'+
       '<span style="font-weight:600;font-size:14px;color:var(--text)">Message thread</span>'+
-      '<div style="display:flex;gap:4px">'+avs+'</div></div>'+
+      '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+lps+'<div style="display:flex;gap:4px">'+avs+'</div></div></div>'+
     '<div style="padding:20px 18px;display:flex;flex-direction:column;gap:17px;max-height:640px;overflow-y:auto">'+inner+'</div></div>';
 }
 
