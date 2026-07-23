@@ -481,16 +481,21 @@ function listHTML(){
 function minutes(t){ if(!t||t==='—') return -1; var p=String(t).split(':'); return (+p[0])*60+(+p[1]); }
 function buildThread(d){
   var items=[];
-  (d.messages||[]).forEach(function(m,idx){ items.push({t:m.time, min:minutes(m.time), kind:'msg', m:m, ord:idx}); });
+  (d.messages||[]).forEach(function(m,idx){ items.push({t:m.time, min:minutes(m.time), ts:(typeof m.ts==='number'?m.ts:null), kind:'msg', m:m, ord:idx}); });
   var DIV={task:1,transition:1,lock:1,slack:1};
   (d.events||[]).forEach(function(ev,idx){
     var evk=ev[1];
     if(!DIV[evk]) return; // deploy/test/token are shown as bubbles or belong to the log
     var mn=minutes(ev[0]); if(evk==='task') mn-=0.5; // creation sorts first within its minute
-    items.push({t:ev[0], min:mn, kind:'div', evkind:evk, text:ev[2], ord:1000+idx});
+    items.push({t:ev[0], min:mn, ts:(typeof ev[3]==='number'?ev[3]:null), kind:'div', evkind:evk, text:ev[2], ord:1000+idx});
   });
-  // stable sort by minute
-  items.sort(function(a,b){ return (a.min-b.min); });
+  // Sort by true creation time (ts, sub-second) when the API supplies it for every
+  // item; otherwise fall back to the legacy minute-granularity sort (keeps a stale
+  // API — e.g. before a broker restart — from breaking the thread). `ord` breaks ties
+  // stably so same-instant items keep the order the API returned them (id order).
+  var allTs = items.length>0 && items.every(function(it){ return typeof it.ts==='number' && isFinite(it.ts); });
+  if(allTs){ items.sort(function(a,b){ return (a.ts-b.ts) || (a.ord-b.ord); }); }
+  else     { items.sort(function(a,b){ return (a.min-b.min) || (a.ord-b.ord); }); }
   return items;
 }
 function bubbleStyle(type,pass){

@@ -218,6 +218,7 @@ def test_messages_join_role_and_decode_body(conn):
     assert msgs[0]["type"] == "status_update"
     assert msgs[0]["body"] == "backend is up"
     assert "time" in msgs[0]
+    assert isinstance(msgs[0]["ts"], (int, float))  # raw ts for thread ordering
 
 
 def test_test_result_messages_get_strike_from_events(conn):
@@ -246,8 +247,9 @@ def test_events_render_and_filter(conn):
 
     all_events = api._events_for(conn, "signin", "all")
     assert len(all_events) == 4
-    # shape: [time, kind, detail]
-    assert all(len(row) == 3 for row in all_events)
+    # shape: [time, kind, detail, created_at] — 4th is the raw ts for client-side sorting
+    assert all(len(row) == 4 for row in all_events)
+    assert all(isinstance(row[3], (int, float)) for row in all_events)
 
     kinds = [row[1] for row in all_events]
     assert kinds == ["transition", "lock", "deploy", "test"]

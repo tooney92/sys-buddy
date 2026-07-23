@@ -278,7 +278,7 @@ def _messages_for(conn, task_id: str) -> list[dict]:
     test_idx = 0
     for r in rows:
         body = json.loads(r["body_json"])
-        msg: dict = {"id": r["id"], "role": r["role"], "type": r["type"], "to_role": r["to_role"], "time": _hhmm(r["created_at"])}
+        msg: dict = {"id": r["id"], "role": r["role"], "type": r["type"], "to_role": r["to_role"], "time": _hhmm(r["created_at"]), "ts": r["created_at"]}
         if isinstance(body, dict):
             msg["body"] = body.get("text") or body.get("body") or ""
             if "code" in body:
@@ -314,7 +314,9 @@ def _events_for(conn, task_id: str, filter: str = "all") -> list[dict]:
             "SELECT kind, detail_json, created_at FROM events WHERE task_id = ? ORDER BY id",
             (task_id,),
         ).fetchall()
-    return [[_hhmm(r["created_at"]), r["kind"], _render_detail(r["kind"], json.loads(r["detail_json"]))] for r in rows]
+    # 4th element is the raw created_at (float) so the client can sort the thread by
+    # true creation time, not just minute precision. Existing consumers use [0:3].
+    return [[_hhmm(r["created_at"]), r["kind"], _render_detail(r["kind"], json.loads(r["detail_json"])), r["created_at"]] for r in rows]
 
 
 def _agents_for(conn, task_id: str) -> list[dict]:
