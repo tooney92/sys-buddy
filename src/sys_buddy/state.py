@@ -369,12 +369,25 @@ def lock_contract(conn, identity: Identity, version: int) -> dict:
         f"[{identity.task_id}] Contract v{version} locked — signed by {', '.join(sorted(signed_set))}",
     )
     conn.commit()
+    # PUSH the lock to the roles that already signed. Only the FINAL signer learns the
+    # lock from this call's return value; without this the others would have to poll
+    # get_contract, and a parked wait_for_message would sleep straight through the lock
+    # it is waiting for (an event is not a message; the wait loop only reads the message
+    # queue). So the broker drops one broker-authored `contract_locked` notification:
+    #   * `service.BROKER_TYPES` → delivered in the <broker trust="broker"> envelope,
+    #     never framed as peer DATA, and unforgeable via send_message;
+    #   * authored on the finalising signer's row, so `from_agent_id != me` delivers it
+    #     to exactly the already-signed roles and not to the signer who just got
+    #     {locked: true} synchronously — no double-notify;
+    #   * exactly ONE message for exactly one `lock` event, so the dashboard thread
+    #     shows a single lock bubble beside its divider (D10's 1:1 invariant holds).
     service.post_message(
         conn,
         identity,
-        "contract_lock",
-        f"Contract v{version} is LOCKED — signed by all parties. This is the blueprint to "
-        f"build against; get the staging_url from get_contract.",
+        "contract_locked",
+        f"Contract v{version} is LOCKED — signed by all parties ({', '.join(sorted(signed_set))}). "
+        f"This is the blueprint to build against; read the frozen shape and the "
+        f"staging_url from get_contract.",
     )
     return {"locked": True, "version": version, "signed": sorted(signed_set), "state": state}
 

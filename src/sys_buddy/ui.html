@@ -66,7 +66,10 @@ button{font-family:inherit}
 var SK={open:'open',contract_proposed:'proposed',contract_locked:'locked',backend_live:'live',testing:'testing',verified:'verified',stuck:'stuck'};
 var SLAB={open:'open',contract_proposed:'planning',contract_locked:'contract locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
 var ORDER={open:0,contract_proposed:1,contract_locked:2,backend_live:3,testing:4,verified:5};
-var RL={backend:{i:'B',c:'var(--role-backend)',label:'backend'},frontend:{i:'F',c:'var(--role-frontend)',label:'frontend'},mobile:{i:'M',c:'var(--role-mobile)',label:'mobile'}};
+// `broker` is not an agent seat — it's the broker's own voice, used for the
+// notifications it authors (e.g. contract_locked). Neutral system colour so it never
+// reads as one of the peers talking.
+var RL={backend:{i:'B',c:'var(--role-backend)',label:'backend'},frontend:{i:'F',c:'var(--role-frontend)',label:'frontend'},mobile:{i:'M',c:'var(--role-mobile)',label:'mobile'},broker:{i:'SB',c:'var(--role-system)',label:'sys-buddy'}};
 // The 'preflight' node has no matching task state — it's a sub-phase of 'open',
 // driven by per-agent readiness (see genSteps). ORDER above stays keyed on the REAL
 // task states; genSteps maps real→display indices around the inserted node.
@@ -79,7 +82,8 @@ function stateChip(s){ var k=SK[s]||'open'; return {label:SLAB[s]||s, bg:'var(--
 function methodChip(m){ var k=({GET:'proposed',POST:'live',PUT:'locked',PATCH:'testing',DELETE:'stuck'})[m]||'open'; return {bg:'var(--st-'+k+'-bg)', fg:'var(--st-'+k+'-fg)'}; }
 function typeChip(type,pass){
   var map={question:['question','open'],answer:['answer','proposed'],status_update:['status','open'],
-    contract_proposal:['contract proposal','locked'],contract_lock:['contract lock','locked'],renegotiation:['replanning','proposed'],
+    contract_proposal:['contract proposal','locked'],contract_lock:['contract lock','locked'],
+    contract_locked:['contract locked','locked'],renegotiation:['replanning','proposed'],
     deploy_confirmed:['deploy confirmed','live'],verified:['verified','verified'],stuck:['stuck','stuck']};
   var label,key;
   if(type==='test_result'){ label=pass?'test · pass':'test · fail'; key=pass?'verified':'stuck'; }

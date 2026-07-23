@@ -20,7 +20,7 @@ import secrets
 import sqlite3
 import time
 
-from . import audit
+from . import audit, service
 from .db import connect
 from .identity import new_invite_code, new_viewer_token, sha256_hex
 
@@ -82,6 +82,15 @@ def create_task(id: str | None, *, title: str, roles: list[str], mode: str = "co
         raise ValueError("a task needs at least one non-empty role")
     if len(roles) != len(set(roles)):
         raise ValueError("task roles must be unique (no duplicates)")
+    # `broker` is the broker's OWN voice: it authors pushes like contract_locked, and
+    # both the agent envelope and the dashboard thread attribute them to that role. A
+    # seat literally named 'broker' would be indistinguishable from the broker itself,
+    # so the name is reserved.
+    if any(r.lower() == service.BROKER_ROLE for r in roles):
+        raise ValueError(
+            f"'{service.BROKER_ROLE}' is reserved for the broker's own notifications — "
+            f"pick another role name"
+        )
     if mode == "contract" and len(roles) < 2:
         # Model B: the producer is whoever proposes the contract (no hardcoded role).
         # A contract still needs at least two roles — one to produce and one to build

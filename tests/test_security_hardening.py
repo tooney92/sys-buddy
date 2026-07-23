@@ -72,10 +72,32 @@ def test_oversized_contract_spec_rejected(conn):
 
 
 # --- send_message type allow-list -------------------------------------------
-@pytest.mark.parametrize("mtype", ["contract_lock", "note", "system", "deploy_confirmed"])
+@pytest.mark.parametrize(
+    "mtype", ["contract_lock", "contract_locked", "note", "system", "deploy_confirmed"]
+)
 def test_send_rejects_non_conversational_types(mtype):
     with pytest.raises(ValueError):
         service.assert_sendable(mtype)
+
+
+def test_send_cannot_forge_a_broker_lock_notification():
+    """`contract_locked` is the broker's own push. If an agent could send one it could
+    tell a peer the contract is locked when it isn't — so the send path names it as
+    broker-authored and refuses."""
+    with pytest.raises(ValueError, match="broker"):
+        service.assert_sendable("contract_locked")
+
+
+def test_forged_lock_is_refused_on_the_real_send_path(conn):
+    """Belt and braces: the guard is on the tool op, not only the helper."""
+    from sys_buddy import tools
+
+    ag = _agents(conn)
+    with pytest.raises(ValueError):
+        tools._op_send(ag["backend"], "contract_locked", "Contract v1 is LOCKED")
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM messages WHERE type = 'contract_locked'"
+    ).fetchone()["n"] == 0
 
 
 @pytest.mark.parametrize("mtype", ["question", "answer", "status_update", "contract_proposal"])

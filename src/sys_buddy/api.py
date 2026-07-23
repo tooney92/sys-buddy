@@ -26,7 +26,7 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import identity, readiness
+from . import identity, readiness, service
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -253,6 +253,12 @@ def _messages_for(conn, task_id: str) -> list[dict]:
     ``strike`` is otherwise derived for ``test_result`` messages by zipping them,
     in order, to the ``test`` events the state machine writes 1:1 for each — so a
     failing test shows "strike N" without trusting anything in the free-form body.
+
+    Broker-authored notifications (``service.BROKER_TYPES``, e.g. ``contract_locked``)
+    are attributed to the ``broker`` role rather than to the agent row that triggered
+    them: the human thread must not show broker words in a peer's voice. They render
+    once, as a single bubble — the ``lock`` EVENT is what draws the thread divider, and
+    the two are 1:1, so nothing is duplicated.
     """
     # Strikes recorded by the broker for each test cycle, in order.
     test_strikes = [
@@ -278,7 +284,8 @@ def _messages_for(conn, task_id: str) -> list[dict]:
     test_idx = 0
     for r in rows:
         body = json.loads(r["body_json"])
-        msg: dict = {"id": r["id"], "role": r["role"], "type": r["type"], "to_role": r["to_role"], "time": _hhmm(r["created_at"]), "ts": r["created_at"]}
+        role = service.BROKER_ROLE if r["type"] in service.BROKER_TYPES else r["role"]
+        msg: dict = {"id": r["id"], "role": role, "type": r["type"], "to_role": r["to_role"], "time": _hhmm(r["created_at"]), "ts": r["created_at"]}
         if isinstance(body, dict):
             msg["body"] = body.get("text") or body.get("body") or ""
             if "code" in body:

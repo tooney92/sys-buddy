@@ -53,3 +53,12 @@ def test_create_task_empty_string_id_also_derives(conn):
 def test_create_task_explicit_id_used_verbatim(conn):
     t = admin.create_task("signin", title="Sign in", roles=["backend", "frontend"])
     assert t["id"] == "signin"
+
+
+def test_create_task_rejects_the_reserved_broker_role(conn):
+    """`broker` is how the broker's own pushes (contract_locked) are attributed in the
+    envelope and the dashboard — a seat by that name could impersonate the broker."""
+    import pytest
+
+    with pytest.raises(ValueError, match="reserved"):
+        admin.create_task("signin", title="Sign in", roles=["backend", "Broker"])
