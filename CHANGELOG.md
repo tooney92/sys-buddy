@@ -15,6 +15,16 @@ Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y
   contracts; staging_url at host setup + localhost for same-machine tasks; three-role /
   scoped-parties contracts).
 
+## [1.0.1] — 2026-07-23
+
+### Fixed
+- **Dashboard thread ordering.** The message/event thread sorted by minute-precision
+  time, so items within the same minute — and message↔event interleaving — could
+  render out of creation order. The API (`_messages_for`, `_events_for`) now sends a
+  raw `created_at` timestamp per item, and the dashboard sorts by it (sub-second),
+  falling back to the old minute sort only if the API is stale — safe during a broker
+  restart, when `ui.html` (served from disk) can be newer than the running `api.py`.
+
 ## [1.0.0] — 2026-07-23
 First tagged release — the sys-buddy broker for cross-human AI agent collaboration.
 
@@ -42,5 +52,6 @@ First tagged release — the sys-buddy broker for cross-human AI agent collabora
   told to review via `get_contract` but saw nothing until it locked — which it can't do
   until they sign. The `staging_url` stays the single trusted, signed source (SSRF-guarded).
 
-[Unreleased]: https://github.com/tooney92/sys-buddy/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/tooney92/sys-buddy/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/tooney92/sys-buddy/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/tooney92/sys-buddy/releases/tag/v1.0.0
