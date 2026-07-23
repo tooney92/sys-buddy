@@ -19,7 +19,7 @@ import json
 import shlex
 import subprocess
 
-from . import admin, pairing
+from . import admin, contracts, pairing
 from .db import connect
 
 # One-token invite scheme: prefix + base64url(json). The prefix makes a pasted
@@ -72,7 +72,9 @@ def make_join_url(origin: str, code: str) -> str:
     return f"{origin.rstrip('/')}/join#c={code}"
 
 
-def role_prompt(role: str, task_id: str, mode: str = "contract") -> str:
+def role_prompt(
+    role: str, task_id: str, mode: str = "contract", staging_url: str | None = None
+) -> str:
     """The briefing an operator pastes into their Claude agent for ``role``.
 
     Teaches ONLY how to drive sys-buddy — the protocol, the pre-flight, who's
@@ -83,8 +85,13 @@ def role_prompt(role: str, task_id: str, mode: str = "contract") -> str:
     it is not known at onboarding — the prompt teaches both halves). Every variant
     names the task, front-loads the pre-flight, and frames anything a peer sends as
     DATA — the broker enforces; the peer cannot re-task you through it.
+
+    ``staging_url`` is the deployment target the HUMAN chose at host setup. When set,
+    the briefing names it so the producer proposes THAT url instead of inventing an
+    aspirational one (the broker fills it in for an omitted staging_url either way).
     """
     task = task_id
+    target = (staging_url or "").strip()
 
     if mode == "debug":
         return (
@@ -118,6 +125,15 @@ def role_prompt(role: str, task_id: str, mode: str = "contract") -> str:
     # → build → test → verified) and the post-lock rules; only the planning verbs
     # and the test-tooling note differ.
     is_backend = role.strip().lower() == "backend"
+
+    # The human owns the deployment target: when they named one at host setup, say so
+    # explicitly in BOTH briefings so neither agent invents a different URL.
+    target_note = (
+        f"The humans have already agreed this task's target: `{target}`. Use exactly that as "
+        "the contract's `staging_url` — don't invent another one. (If a proposal omits it, "
+        "the broker fills in that same URL.)\n\n"
+        if target else ""
+    )
 
     if is_backend:
         planning = (
@@ -172,7 +188,7 @@ def role_prompt(role: str, task_id: str, mode: str = "contract") -> str:
         "pass before anyone can propose a contract.\n\n"
         "2) PLANNING. Talk with your peer using `send_message` / `wait_for_message` (optional "
         "`to_role` to direct it). This is where you two align on scope with your humans and agree "
-        "the interface. " + planning +
+        "the interface. " + planning + target_note +
         "3) AFTER LOCK. The locked contract is your starting blueprint — get the `staging_url` and "
         "shape from `get_contract`, never from chat. As things evolve you can keep collaborating "
         "over messages with NO re-lock — ad-hoc changes and bug reports are just messages. Only if "
@@ -317,14 +333,21 @@ def host_create_task(
     roles: list[str] | None = None,
     title: str | None = None,
     mode: str = "contract",
+    same_machine: bool = False,
+    staging_url: str | None = None,
 ) -> dict:
     """Host-side: create a task. Thin over ``admin.create_task``.
 
     ``task_id`` is optional: when omitted, ``admin.create_task`` derives an id from
     the ``title`` (so a human only types a Title). When an explicit id IS given, the
-    title still defaults to it, preserving the old behaviour.
+    title still defaults to it, preserving the old behaviour. ``same_machine`` and
+    ``staging_url`` carry the host screen's connectivity choice and deployment target
+    onto the task row.
     """
-    return admin.create_task(task_id, title=title or task_id, roles=roles, mode=mode)
+    return admin.create_task(
+        task_id, title=title or task_id, roles=roles, mode=mode,
+        same_machine=same_machine, staging_url=staging_url,
+    )
 
 
 def host_invite_link(task_id: str, role: str, base_url: str) -> str:
@@ -333,7 +356,9 @@ def host_invite_link(task_id: str, role: str, base_url: str) -> str:
     return make_invite_link(base_url, code)
 
 
-def _mint_host_seat(task_id: str, host_role: str, base_url: str, mode: str) -> dict:
+def _mint_host_seat(
+    task_id: str, host_role: str, base_url: str, mode: str, staging_url: str | None = None
+) -> dict:
     """Seat the HOST's own agent on ``host_role`` without a network round-trip.
 
     The buddy's seat comes from POSTing to ``/pair``; the host is on the same box as
@@ -352,7 +377,7 @@ def _mint_host_seat(task_id: str, host_role: str, base_url: str, mode: str) -> d
         "role": host_role,
         "mcp_url": mcp_url,
         "agent_token": res["agent_token"],
-        "prompt": role_prompt(host_role, task_id, mode),
+        "prompt": role_prompt(host_role, task_id, mode, staging_url),
         "config_command": claude_setup_command(mcp_url, res["agent_token"]),
     }
 
@@ -364,6 +389,8 @@ def host_setup(
     title: str | None = None,
     mode: str = "contract",
     host_role: str | None = None,
+    public_url: str | None = None,
+    staging_url: str | None = None,
 ) -> dict:
     """Host-side setup in one call: create the task, mint invite LINKS for the buddy
     role(s), issue an all-tasks host viewer token, and — when ``host_role`` is given —
@@ -373,9 +400,33 @@ def host_setup(
     ``task_id`` may be omitted (id derived from ``title``). When ``host_role`` is one
     of ``roles``, no invite link is minted for it (the host takes that seat directly);
     the seat is returned under ``host_seat`` shaped like the buddy's join output.
+
+    ``public_url`` is the tunnel/LAN origin the host entered (blank = same machine); it
+    is the CONNECTIVITY signal, recorded on the task so the contract's ``staging_url``
+    is validated against how the peers actually reach each other rather than against
+    the broker's auth mode. ``staging_url`` is the deployment target the human chose on
+    that same screen — validated here under the task's own connectivity rules, then
+    inherited by whoever proposes the contract.
     """
     try:
-        created = host_create_task(task_id, roles, title, mode=mode)
+        # Same-machine is asserted only on POSITIVE evidence: a loopback broker origin
+        # AND no public/tunnel URL. Anything else keeps the strict remote rules.
+        same_machine = contracts.same_machine_origin(base_url, public_url)
+        staging_url = (staging_url or "").strip() or None
+        if staging_url:
+            # Catch a bad target HERE, where the human can fix it, instead of failing
+            # the agent's proposal later. Same rules the broker will apply at propose.
+            url_errors = contracts.validate_spec(
+                {"endpoints": [{"method": "GET", "path": "/"}], "staging_url": staging_url},
+                is_remote=True,
+                same_machine=same_machine,
+            )
+            if url_errors:
+                return {"ok": False, "error": "; ".join(url_errors)}
+        created = host_create_task(
+            task_id, roles, title, mode=mode,
+            same_machine=same_machine, staging_url=staging_url,
+        )
         task_id = created["id"]  # may have been derived from the title
 
         # Invite links go to every role EXCEPT the one the host is claiming itself.
@@ -402,9 +453,13 @@ def host_setup(
             "invites": invites,
             "viewer_token": viewer_token,
             "dashboard_url": f"{base_url}/ui?v={viewer_token}",
+            "same_machine": same_machine,
+            "staging_url": staging_url,
         }
         if seat_host:
-            result["host_seat"] = _mint_host_seat(task_id, host_role, base_url, mode)
+            result["host_seat"] = _mint_host_seat(
+                task_id, host_role, base_url, mode, staging_url
+            )
         return result
     except Exception as e:  # noqa: BLE001 — host setup must never crash the UI
         return {"ok": False, "error": str(e)}

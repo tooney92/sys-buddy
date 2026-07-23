@@ -406,3 +406,124 @@ def test_gui_start_host_rejects_http_public_url():
         "My Task", ["backend", "frontend"], host_role="", public_url="http://insecure.example"
     )
     assert r.get("ok") is False and "https" in r["error"].lower()
+
+
+# --- host_setup: connectivity + the human-owned staging target --------------
+def _task_row(conn, task_id):
+    return conn.execute(
+        "SELECT same_machine, staging_url FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+
+
+def test_host_setup_records_same_machine_for_a_loopback_origin(conn):
+    """Blank public URL + loopback broker origin = one box: recorded on the task so
+    the contract may name http://localhost:PORT."""
+    r = onboarding.host_setup(
+        "local1", ["backend", "frontend"], "http://127.0.0.1:8787",
+        public_url=None, staging_url="http://localhost:3000",
+    )
+    assert r["ok"] is True
+    assert r["same_machine"] is True
+    assert r["staging_url"] == "http://localhost:3000"
+    row = _task_row(conn, "local1")
+    assert row["same_machine"] == 1
+    assert row["staging_url"] == "http://localhost:3000"
+
+
+@pytest.mark.parametrize("public_url", [
+    "https://abc-123.ngrok-free.app",
+    "https://my-box.tailnet.ts.net",
+])
+def test_host_setup_marks_a_tunnel_task_remote(conn, public_url):
+    r = onboarding.host_setup(
+        "remote1", ["backend", "frontend"], public_url,
+        public_url=public_url, staging_url="https://api-staging.example.com",
+    )
+    assert r["ok"] is True
+    assert r["same_machine"] is False
+    assert _task_row(conn, "remote1")["same_machine"] == 0
+
+
+@pytest.mark.parametrize("staging_url", [
+    "http://localhost:3000",
+    "http://api-staging.example.com",
+    "https://127.0.0.1/admin",
+    "https://169.254.169.254/latest/meta-data/",
+    "https://db.internal/x",
+])
+def test_host_setup_rejects_an_unreachable_target_on_a_tunnel_task(conn, staging_url):
+    """REGRESSION: the strict https + SSRF rules apply to any task with a real
+    origin, and the human is told at setup rather than the agent failing later."""
+    r = onboarding.host_setup(
+        "remote2", ["backend", "frontend"], "https://abc.ngrok-free.app",
+        public_url="https://abc.ngrok-free.app", staging_url=staging_url,
+    )
+    assert r["ok"] is False
+    assert "staging_url" in r["error"]
+    assert conn.execute("SELECT 1 FROM tasks WHERE id = 'remote2'").fetchone() is None
+
+
+def test_host_setup_without_a_staging_url_is_unchanged(conn):
+    """Back-compat: the field is optional — omit it and the agents agree one."""
+    r = onboarding.host_setup("nourl", ["backend", "frontend"], "http://127.0.0.1:8787")
+    assert r["ok"] is True
+    assert r["staging_url"] is None
+    assert _task_row(conn, "nourl")["staging_url"] is None
+
+
+def test_host_seat_prompt_names_the_chosen_target(conn):
+    r = onboarding.host_setup(
+        "seated", ["backend", "frontend"], "http://127.0.0.1:8787",
+        host_role="backend", staging_url="http://localhost:4321",
+    )
+    assert r["ok"] is True
+    assert "http://localhost:4321" in r["host_seat"]["prompt"]
+
+
+def test_role_prompt_omits_the_target_line_when_unset():
+    prompt = onboarding.role_prompt("backend", "t1")
+    assert "already agreed this task's target" not in prompt
+
+
+# --- gui.start_host plumbing ------------------------------------------------
+def _stub_broker(monkeypatch):
+    """Neutralise the two side effects of start_host: booting the in-process broker
+    and shelling out to the Claude CLI."""
+    from sys_buddy import gui
+    monkeypatch.setattr(gui, "_ensure_broker", lambda *a, **k: True)
+    monkeypatch.setattr(
+        onboarding, "configure_claude",
+        lambda *a, **k: {"ok": True, "detail": "stub", "command": "claude mcp add …"},
+    )
+    return gui
+
+
+def test_gui_start_host_threads_the_staging_url_onto_a_same_machine_task(conn, monkeypatch):
+    gui = _stub_broker(monkeypatch)
+    r = gui.GuiApi().start_host(
+        "Local Task", ["backend", "frontend"], host_role="backend",
+        public_url="", mode="contract", staging_url="http://localhost:3000",
+    )
+    assert r["ok"] is True
+    assert r["same_machine"] is True and r["staging_url"] == "http://localhost:3000"
+    row = _task_row(conn, r["task_id"])
+    assert row["same_machine"] == 1 and row["staging_url"] == "http://localhost:3000"
+    assert "http://localhost:3000" in r["host_seat"]["prompt"]
+
+
+def test_gui_start_host_rejects_localhost_target_when_exposed(conn, monkeypatch):
+    """REGRESSION: choosing a tunnel means the buddy is elsewhere — a localhost
+    target is refused even though the same GUI allows it on a same-machine task."""
+    gui = _stub_broker(monkeypatch)
+    r = gui.GuiApi().start_host(
+        "Tunnelled", ["backend", "frontend"], host_role="backend",
+        public_url="https://abc.ngrok-free.app", mode="contract",
+        staging_url="http://localhost:3000",
+    )
+    assert r["ok"] is False and "staging_url" in r["error"]
+
+
+def test_gui_start_host_without_a_staging_url_still_works(conn, monkeypatch):
+    gui = _stub_broker(monkeypatch)
+    r = gui.GuiApi().start_host("No Target", ["backend", "frontend"], host_role="backend")
+    assert r["ok"] is True and r["staging_url"] is None

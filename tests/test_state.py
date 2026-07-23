@@ -460,3 +460,120 @@ def test_non_backend_producer_full_flow(conn):
 
     r = state.report_status(conn, ag["mobile"], state.STATUS_VERIFIED, "all good")
     assert r["state"] == state.VERIFIED
+
+
+# --- staging_url strictness keys on CONNECTIVITY, not the broker's auth mode --
+# The GUI always runs the broker in remote mode (token auth needs it), so a
+# same-machine task must still be able to name http://localhost:PORT.
+def _remote_mode(conn):
+    from sys_buddy.config import Config, get_config, set_config
+    set_config(Config(mode="remote", db_path=get_config().db_path))
+
+
+def _preflight_passed(conn, ag):
+    for ident in ag.values():
+        conn.execute("UPDATE agents SET ready = 1 WHERE id = ?", (ident.agent_id,))
+    conn.commit()
+
+
+def _mark(conn, task="signin", *, same_machine=None, staging_url=None):
+    if same_machine is not None:
+        conn.execute(
+            "UPDATE tasks SET same_machine = ? WHERE id = ?", (1 if same_machine else 0, task)
+        )
+    if staging_url is not None:
+        conn.execute("UPDATE tasks SET staging_url = ? WHERE id = ?", (staging_url, task))
+    conn.commit()
+
+
+def test_propose_allows_localhost_on_same_machine_task_in_remote_mode(conn):
+    _remote_mode(conn)
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=True)
+    result = state.propose_contract(
+        conn, ag["backend"], _valid_spec(url="http://localhost:3000")
+    )
+    assert result["state"] == state.CONTRACT_PROPOSED
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:3000",
+    "http://api-staging.example.com",
+    "https://127.0.0.1/admin",
+    "https://169.254.169.254/latest/meta-data/",
+    "https://10.0.0.5/api",
+])
+def test_propose_rejects_localhost_and_ssrf_on_remote_task(conn, url):
+    """REGRESSION: a task with a real tunnel/public origin (same_machine = 0) keeps
+    the full https + SSRF rules — nothing about the new lenient path leaks into it."""
+    _remote_mode(conn)
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=False)
+    with pytest.raises(ValueError, match="staging_url"):
+        state.propose_contract(conn, ag["backend"], _valid_spec(url=url))
+    assert _task_state(conn) == state.OPEN
+
+
+def test_same_machine_flag_is_ignored_when_broker_has_a_public_origin(conn):
+    """Defence in depth: even a same_machine=1 row stays strict while THIS process is
+    reachable at a public origin — a peer may well be off-box."""
+    from sys_buddy.config import Config, get_config, set_config
+    set_config(Config(
+        mode="remote", db_path=get_config().db_path, public_url="https://abc.ngrok-free.app"
+    ))
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=True)
+    with pytest.raises(ValueError, match="staging_url"):
+        state.propose_contract(conn, ag["backend"], _valid_spec(url="http://localhost:3000"))
+
+
+def test_task_defaults_to_strict_when_nothing_declared(conn):
+    """A task created by any path that doesn't declare connectivity is strict."""
+    _remote_mode(conn)
+    ag = _agents(conn)  # seeded without touching same_machine
+    _preflight_passed(conn, ag)
+    with pytest.raises(ValueError, match="staging_url"):
+        state.propose_contract(conn, ag["backend"], _valid_spec(url="http://localhost:3000"))
+
+
+# --- the host-chosen staging_url is inherited by the proposal ---------------
+def _contract_spec(conn, task="signin", version=1) -> dict:
+    row = conn.execute(
+        "SELECT spec_json FROM contracts WHERE task_id = ? AND version = ?", (task, version)
+    ).fetchone()
+    import json as _json
+    return _json.loads(row["spec_json"])
+
+
+def test_proposal_inherits_the_host_chosen_staging_url(conn):
+    _remote_mode(conn)
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=True, staging_url="http://localhost:4321")
+    spec = _valid_spec()
+    del spec["staging_url"]                      # agent didn't invent one
+    state.propose_contract(conn, ag["backend"], spec)
+    assert _contract_spec(conn)["staging_url"] == "http://localhost:4321"
+
+
+def test_explicit_staging_url_still_wins_over_the_task_default(conn):
+    ag = _agents(conn)
+    _mark(conn, staging_url="https://host-chose.example.com")
+    state.propose_contract(conn, ag["backend"], _valid_spec(url="https://agent-chose.example.com"))
+    assert _contract_spec(conn)["staging_url"] == "https://agent-chose.example.com"
+
+
+def test_inherited_staging_url_is_still_validated(conn):
+    """Inheritance is a convenience, not a bypass: a remote task can't inherit a
+    localhost target."""
+    _remote_mode(conn)
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=False, staging_url="http://localhost:4321")
+    spec = _valid_spec()
+    del spec["staging_url"]
+    with pytest.raises(ValueError, match="staging_url"):
+        state.propose_contract(conn, ag["backend"], spec)

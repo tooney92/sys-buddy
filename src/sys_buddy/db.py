@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     mode        TEXT NOT NULL DEFAULT 'contract',  -- 'contract' | 'debug'
     roles_json  TEXT NOT NULL,
     strikes     INTEGER NOT NULL DEFAULT 0,
+    -- 1 only when the HOST declared at setup that everything lives on ONE box
+    -- (loopback broker origin, no public/tunnel URL). Defaults to 0 so anything
+    -- created by another path is validated with the strict remote rules.
+    same_machine INTEGER NOT NULL DEFAULT 0,
+    staging_url TEXT,                       -- the host-chosen deployment target
     created_at  REAL NOT NULL,
     closed_at   REAL
 );
@@ -172,6 +177,13 @@ def init_db(db_path: Path | str | None = None) -> Path:
         task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "mode" not in task_cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'contract'")
+        # Migration: connectivity + the host-chosen staging target. An existing task
+        # predates the flag, so it gets 0 — i.e. the strict staging_url rules. Failing
+        # closed here is deliberate: same-machine leniency must be positively declared.
+        if "same_machine" not in task_cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN same_machine INTEGER NOT NULL DEFAULT 0")
+        if "staging_url" not in task_cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN staging_url TEXT")
         # Migration: add messages.to_role to a db created before directed messages existed.
         msg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
         if "to_role" not in msg_cols:
