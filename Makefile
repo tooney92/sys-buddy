@@ -1,7 +1,6 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 SERVICE := sys-buddy
-DEVCOMPOSE := docker compose -f .devcontainer/docker-compose.workspace.yml --env-file .devcontainer/.env
 
 .PHONY: help build up down restart logs ps shell token url open clean test local serve lock task tasks invite \
 	dc-up dc-down dc-logs dc-ps dc-tunnel-url
@@ -67,18 +66,3 @@ serve: ## Run the broker locally in remote/auth-enforced mode, no docker
 
 lock: ## Refresh uv.lock after a dependency change
 	uv lock
-
-dc-up: ## Start the devcontainer stack (workspace, mysql, sys-buddy, cloudflared)
-	$(DEVCOMPOSE) up -d --build
-
-dc-down: ## Stop the devcontainer stack (keeps volumes)
-	$(DEVCOMPOSE) down
-
-dc-logs: ## Follow devcontainer stack logs
-	$(DEVCOMPOSE) logs -f
-
-dc-ps: ## Show devcontainer stack status
-	$(DEVCOMPOSE) ps
-
-dc-tunnel-url: ## Print the current Cloudflare quick-tunnel URL
-	@$(DEVCOMPOSE) logs cloudflared 2>/dev/null | grep -oE 'https://[A-Za-z0-9.-]+\.trycloudflare\.com' | tail -1
