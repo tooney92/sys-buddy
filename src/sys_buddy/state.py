@@ -94,6 +94,40 @@ def _task_mode(conn, task_id: str) -> str:
     return row["mode"]
 
 
+def _task_is_same_machine(conn, task_id: str) -> bool:
+    """Is this task confined to ONE machine (host-declared at setup)?
+
+    Two independent conditions must BOTH hold, so the lenient staging_url path is
+    only ever taken on positive evidence:
+
+    1. the task row carries ``same_machine = 1`` — set only by host setup when the
+       broker origin was loopback and no public/tunnel URL was given; and
+    2. this broker process has no ``public_url`` — if the process is reachable at a
+       public origin, a peer may well be off-box regardless of what the row says.
+
+    A missing column/row/NULL reads as False (strict). Nothing an AGENT can send
+    over MCP feeds into either condition.
+    """
+    try:
+        row = conn.execute("SELECT same_machine FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return False  # pre-migration db → strict
+    if row is None or not row["same_machine"]:
+        return False
+    return not (config.get_config().public_url or "").strip()
+
+
+def _task_staging_url(conn, task_id: str) -> str | None:
+    """The host-chosen deployment target for this task, if they set one at setup."""
+    try:
+        row = conn.execute("SELECT staging_url FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None or not row["staging_url"]:
+        return None
+    return str(row["staging_url"]).strip() or None
+
+
 def _event(conn, task_id: str, kind: str, detail: object) -> None:
     """Append an events row. ``detail`` is any JSON value; the API layer depends on
     the exact shapes documented in the step-4 brief (transition/lock/deploy/test)."""
@@ -217,10 +251,24 @@ def propose_contract(conn, identity: Identity, spec: dict) -> dict:
     back to ``contract_proposed`` (SPEC §5 rule 1). Terminal tasks cannot be
     reopened without a human.
     """
-    # staging_url strictness is mode-aware: remote peers are on another machine (real
-    # https domain + SSRF guard); locally the frontend just hits the backend on
-    # localhost, so any non-empty URL is fine. See contracts._validate_staging_url.
-    errors = contracts.validate_spec(spec, is_remote=config.get_config().is_remote)
+    # The host may have nominated the deployment target at setup — the human owns it,
+    # and the producer agent INHERITS it rather than inventing a URL that was never
+    # deployed. Only fills a gap: an explicit staging_url in the proposal still wins.
+    task_url = _task_staging_url(conn, identity.task_id)
+    if task_url and not (isinstance(spec, dict) and str(spec.get("staging_url") or "").strip()):
+        spec = {**spec, "staging_url": task_url} if isinstance(spec, dict) else spec
+
+    # staging_url strictness is CONNECTIVITY-aware, not auth-mode-aware: a peer on
+    # another machine needs a real https domain + the SSRF guard, while a task the
+    # host declared same-machine (loopback origin, no public URL) is one person on one
+    # box, where http://localhost:PORT is the correct target. The GUI always runs the
+    # broker in remote mode for token auth, so is_remote alone cannot tell them apart.
+    # See contracts._validate_staging_url.
+    errors = contracts.validate_spec(
+        spec,
+        is_remote=config.get_config().is_remote,
+        same_machine=_task_is_same_machine(conn, identity.task_id),
+    )
     if errors:
         # Raise with joined errors so the agent gets every fix in one shot.
         raise ValueError("invalid contract:\n- " + "\n- ".join(errors))

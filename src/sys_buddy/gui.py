@@ -136,7 +136,7 @@ class GuiApi:
             return {"error": str(exc)}
 
     def start_host(self, title: str, roles: list, host_role: str = "", public_url: str = "",
-                   mode: str = "contract") -> dict:
+                   mode: str = "contract", staging_url: str = "") -> dict:
         """Host flow: start the in-process broker (once), create the task (id derived
         from ``title``), mint invite links for the buddy role(s), and — when
         ``host_role`` is given — seat the host's OWN agent on that role and auto-wire
@@ -144,8 +144,16 @@ class GuiApi:
         another machine can reach the broker — the invite links embed it. Blank =
         same machine (loopback). Both remote paths present an https origin: a public
         tunnel (``ngrok http 8787``) or a private network proxy (``tailscale serve
-        8787``), so the GUI requires https for any remote origin. Returns the
-        host_setup dict (with ``host_seat`` when host_role is set), or an error."""
+        8787``), so the GUI requires https for any remote origin.
+
+        ``staging_url`` (optional) is the deployment target the human nominates on this
+        screen — the URL their peers actually build and test against. It rides onto the
+        task so the producer agent inherits it at ``propose_contract`` instead of
+        inventing an aspirational one. Blank public_url means same-machine, and THAT is
+        what lets the target be ``http://localhost:PORT``: the broker itself always runs
+        in remote mode here (token auth needs it), so auth mode says nothing about who
+        can reach the target. Returns the host_setup dict (with ``host_seat`` when
+        host_role is set), or an error."""
         try:
             title = (title or "").strip()
             if not title:
@@ -167,7 +175,9 @@ class GuiApi:
                     get_config().agent_token_ttl = 24 * 3600
             host_role = (host_role or "").strip() or None
             res = onboarding.host_setup(
-                None, list(roles), base or BASE_URL, title=title, mode=mode, host_role=host_role
+                None, list(roles), base or BASE_URL, title=title, mode=mode,
+                host_role=host_role, public_url=base or None,
+                staging_url=(staging_url or "").strip() or None,
             )
             # The host is on the same box as the broker, so try to auto-register their
             # own seat's MCP (same as the buddy flow). The command is shown regardless,

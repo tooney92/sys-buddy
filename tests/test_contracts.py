@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 
+import pytest
+
 from sys_buddy import contracts
 
 
@@ -118,3 +120,87 @@ def test_all_errors_collected_in_one_pass():
     spec["staging_url"] = "http://insecure"
     errors = contracts.validate_spec(spec)
     assert len(errors) >= 3
+
+
+# --- connectivity-keyed staging_url strictness ------------------------------
+# The GUI always runs the broker in remote AUTH mode (token auth needs it), so the
+# staging_url rule keys on the TASK's connectivity instead. Both branches below.
+@pytest.mark.parametrize("url", [
+    "http://localhost:3000",
+    "http://127.0.0.1:8000/api",
+    "http://[::1]:8080",
+    "localhost:3000",              # bare host — fine on one box
+    "https://api-staging.example.com",
+])
+def test_same_machine_task_accepts_any_target(url):
+    """One human, one box: localhost/http IS the real target and there is no
+    cross-machine test-runner to point at internal infrastructure."""
+    spec = _valid_spec()
+    spec["staging_url"] = url
+    assert contracts.validate_spec(spec, is_remote=True, same_machine=True) == []
+
+
+@pytest.mark.parametrize("url", ["", "   ", None, 42])
+def test_same_machine_still_requires_a_non_empty_string(url):
+    """Leniency is about the URL's *shape*, not about skipping the field."""
+    spec = _valid_spec()
+    spec["staging_url"] = url
+    assert any("staging_url" in e for e in contracts.validate_spec(
+        spec, is_remote=True, same_machine=True
+    ))
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:3000",
+    "http://api-staging.example.com",      # cleartext
+    "https://127.0.0.1/admin",
+    "https://169.254.169.254/latest/meta-data/",
+    "https://10.0.0.5/api",
+    "https://foo.internal/api",
+])
+def test_remote_task_rejects_the_same_targets(url):
+    """REGRESSION: with same_machine=False nothing is relaxed — the strict https +
+    SSRF rules apply exactly as before."""
+    spec = _valid_spec()
+    spec["staging_url"] = url
+    assert any("staging_url" in e for e in contracts.validate_spec(
+        spec, is_remote=True, same_machine=False
+    ))
+
+
+def test_staging_url_strictness_defaults_to_strict():
+    """A caller that passes neither flag gets the remote rules (fail safe)."""
+    spec = _valid_spec()
+    spec["staging_url"] = "http://localhost:3000"
+    assert contracts.validate_spec(spec)
+
+
+# --- same_machine_origin: positive evidence only ----------------------------
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:8787",
+    "http://localhost:8787",
+    "https://127.0.0.1:8787",
+    "http://[::1]:8787",
+    "http://127.9.9.9:8787",     # all of 127/8 is loopback
+])
+def test_same_machine_origin_true_for_loopback_without_public_url(base_url):
+    assert contracts.same_machine_origin(base_url) is True
+    assert contracts.same_machine_origin(base_url, "") is True
+    assert contracts.same_machine_origin(base_url, "   ") is True
+
+
+@pytest.mark.parametrize("base_url,public_url", [
+    ("http://127.0.0.1:8787", "https://abc.ngrok-free.app"),   # a tunnel exists
+    ("http://127.0.0.1:8787", "https://host.tailnet.ts.net"),  # tailscale
+    ("https://abc.ngrok-free.app", None),                      # public origin
+    ("http://192.168.1.20:8787", None),                        # LAN, not this box
+    ("http://10.0.0.5:8787", None),
+    ("http://buddy.local:8787", None),
+    ("127.0.0.1:8787", None),        # no scheme → unparseable origin, can't prove it
+    ("", None),
+    (None, None),
+    (12345, None),
+    ("http://", None),
+])
+def test_same_machine_origin_false_without_positive_evidence(base_url, public_url):
+    assert contracts.same_machine_origin(base_url, public_url) is False

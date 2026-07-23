@@ -60,12 +60,26 @@ def _write_event(conn: sqlite3.Connection, task_id: str, kind: str, detail: dict
     )
 
 
-def create_task(id: str | None, *, title: str, roles: list[str], mode: str = "contract") -> dict:
+def create_task(
+    id: str | None,
+    *,
+    title: str,
+    roles: list[str],
+    mode: str = "contract",
+    same_machine: bool = False,
+    staging_url: str | None = None,
+) -> dict:
     """Create a task in the ``open`` state with the given fixed cast of roles.
 
     ``mode`` selects the workflow: ``'contract'`` (the default) runs the full
     propose/lock/deploy state machine; ``'debug'`` is a lightweight mode where two
     buddies just fix a problem and mark it resolved, with no contract required.
+
+    ``same_machine`` records the task's CONNECTIVITY (not the broker's auth mode):
+    True only when the host proved everything lives on one box. It relaxes the
+    ``staging_url`` rules for this task, so it defaults to False — a caller that
+    doesn't say gets the strict remote validation. ``staging_url`` is the host-chosen
+    deployment target the producer agent inherits when it proposes a contract.
 
     ``id`` may be falsy (``None``/``""``): the id is then derived from ``title`` via
     :func:`new_task_id`, so a human only has to supply a Title. An explicit id is
@@ -99,14 +113,26 @@ def create_task(id: str | None, *, title: str, roles: list[str], mode: str = "co
         elif conn.execute("SELECT 1 FROM tasks WHERE id = ?", (id,)).fetchone() is not None:
             raise ValueError(f"task '{id}' already exists")
         now = time.time()
+        staging_url = (staging_url or "").strip() or None
         conn.execute(
-            "INSERT INTO tasks (id, title, state, mode, roles_json, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (id, title, "open", mode, json.dumps(list(roles)), now),
+            "INSERT INTO tasks (id, title, state, mode, roles_json, same_machine, staging_url, "
+            "created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                id, title, "open", mode, json.dumps(list(roles)),
+                1 if same_machine else 0, staging_url, now,
+            ),
         )
         _write_event(conn, id, "task", {"text": f"Task created: {id}"})
         conn.commit()
-        return {"id": id, "state": "open", "title": title, "roles": list(roles), "mode": mode}
+        return {
+            "id": id,
+            "state": "open",
+            "title": title,
+            "roles": list(roles),
+            "mode": mode,
+            "same_machine": bool(same_machine),
+            "staging_url": staging_url,
+        }
     finally:
         conn.close()
 
