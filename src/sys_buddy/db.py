@@ -48,9 +48,77 @@ CREATE TABLE IF NOT EXISTS contracts (
     spec_json   TEXT NOT NULL,
     status      TEXT NOT NULL,            -- 'draft' | 'locked'
     proposed_by INTEGER REFERENCES agents(id),
+    -- NULL = a TASK-level contract (everything before todos existed, and every task
+    -- that never grows a todo). Non-NULL keys the contract to one deliverable, whose
+    -- party list — not the task's full cast — is the signatory set (see todos.py).
+    todo_id     INTEGER REFERENCES todos(id),
     locked_at   REAL,
     created_at  REAL NOT NULL,
+    -- Versions stay a single MAX+1 sequence PER TASK even when contracts belong to
+    -- different todos, so this constraint is untouched by todos and `lock_contract(3)`
+    -- still names exactly one row. A todo's chain is therefore v1, v4, v7 rather than
+    -- v1, v2, v3 — non-contiguous but unambiguous, and it needs no table rebuild on
+    -- databases that predate todos.
     UNIQUE(task_id, version)
+);
+
+-- TODOS (v2): several deliverables under one task, each with its own contract chain
+-- and its own proposed→locked→built→verified march. The TASK's state becomes a
+-- ROLLUP of these (see todos.rollup) rather than something an agent sets.
+--
+-- `parties_json` is the decision the feature rests on: SEATS ≠ PARTICIPANTS. A todo
+-- reuses the task's seats (you pair ONCE, at the task) and names WHICH of them it
+-- binds. A seat not named here may READ the todo, is not bound by it, is not in its
+-- contract's quorum, and does not block it.
+CREATE TABLE IF NOT EXISTS todos (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL REFERENCES tasks(id),
+    title         TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    parties_json  TEXT NOT NULL,            -- roles bound by THIS todo (⊆ task roles)
+    version       INTEGER NOT NULL DEFAULT 1,  -- bumped by repropose_todo; resets acceptances
+    -- The per-todo march. Deliberately NOT the agreement stage: `pending/accepted/
+    -- contracted/verified/dropped` is DERIVED from acceptances + contracts + this
+    -- column (todos.status_of), so a rollup can never disagree with its parts.
+    state         TEXT NOT NULL DEFAULT 'open',
+    strikes       INTEGER NOT NULL DEFAULT 0,  -- per-todo ping-pong counter
+    proposed_by   INTEGER REFERENCES agents(id),
+    proposed_role TEXT NOT NULL,
+    created_at    REAL NOT NULL,
+    verified_at   REAL,
+    -- `stuck` is an orthogonal FLAG, not a state: a stuck deliverable must not brick
+    -- the whole task the way task-level `stuck` does, and the rollup still needs to
+    -- know how far this todo actually got.
+    stuck_at      REAL,
+    stuck_reason  TEXT,
+    dropped_at    REAL,
+    dropped_by    TEXT,                     -- role that finalised the drop, or 'host'
+    drop_reason   TEXT
+);
+
+-- Acceptances/declines as LISTS (mirroring contract_signatures) rather than a
+-- `declined` status a state machine would then have to unwind. Keyed by VERSION so a
+-- repropose resets consent without deleting the audit trail of who accepted v1.
+CREATE TABLE IF NOT EXISTS todo_decisions (
+    todo_id    INTEGER NOT NULL REFERENCES todos(id),
+    version    INTEGER NOT NULL,
+    role       TEXT NOT NULL,
+    agent_id   INTEGER REFERENCES agents(id),
+    decision   TEXT NOT NULL,               -- 'accepted' | 'declined'
+    reason     TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(todo_id, version, role)
+);
+
+-- Dropping is MUTUAL: every named party consents. Version-independent — you are
+-- abandoning the deliverable, not a revision of it.
+CREATE TABLE IF NOT EXISTS todo_drop_consents (
+    todo_id    INTEGER NOT NULL REFERENCES todos(id),
+    role       TEXT NOT NULL,
+    agent_id   INTEGER REFERENCES agents(id),
+    reason     TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(todo_id, role)
 );
 
 CREATE TABLE IF NOT EXISTS contract_signatures (
@@ -132,6 +200,8 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  REAL NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_todos_task ON todos(task_id, id);
+CREATE INDEX IF NOT EXISTS idx_contracts_todo ON contracts(todo_id);
 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_deliveries_agent ON deliveries(agent_id, acked_at);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
@@ -194,6 +264,16 @@ def init_db(db_path: Path | str | None = None) -> Path:
             conn.execute("ALTER TABLE tasks ADD COLUMN same_machine INTEGER NOT NULL DEFAULT 0")
         if "staging_url" not in task_cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN staging_url TEXT")
+        # Migration: key contracts to a todo. NULL on every pre-existing row, which is
+        # exactly right — they are TASK-level contracts and keep behaving as such. The
+        # todos/todo_decisions/todo_drop_consents tables come from CREATE TABLE IF NOT
+        # EXISTS above, so an old db needs nothing else: "do nothing" is the whole
+        # migration story for a task that never grows a todo.
+        contract_cols = {
+            r["name"] for r in conn.execute("PRAGMA table_info(contracts)").fetchall()
+        }
+        if "todo_id" not in contract_cols:
+            conn.execute("ALTER TABLE contracts ADD COLUMN todo_id INTEGER REFERENCES todos(id)")
         # Migration: add messages.to_role to a db created before directed messages existed.
         msg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
         if "to_role" not in msg_cols:
