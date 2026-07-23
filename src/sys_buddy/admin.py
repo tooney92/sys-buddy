@@ -20,7 +20,7 @@ import secrets
 import sqlite3
 import time
 
-from . import audit, service
+from . import audit, service, todos
 from .db import connect
 from .identity import new_invite_code, new_viewer_token, sha256_hex
 
@@ -283,6 +283,56 @@ def close_task(task: str) -> None:
     finally:
         conn.close()
     audit.event("task_closed", task=task)
+
+
+def _assert_task(conn: sqlite3.Connection, task: str) -> None:
+    """Fail with the task id, not with "no todo N" — the host mistyped one of two args
+    and has to be told which."""
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task,)).fetchone() is None:
+        raise ValueError(f"unknown task '{task}'")
+
+
+def list_todos(task: str) -> tuple[list[dict], dict | None]:
+    """Every todo on ``task`` plus its rollup, for the host's CLI view.
+
+    Returns ``(todos, rollup)``; the rollup is ``None`` when the task has no live todos
+    (``todos.rollup``), i.e. exactly when the task still runs its own state machine.
+    Read-only — the host's one WRITE here is :func:`host_drop_todo`.
+    """
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        return todos.get_todos(conn, task), todos.rollup(conn, task)
+    finally:
+        conn.close()
+
+
+def host_drop_todo(task: str, todo: int, reason: str) -> tuple[dict, dict | None]:
+    """Drop a todo unilaterally, as the HOST. The escape hatch, and the only one.
+
+    A mutual ``drop_todo`` needs every named party's consent — including the party whose
+    human went offline and is the whole reason you want it gone — so that path deadlocks
+    on exactly the person who is missing. This is why the escape hatch is HUMAN and lives
+    here and in the desktop app rather than as a tool: no peer may ever remove a peer,
+    or the moment one objects to a shape the other removes it and locks without the
+    dissent ("both sides sign" quietly becomes "whoever proposes wins").
+
+    ``todos.host_drop_todo`` posts the who/why to the task thread as the BROKER's own
+    seat, so the absent party's agent finds an explanation instead of vanished work.
+
+    Returns ``(dropped_todo, task_rollup)`` — the rollup so the caller can print what the
+    task now reports, and ``None`` there when the last live todo just went (the task is
+    back on its own state machine).
+    """
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        result = todos.host_drop_todo(conn, task, todo, reason)
+        roll = todos.rollup(conn, task)
+    finally:
+        conn.close()
+    audit.event("todo_dropped", task=task, todo=result["id"], by=todos.HOST)
+    return result, roll
 
 
 def list_tasks() -> list[dict]:
