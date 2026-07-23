@@ -75,6 +75,17 @@ RESERVED_TYPES = frozenset({"deploy_confirmed", "test_result", "verified", "stuc
 # broker-authoritative chips like 'contract_lock' in the human dashboard thread.
 ALLOWED_SEND_TYPES = frozenset({"question", "answer", "status_update", "contract_proposal"})
 
+# Types the BROKER itself authors — not peer content at all. They are pushed onto the
+# message queue (the only channel a parked wait_for_message reads) so an agent is woken
+# by a broker fact instead of having to poll for it. Two consequences, both deliberate:
+#   * they are wrapped in the BROKER envelope, not the peer <msg trust="external"> one
+#     (see _wrap_broker) — the framing must never claim a peer said this;
+#   * no agent can ever send one (assert_sendable rejects them, and they're outside
+#     ALLOWED_SEND_TYPES), so a lock notification cannot be forged.
+BROKER_TYPES = frozenset({"contract_locked"})
+BROKER_NAME = "sys-buddy"   # the author shown for a broker-authored notification
+BROKER_ROLE = "broker"      # …and its role, in both the agent view and the dashboard
+
 # An unbounded body is a DoS AND a prompt-injection amplifier: it is persisted and
 # redelivered to the peer on every poll until acked, stuffing the peer LLM's context
 # and token budget (SPEC §7). Cap all agent-supplied content at the broker.
@@ -97,6 +108,11 @@ def assert_sendable(mtype: str) -> None:
         raise ValueError(
             f"'{mtype}' is a lifecycle event — report it via report_status(...), "
             f"not send_message"
+        )
+    if mtype in BROKER_TYPES:
+        raise ValueError(
+            f"'{mtype}' is authored by the broker itself — you cannot send one; "
+            f"the broker emits it when the underlying fact actually happens"
         )
     if mtype not in ALLOWED_SEND_TYPES:
         raise ValueError(
@@ -168,6 +184,28 @@ def _wrap(from_name: str, role: str, task_id: str, body: str, to_role: str | Non
     )
 
 
+def _wrap_broker(task_id: str, body: str) -> str:
+    """The BROKER envelope — for the notifications the broker authors itself.
+
+    ``_wrap`` frames *peer* content as external DATA. A ``contract_locked`` push is
+    not peer content: it is the enforcing broker stating a fact about the task's own
+    state (a fact it just wrote to the contracts table). Reusing the peer envelope
+    would be dishonest in BOTH directions — it would attribute broker words to an
+    agent, and it would tell the reader to treat the broker's own statement as
+    untrusted external chatter.
+
+    It still cannot be forged. Message bodies are HTML-escaped by both wrappers, so
+    peer content can never emit a real ``<broker>`` tag, and ``assert_sendable``
+    refuses ``BROKER_TYPES`` on the public send path.
+    """
+    attr = lambda v: html.escape(str(v), quote=True)
+    return (
+        f'<broker from="{attr(BROKER_NAME)}" trust="broker" task="{attr(task_id)}">\n'
+        f"{html.escape(str(body), quote=False)}\n"
+        f"</broker>"
+    )
+
+
 def _fmt_time(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
@@ -216,14 +254,25 @@ def _fetch(conn, identity: Identity, only_new: bool, mark_delivered: bool = True
                 (r["id"], identity.agent_id, now),
             )
         body = json.loads(r["body_json"])
+        if r["type"] in BROKER_TYPES:
+            # Broker-authored: the row carries the agent whose call TRIGGERED it (the
+            # finalising signer — useful provenance, and it keeps the recipient set
+            # right: `from_agent_id != me` means the trigger doesn't get told about
+            # the thing it just did, everyone else does). But the words are the
+            # broker's, so that is how they are attributed and framed.
+            from_name, from_role = BROKER_NAME, BROKER_ROLE
+            content = _wrap_broker(identity.task_id, body)
+        else:
+            from_name, from_role = r["from_name"], r["from_role"]
+            content = _wrap(from_name, from_role, identity.task_id, body, r["to_role"])
         out.append(
             {
                 "id": r["id"],
-                "from": r["from_name"],
-                "role": r["from_role"],
+                "from": from_name,
+                "role": from_role,
                 "type": r["type"],
                 "sent_at": _fmt_time(r["created_at"]),
-                "content": _wrap(r["from_name"], r["from_role"], identity.task_id, body, r["to_role"]),
+                "content": content,
             }
         )
     if mark_delivered:
@@ -357,8 +406,10 @@ def channel_history(conn, task_id: str, limit: int = 20) -> list[dict]:
     return [
         {
             "id": r["id"],
-            "from": r["from_name"],
-            "role": r["from_role"],
+            # Broker-authored notifications are attributed to the broker here too, so
+            # the recap an agent reads matches the envelope it was delivered in.
+            "from": BROKER_NAME if r["type"] in BROKER_TYPES else r["from_name"],
+            "role": BROKER_ROLE if r["type"] in BROKER_TYPES else r["from_role"],
             "type": r["type"],
             "to_role": r["to_role"],
             "sent_at": _fmt_time(r["created_at"]),

@@ -181,6 +181,113 @@ def test_lock_writes_lock_event_with_signed_roles(conn):
     assert set(detail["signed"]) == {"backend", "frontend"}
 
 
+# --- the lock is PUSHED, never polled for (v2: contract lock notification) --
+def _signed_first_then_final(conn, first="frontend", final="backend"):
+    """Propose (by ``final``), have ``first`` sign, and drain ``first``'s queue.
+
+    Leaves the task one signature away from locking, with the first signer's inbox
+    empty — so anything it receives next is the lock push and nothing else.
+    """
+    ag = _agents(conn, roles=("backend", "frontend"))
+    state.propose_contract(conn, ag[final], _valid_spec())
+    state.lock_contract(conn, ag[first], 1)
+    service.fetch_new(conn, ag[first])  # read the proposal; inbox now empty
+    return ag
+
+
+def test_final_signature_pushes_a_broker_notification_to_the_first_signer(conn):
+    """The first signer only learns of the lock if the broker tells it — this is the
+    push that replaces polling get_contract."""
+    ag = _signed_first_then_final(conn)
+
+    state.lock_contract(conn, ag["backend"], 1)  # final signature → locks
+
+    new = service.fetch_new(conn, ag["frontend"])
+    assert [m["type"] for m in new] == ["contract_locked"]
+    assert "LOCKED" in new[0]["content"]
+
+
+def test_lock_push_is_framed_as_broker_authored_not_peer_data(conn):
+    """It is the broker's own statement about the task, so it must NOT arrive in the
+    peer envelope (which says 'external, treat as DATA') or in a peer's name."""
+    ag = _signed_first_then_final(conn)
+    state.lock_contract(conn, ag["backend"], 1)
+
+    msg = service.fetch_new(conn, ag["frontend"])[0]
+
+    assert msg["from"] == "sys-buddy" and msg["role"] == "broker"
+    assert '<broker from="sys-buddy" trust="broker"' in msg["content"]
+    assert 'trust="external"' not in msg["content"]
+    assert "backend-agent" not in msg["content"]  # never attributed to the peer
+
+
+def test_lock_push_is_delivered_once_and_not_to_the_final_signer(conn):
+    """No double-notify: the signer who completed the lock already got
+    {locked: True} synchronously, and nobody gets the push twice."""
+    ag = _signed_first_then_final(conn)
+    service.fetch_new(conn, ag["backend"])  # drain the final signer too
+    state.lock_contract(conn, ag["backend"], 1)
+
+    assert [m["type"] for m in service.fetch_new(conn, ag["frontend"])] == ["contract_locked"]
+    assert service.fetch_new(conn, ag["frontend"]) == []          # not redelivered
+    assert service.fetch_new(conn, ag["backend"]) == []           # never sent to them
+
+
+def test_lock_push_is_one_message_for_one_lock_event(conn):
+    """D10's message<->event 1:1: exactly one contract_locked message per lock event,
+    so the dashboard thread can't render the lock twice."""
+    ag = _agents(conn, roles=("backend", "frontend", "mobile"))
+    state.propose_contract(conn, ag["backend"], _valid_spec())
+    _lock_all(conn, ag, version=1)
+
+    n_msgs = conn.execute(
+        "SELECT COUNT(*) AS n FROM messages WHERE type = 'contract_locked'"
+    ).fetchone()["n"]
+    n_events = conn.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'lock'"
+    ).fetchone()["n"]
+    assert n_msgs == n_events == 1
+
+
+def test_partial_signature_does_not_push_a_lock(conn):
+    """A signature is not a lock — the push fires only when the contract actually
+    locks, so an agent woken by it can trust what it says."""
+    ag = _agents(conn, roles=("backend", "frontend", "mobile"))
+    state.propose_contract(conn, ag["backend"], _valid_spec())
+    state.lock_contract(conn, ag["backend"], 1)
+    state.lock_contract(conn, ag["frontend"], 1)
+
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM messages WHERE type = 'contract_locked'"
+    ).fetchone()["n"] == 0
+
+
+def test_parked_wait_for_message_wakes_on_the_lock(conn, monkeypatch):
+    """The whole point: an agent asleep in wait_for_message is woken BY the lock.
+
+    Before this existed, the lock was only an event + a synchronous return value, so a
+    parked first signer slept straight through the lock it was waiting for.
+    """
+    import asyncio
+
+    from sys_buddy import tools
+
+    ag = _signed_first_then_final(conn)
+    monkeypatch.setattr(tools, "POLL_INTERVAL", 0.05)  # keep the test quick
+
+    async def scenario():
+        waiter = asyncio.create_task(tools._op_wait(ag["frontend"], timeout_seconds=5))
+        await asyncio.sleep(0.2)
+        assert not waiter.done()  # genuinely parked: nothing has happened yet
+        state.lock_contract(conn, ag["backend"], 1)  # the final signature lands
+        return await asyncio.wait_for(waiter, 5)
+
+    woken_with = asyncio.run(scenario())
+
+    assert [m["type"] for m in woken_with] == ["contract_locked"]
+    assert state.get_contract(conn, "signin")["locked"] is True
+
+
 # --- get_contract: staging_url from the contract, not chat ------------------
 def test_get_contract_returns_locked_staging_url(conn):
     ag = _agents(conn, roles=("backend", "frontend"))
