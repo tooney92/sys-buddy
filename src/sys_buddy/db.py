@@ -170,7 +170,12 @@ CREATE TABLE IF NOT EXISTS messages (
     body_json     TEXT NOT NULL,
     state_at_send TEXT NOT NULL,
     created_at    REAL NOT NULL,
-    to_role       TEXT                      -- optional directed recipient; NULL = broadcast to all roles
+    to_role       TEXT,                     -- optional directed recipient; NULL = broadcast to all roles
+    -- Which deliverable this message belongs to, or NULL for a task-level message
+    -- (everything before todos existed, and every message on a task with none). This
+    -- is what the dashboard's ⟨todo⟩ chip keys on — an authoritative id rather than a
+    -- string scraped from the body.
+    todo_id       INTEGER REFERENCES todos(id)
 );
 
 -- Per-recipient delivery tracking (see module docstring).
@@ -278,6 +283,12 @@ def init_db(db_path: Path | str | None = None) -> Path:
         msg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
         if "to_role" not in msg_cols:
             conn.execute("ALTER TABLE messages ADD COLUMN to_role TEXT")
+        # Migration: key a message to a todo. NULL on every pre-existing row — a
+        # task-level message, which is exactly what they were. The dashboard falls
+        # back to scraping "todo #N" from the body for these old rows, so the chip
+        # still renders on them; new rows carry the id directly.
+        if "todo_id" not in msg_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN todo_id INTEGER REFERENCES todos(id)")
         conn.commit()
     finally:
         conn.close()

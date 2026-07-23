@@ -494,6 +494,7 @@ def propose_contract(conn, identity: Identity, spec: dict, todo_id: int | None =
         f"shows the proposed contract, not only locked ones), then lock_contract({version}) "
         f"to sign — or message me to request changes first. The staging_url appears in "
         f"get_contract once {signers} {'has' if todo is None else 'have'} signed.",
+        todo_id=todo["id"] if todo else None,
     )
     if todo is None:
         return {"version": version, "state": state}
@@ -595,6 +596,7 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
             "contract_lock",
             f"Signed contract v{version}{scope_note}. Waiting on {', '.join(remaining)} to "
             f"sign before it locks.",
+            todo_id=todo["id"] if todo else None,
         )
         out = {
             "locked": False,
@@ -664,6 +666,7 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
             "" if todo is None
             else f" Report progress on this deliverable with report_status(..., todo={todo['id']})."
         ),
+        todo_id=todo["id"] if todo else None,
     )
     out = {"locked": True, "version": version, "signed": sorted(signed_set), "state": state}
     if todo is not None:
@@ -766,6 +769,7 @@ def _reopen_todo(conn, identity: Identity, reason: str, todo_id: int) -> dict:
         f"{detail}. Its last locked contract still stands until a new version is proposed "
         f"with propose_contract(spec, todo={row['id']}) and re-signed by "
         f"{', '.join(todos.parties_of(row))}.",
+        todo_id=row["id"],
     )
     return {
         "state": state,
@@ -1067,7 +1071,8 @@ def _report_todo_deployed(conn, identity: Identity, row, detail: str) -> dict:
     _todo_march(conn, identity.task_id, row["id"], row["state"], BACKEND_LIVE)
     _event(conn, identity.task_id, "deploy", {"text": detail, "todo_id": row["id"]})
     service.post_message(
-        conn, identity, "deploy_confirmed", f"{_todo_label(row)} {detail}"
+        conn, identity, "deploy_confirmed", f"{_todo_label(row)} {detail}",
+        todo_id=row["id"],
     )
     return _todo_result(conn, identity, row, STATUS_DEPLOYED)
 
@@ -1096,7 +1101,8 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
     if status == STATUS_TEST_PASSED:
         _event(conn, identity.task_id, "test",
                {"pass": True, "strike": None, "todo_id": row["id"]})
-        service.post_message(conn, identity, "test_result", f"{_todo_label(row)} {detail}")
+        service.post_message(conn, identity, "test_result", f"{_todo_label(row)} {detail}",
+                             todo_id=row["id"])
         return _todo_result(conn, identity, row, status)
 
     # blocked → the broker (not the agent) counts the strike, on the todo.
@@ -1104,7 +1110,8 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
     strikes = todos.get_row(conn, identity.task_id, row["id"])["strikes"]
     _event(conn, identity.task_id, "test",
            {"pass": False, "strike": strikes, "todo_id": row["id"]})
-    service.post_message(conn, identity, "test_result", f"{_todo_label(row)} {detail}")
+    service.post_message(conn, identity, "test_result", f"{_todo_label(row)} {detail}",
+                         todo_id=row["id"])
 
     if strikes >= MAX_STRIKES:
         conn.execute(
@@ -1118,6 +1125,7 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
             f"{_todo_label(row)} {MAX_STRIKES} fix cycles reached on this deliverable — "
             f"humans needed. Last failure: {detail}. The rest of the task is unaffected; "
             f"don't re-report on this todo until a human unblocks it.",
+            todo_id=row["id"],
         )
         _slack(
             conn, identity.task_id,
@@ -1145,7 +1153,8 @@ def _report_todo_verified(conn, identity: Identity, row, detail: str) -> dict:
         "UPDATE todos SET verified_at = ?, stuck_at = NULL, stuck_reason = NULL WHERE id = ?",
         (_now(), row["id"]),
     )
-    service.post_message(conn, identity, "verified", f"{_todo_label(row)} {detail}")
+    service.post_message(conn, identity, "verified", f"{_todo_label(row)} {detail}",
+                         todo_id=row["id"])
     out = _todo_result(conn, identity, row, STATUS_VERIFIED)
     roll = out["rollup"] or {}
     if roll.get("complete"):
@@ -1179,7 +1188,8 @@ def _report_todo_stuck(conn, identity: Identity, row, detail: str) -> dict:
     )
     todos._event(conn, identity.task_id, "todo_stuck", row["id"],
                  {"reason": detail, "by": identity.role})
-    service.post_message(conn, identity, "stuck", f"{_todo_label(row)} {detail}")
+    service.post_message(conn, identity, "stuck", f"{_todo_label(row)} {detail}",
+                         todo_id=row["id"])
     _slack(
         conn, identity.task_id,
         f"[{identity.task_id}] STUCK on todo #{row['id']} ({row['title']}): {detail}",

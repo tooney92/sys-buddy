@@ -426,6 +426,7 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
         f"if the scope is right, or decline_todo({todo_id}, reason) / message me to "
         f"reshape it. Accepting agrees on WHAT; the contract on this todo is a "
         f"separate, later agreement about HOW.",
+        todo_id=todo_id,
     )
     return _result(conn, identity.task_id, todo_id)
 
@@ -457,7 +458,7 @@ def accept_todo(conn, identity: Identity, todo_id: int) -> dict:
             f"proposes a contract on this todo with propose_contract(spec, todo={row['id']}), "
             f"and the SAME parties sign it."
         )
-    service.post_message(conn, identity, "todo_accept", body)
+    service.post_message(conn, identity, "todo_accept", body, todo_id=row["id"])
     return _result(conn, identity.task_id, row["id"])
 
 
@@ -487,6 +488,7 @@ def decline_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
         f"Declined todo #{row['id']} v{row['version']} ({row['title']}): {reason}. "
         f"Reshape it and repropose_todo({row['id']}, ...) — that issues a new version "
         f"and resets everyone's acceptance, so nobody is held to a scope they didn't read.",
+        todo_id=row["id"],
     )
     return _result(conn, identity.task_id, row["id"])
 
@@ -577,6 +579,7 @@ def repropose_todo(
         f"Reproposed todo #{row['id']} as v{version}: {new_title}. Scope: {new_scope}. "
         f"Binds {', '.join(new_parties)}.{note} Everyone's earlier acceptance is cleared — "
         f"accept_todo({row['id']}) again if v{version} is right.{sig_note}",
+        todo_id=row["id"],
     )
     return _result(conn, identity.task_id, row["id"])
 
@@ -623,6 +626,7 @@ def drop_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
             f"Proposed dropping todo #{row['id']} ({row['title']}): {reason}. Dropping is "
             f"mutual — waiting on {', '.join(remaining)} to also call "
             f"drop_todo({row['id']}, reason). Say so in chat if you'd rather keep it.",
+            todo_id=row["id"],
         )
         return _result(conn, identity.task_id, row["id"])
 
@@ -632,6 +636,7 @@ def drop_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
         conn, identity, "todo_drop",
         f"Todo #{row['id']} ({row['title']}) is DROPPED by mutual consent of "
         f"{', '.join(parties)}: {reason}. It no longer counts toward the task.",
+        todo_id=row["id"],
     )
     apply_rollup(conn, identity.task_id)
     conn.commit()
@@ -678,6 +683,7 @@ def host_drop_todo(conn, task_id: str, todo_id: int, reason: str, by: str = HOST
         f"It bound {', '.join(parties_of(row))} and no longer counts toward this task. "
         f"This was a human decision, not a peer's — if you were mid-work on it, stop, "
         f"and check get_todos() for what is still live.",
+        todo_id=row["id"],
     )
     apply_rollup(conn, task_id)
     conn.commit()

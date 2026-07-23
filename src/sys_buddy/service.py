@@ -165,7 +165,14 @@ def _count_other_agents(conn, task_id: str, exclude_id: int) -> int:
     ).fetchone()["n"]
 
 
-def post_message(conn, identity: Identity, mtype: str, body: str, to_role: str | None = None) -> dict:
+def post_message(
+    conn,
+    identity: Identity,
+    mtype: str,
+    body: str,
+    to_role: str | None = None,
+    todo_id: int | None = None,
+) -> dict:
     """Store a message from ``identity`` on its task. Returns a small receipt.
 
     Delivery rows are created lazily on fetch, so an agent that pairs later still
@@ -174,6 +181,10 @@ def post_message(conn, identity: Identity, mtype: str, body: str, to_role: str |
     ``to_role`` directs the message at a single role; None/empty broadcasts to all
     other agents on the task (the unchanged default). A non-empty ``to_role`` must
     name a role declared on the task.
+
+    ``todo_id`` records which deliverable the message belongs to, so the dashboard's
+    ⟨todo⟩ chip keys on a real id rather than a string scraped from the body. None
+    (the default) is a task-level message — every message before todos existed.
     """
     task = conn.execute(
         "SELECT state, closed_at, roles_json FROM tasks WHERE id = ?", (identity.task_id,)
@@ -193,9 +204,9 @@ def post_message(conn, identity: Identity, mtype: str, body: str, to_role: str |
     state_at_send = task["state"]
     now = time.time()
     cur = conn.execute(
-        "INSERT INTO messages (task_id, from_agent_id, type, body_json, to_role, state_at_send, created_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (identity.task_id, identity.agent_id, mtype, json.dumps(body), to_role, state_at_send, now),
+        "INSERT INTO messages (task_id, from_agent_id, type, body_json, to_role, todo_id, state_at_send, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (identity.task_id, identity.agent_id, mtype, json.dumps(body), to_role, todo_id, state_at_send, now),
     )
     conn.commit()
     recipients = _count_other_agents(conn, identity.task_id, identity.agent_id)

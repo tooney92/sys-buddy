@@ -318,6 +318,45 @@ def test_todo_reference_is_validated_against_the_task(conn):
     assert "todo" not in m
 
 
+def test_chip_comes_from_the_column_not_the_body_text(conn):
+    """The authoritative source is ``messages.todo_id``, set at post time — so a
+    message that belongs to a deliverable is chipped even when its body says nothing
+    like "todo #N". This is what stops the chip depending on prose staying in sync."""
+    seats = _task_with_seats(conn, roles=("backend", "frontend"))
+    todo = todos.propose_todo(
+        conn, seats["backend"], "Payments API", "POST /pay", ["backend", "frontend"]
+    )
+    # A body with NO "todo #N" reference anywhere in it.
+    service.post_message(
+        conn, seats["backend"], "status_update",
+        "shipping the endpoint now, no reference in this text",
+        todo_id=todo["id"],
+    )
+    (m,) = [m for m in api._messages_for(conn, "signin") if m["type"] == "status_update"]
+    assert m["todo"] == todo["id"]
+
+
+def test_chip_falls_back_to_the_body_for_pre_column_rows(conn):
+    """A row written before the ``messages.todo_id`` column existed carries NULL, so
+    the chip is recovered by scraping "todo #N" — but only for a REAL todo on the task."""
+    seats = _task_with_seats(conn, roles=("backend", "frontend"))
+    todo = todos.propose_todo(
+        conn, seats["backend"], "Payments API", "POST /pay", ["backend", "frontend"]
+    )
+    # Simulate a legacy row: todo_id column left NULL, deliverable named only in prose.
+    conn.execute(
+        "INSERT INTO messages (task_id, from_agent_id, type, body_json, state_at_send, "
+        "created_at) VALUES (?,?,?,?,?,?)",
+        (
+            "signin", seats["backend"].agent_id, "status_update",
+            json.dumps(f"legacy note about todo #{todo['id']}"), "open", time.time(),
+        ),
+    )
+    conn.commit()
+    (m,) = [m for m in api._messages_for(conn, "signin") if m["type"] == "status_update"]
+    assert m["todo"] == todo["id"]
+
+
 def test_todo_events_render_and_filter(conn):
     seats = _task_with_seats(conn, roles=("backend", "frontend"))
     todo = todos.propose_todo(

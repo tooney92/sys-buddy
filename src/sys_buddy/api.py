@@ -43,11 +43,11 @@ from .identity import ViewerIdentity
 # so the dashboard's filter vocabulary stays fixed as the todo actions grow.
 _EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "token", "todo"}
 
-# Which todo a thread message belongs to, for the UI's ``⟨api123⟩`` chip. There is no
-# ``messages.todo_id`` column — that is a schema change owned elsewhere — but every
-# message ``todos.py`` writes names its deliverable as "todo #N", so the chip is
-# DERIVED from that reference and then validated against the task's real todo ids
-# (see ``_messages_for``). Unmatched bodies simply get no chip.
+# Fallback for the UI's ``⟨api123⟩`` chip on rows written before the
+# ``messages.todo_id`` column existed: scrape "todo #N" from the body. New rows
+# carry the id in the column and never reach this; a matched id is validated against
+# the task's real todos either way (see ``_messages_for``), so a stale "#999" gets
+# no chip.
 _TODO_REF_RE = re.compile(r"\btodos?\s*#(\d+)", re.IGNORECASE)
 
 # Sort buckets for the todo panel. A PENDING todo is the only thing on that screen
@@ -356,7 +356,7 @@ def _messages_for(conn, task_id: str) -> list[dict]:
 
     rows = conn.execute(
         """
-        SELECT m.id, m.type, m.body_json, m.to_role, m.created_at, a.role AS role
+        SELECT m.id, m.type, m.body_json, m.to_role, m.todo_id, m.created_at, a.role AS role
         FROM messages m
         JOIN agents a ON a.id = m.from_agent_id
         WHERE m.task_id = ?
@@ -388,10 +388,17 @@ def _messages_for(conn, task_id: str) -> list[dict]:
                     msg["strike"] = strike
                 test_idx += 1
 
-        # Only the todo message types carry a reference worth trusting, and the id is
-        # checked against this TASK's todos — a body that says "todo #999" (or one from
-        # another task) gets no chip rather than a chip pointing at nothing.
-        if r["type"].startswith("todo"):
+        # Which deliverable this message belongs to (the UI's ⟨todo⟩ chip). The
+        # authoritative source is the ``messages.todo_id`` column, set at post time.
+        # A row written before that column existed carries NULL, so we fall back to
+        # scraping "todo #N" from any body that references one. Either candidate is
+        # validated against this TASK's real todos, so a stale/foreign "#999" gets no
+        # chip rather than one pointing at nothing.
+        cand = r["todo_id"]
+        if cand is None:
+            ref = _TODO_REF_RE.search(str(msg.get("body") or ""))
+            cand = int(ref.group(1)) if ref is not None else None
+        if cand is not None:
             if todo_ids is None:
                 todo_ids = {
                     row["id"]
@@ -399,9 +406,8 @@ def _messages_for(conn, task_id: str) -> list[dict]:
                         "SELECT id FROM todos WHERE task_id = ?", (task_id,)
                     ).fetchall()
                 }
-            ref = _TODO_REF_RE.search(str(msg.get("body") or ""))
-            if ref is not None and int(ref.group(1)) in todo_ids:
-                msg["todo"] = int(ref.group(1))
+            if cand in todo_ids:
+                msg["todo"] = cand
         out.append(msg)
     return out
 
