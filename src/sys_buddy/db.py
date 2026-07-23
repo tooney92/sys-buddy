@@ -67,7 +67,9 @@ CREATE TABLE IF NOT EXISTS agents (
     expires_at  REAL,                     -- optional TTL; NULL = never expires
     ready       INTEGER NOT NULL DEFAULT 0, -- 0 = not yet passed the pre-flight
     readiness_status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'passed' | 'failed'
-    readiness_report TEXT              -- JSON of the last attempt's per-question results
+    readiness_report TEXT,             -- JSON of the last attempt's per-question results
+    listening_until  REAL,             -- presence EXPIRY: parked in wait_for_message while > now
+    listening_since  REAL              -- start of the current listening streak (for "listening — 42m")
 );
 
 -- Fixed cast: at most one *live* agent per role. A partial index (not a plain
@@ -168,6 +170,14 @@ def init_db(db_path: Path | str | None = None) -> Path:
             )
         if "readiness_report" not in cols:
             conn.execute("ALTER TABLE agents ADD COLUMN readiness_report TEXT")
+        # Migration: add the presence columns to a db created before the listening
+        # signal existed. An EXPIRY (not a boolean): every wait is bounded by
+        # tools.WAIT_CAP, so `listening_until > now` self-heals across a broker crash
+        # that never ran the clearing `finally`. listening_since carries the streak.
+        if "listening_until" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN listening_until REAL")
+        if "listening_since" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN listening_since REAL")
         # Migration: add tasks.mode to a db created before debug tasks existed.
         task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "mode" not in task_cols:

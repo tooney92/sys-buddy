@@ -272,6 +272,67 @@ def ack(conn, identity: Identity, ids: list[int]) -> int:
     return len(valid)
 
 
+# --------------------------------------------------------------------------- #
+# presence — "this seat is parked in wait_for_message"
+# --------------------------------------------------------------------------- #
+# An agent that keeps a listener parked respawns it every ~WAIT_CAP seconds, so
+# there is always a small gap between one wait returning and the next starting.
+# Treat gaps under this as the SAME streak, otherwise the dashboard's "listening —
+# 42m" would reset to 0 on every message cycle.
+LISTEN_STREAK_GAP = 120.0
+
+
+def mark_listening(conn, identity: Identity, timeout_seconds: float, cap: float) -> float:
+    """Stamp this seat as listening until ``now + min(timeout, cap)``.
+
+    Deliberately an EXPIRY, not a boolean: a boolean would persist a LIE if the
+    broker dies with agents parked (the clearing ``finally`` never runs), and the
+    rows would claim "listening" forever. Every wait is bounded by the cap, so
+    ``listening_until > now`` is self-healing with no cleanup job.
+
+    ``listening_since`` is the streak start: kept when the previous stamp expired
+    less than ``LISTEN_STREAK_GAP`` ago (the respawn gap between consecutive
+    listener waits), reset to now otherwise. Returns the new ``listening_until``.
+    """
+    now = time.time()
+    until = now + max(0.0, min(float(timeout_seconds), float(cap)))
+    row = conn.execute(
+        "SELECT listening_until, listening_since FROM agents WHERE id = ?",
+        (identity.agent_id,),
+    ).fetchone()
+    since = now
+    if row is not None:
+        prev_until, prev_since = row["listening_until"], row["listening_since"]
+        if prev_since and prev_until and (now - prev_until) < LISTEN_STREAK_GAP:
+            since = prev_since
+    conn.execute(
+        "UPDATE agents SET listening_until = ?, listening_since = ? WHERE id = ?",
+        (until, since, identity.agent_id),
+    )
+    conn.commit()
+    return until
+
+
+def clear_listening(conn, identity: Identity) -> None:
+    """Mark this seat's listening window as ended — NOT NULL, "expired as of now".
+
+    Writing ``now`` (rather than NULL) keeps the dot going out immediately while
+    leaving ``listening_until`` readable as the moment the seat stopped listening,
+    so a respawned listener inside LISTEN_STREAK_GAP still counts as one streak.
+    """
+    conn.execute(
+        "UPDATE agents SET listening_until = ? WHERE id = ?", (time.time(), identity.agent_id)
+    )
+    conn.commit()
+
+
+def is_listening(until: float | None, now: float | None = None) -> bool:
+    """Read the stored expiry as a live boolean."""
+    if not until:
+        return False
+    return float(until) > (time.time() if now is None else now)
+
+
 MAX_HISTORY = 200  # cap the agent-supplied `limit` (OWASP API4: records per page)
 
 

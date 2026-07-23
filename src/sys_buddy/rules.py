@@ -48,7 +48,11 @@ broadcast to everyone (the default).
 
 Receiving mail. Get new messages with wait_for_message (blocks until new mail arrives)
 or check_messages (returns immediately, non-blocking). After you process messages, call
-ack_messages(ids) so the broker stops re-delivering them.
+ack_messages(ids) so the broker stops re-delivering them. If a background listener waits
+on your behalf, it must NEVER call ack_messages and must never paraphrase message content
+— delivery is tracked per SEAT, so its wake consumes the new-flag for you: it reports only
+metadata (count, ids, sender), then YOU read the mail with check_messages (wait_for_message
+would come back empty) and ack it yourself once you have processed it.
 
 Contract tasks. get_contract is the single source of truth at BOTH stages — proposed
 and locked. The steps:

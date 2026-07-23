@@ -151,6 +151,24 @@ def test_role_prompt_consumer_mentions_optional_playwright():
     assert "playwright" not in backend
 
 
+@pytest.mark.parametrize("mode", ["contract", "debug"])
+def test_role_prompt_teaches_the_listener_protocol_conditionally(mode):
+    """BOTH variants carry STAY LISTENING, and every constraint that makes a shared-seat
+    listener safe: general-purpose subagent (a scoped type doesn't inherit the MCP
+    tools), never ack, metadata only, and the main agent re-reads with check_messages
+    because wait_for_message would come back empty."""
+    text = onboarding.role_prompt("backend", "signin", mode=mode)
+    low = text.lower()
+    assert "stay listening" in low
+    # Conditional — harnesses without background subagents must be unaffected.
+    assert "if your harness supports background subagents" in low
+    assert "general-purpose" in low
+    assert "wait_for_message(timeout_seconds=500)" in text
+    assert "never calls `ack_messages`" in low
+    assert "metadata only" in low and "paraphrase" in low
+    assert "check_messages" in text
+
+
 def test_role_prompt_debug_has_no_contract():
     text = onboarding.role_prompt("backend", "signin", mode="debug")
     assert "debug task" in text
