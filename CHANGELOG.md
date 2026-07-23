@@ -11,9 +11,15 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
 ## [Unreleased]
-- Backlog is tracked in `v2.md` (image/screenshot attachments; non-HTTP / `interface_type`
-  contracts; staging_url at host setup + localhost for same-machine tasks; three-role /
-  scoped-parties contracts).
+- Backlog is tracked in `v2.md` — contract-lock push notification; stronger auth
+  (mTLS / OAuth 2.1); image/screenshot attachments; non-HTTP / `interface_type`
+  contracts; staging_url at host setup + localhost for same-machine tasks;
+  always-listening subagent + dashboard presence signal; todos (several deliverables
+  under one task, a contract each, agent-proposed and peer-accepted); auto-revoke on
+  completion + reopenable tasks + token timer; per-contract signatory scope (subsumed
+  by todos); multi-process presence & wait-cap accounting.
+- Decision D11 recorded: the dashboard never issues commands (read-only; it surfaces
+  state and tells the human what to type).
 
 ## [1.0.1] — 2026-07-23
 

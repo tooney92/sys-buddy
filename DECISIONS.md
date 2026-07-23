@@ -104,3 +104,19 @@ path only), so the message↔event 1:1 invariant the API relies on always holds.
 **Done:** the dashboard HTML is inert; all data comes from `/api/*`, which is
 viewer-token-scoped. The viewer token rides in `?v=`, so the page itself needs no
 gate. A leaked page with no token shows nothing.
+
+## D11 — The dashboard never issues commands
+
+**Done:** `/ui` + `/api/*` stay strictly read-only. The dashboard surfaces state and
+tells the human what to type; it never acts. Every mutation flows human → agent →
+broker tool, or human → CLI.
+
+**Why:** the viewer token is read-scoped, so a leaked `?v=` link can only ever
+*look* (see D7). A single write button — "rotate", "close" — would be the first
+crack in that and would need its own auth story. It also could not finish the job
+anyway: `rotate_token` returns a new bearer token that must land in the agent's MCP
+`Authorization` header, which only the human can paste. So the honest division is
+that the dashboard warns EARLY ENOUGH to act (token countdown at T-1h, listening
+dot, pre-flight badge) and the human and their agent do the acting.
+
+Revisit only with a real write-auth story — not per-button.
