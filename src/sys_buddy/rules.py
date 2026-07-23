@@ -80,6 +80,28 @@ and locked. The steps:
 Review the proposal in get_contract and sign the version number — you do NOT need to
 wait for anything else to "see" it there.
 
+Todos — several deliverables under one task. Only some tasks have them; get_todos() tells
+you (it returns [] if not). A todo is one deliverable with its own scope, its own contract
+and its own march to verified. Each names the seats it BINDS (`parties`): you can READ a
+todo that doesn't name you, but you cannot act on it and it is not waiting for you.
+  1. propose_todo(title, scope, parties) when your human directs it — same rule as a
+     contract. Proposing IS your own consent; every other named party then accept_todo, or
+     decline_todo(id, reason) and you reshape it with repropose_todo — a new version that
+     resets everyone's acceptance, so nobody is held to a scope they didn't read.
+  2. That settles WHAT. The HOW is a contract ON that todo:
+     propose_contract(spec, todo=N), signed by THAT todo's parties — not the whole cast. A
+     seat the todo doesn't bind neither signs it nor blocks it.
+  3. report_status(..., todo=N): with todos, ready/checked/blocked/verified are
+     per-deliverable and the todo id is REQUIRED ("ready" on which one?). The TASK's state
+     is derived from its todos — you never set it — and the task concludes when the LAST
+     todo verifies.
+  4. stuck: with todo=N you flag ONE deliverable and the others carry on; with no todo you
+     freeze the whole task until a human steps in. Prefer the narrow one unless the problem
+     really is task-wide (expired token, no idea what the goal is).
+Abandoning a todo is MUTUAL — every party calls drop_todo(id, reason) — and impossible once
+it is verified. No tool removes a peer from a todo, and you should not ask for one: if a
+party has gone silent, only their human can drop it.
+
 Debug tasks. There is no contract. Just collaborate with your buddy, and when the issue
 is fixed call report_status("resolved").
 """

@@ -14,9 +14,10 @@ import asyncio
 import pytest
 from fastmcp import FastMCP
 
-from sys_buddy import service, state, todos, tools
+from sys_buddy import onboarding, service, state, todos, tools
 from sys_buddy.config import Config
 from sys_buddy.middleware import ACTION_TOOLS
+from sys_buddy.rules import RULES_OF_ENGAGEMENT
 from sys_buddy.server import build_server
 from tests.conftest import seed_agent, seed_task
 
@@ -90,6 +91,28 @@ def test_every_todo_tool_documents_the_protocol(tmp_path, mode):
     schemas = _schemas(mode, tmp_path)
     for name in TODO_TOOLS:
         assert len((schemas[name].description or "").strip()) > 120, name
+
+
+def test_the_charter_teaches_the_todo_protocol():
+    """rules() is where an agent learns the protocol; a tool it is never told about
+    is a tool it never calls."""
+    r = RULES_OF_ENGAGEMENT.lower()
+    for fragment in ("get_todos()", "propose_todo", "accept_todo", "todo=n"):
+        assert fragment in r
+    # The two rules an agent must not guess at: whose signature counts, and that the
+    # todo id is required.
+    assert "not the whole cast" in r
+    assert "required" in r
+
+
+@pytest.mark.parametrize("role", ["backend", "frontend"])
+def test_the_contract_briefing_mentions_todos_conditionally(role):
+    """Named, but framed as "only if this task uses them" — most tasks have none."""
+    text = onboarding.role_prompt(role, "signin")
+    assert "propose_todo" in text and "get_todos()" in text
+    assert "only if this task uses them" in text
+    # A debug task never carries todos, so its briefing must not mention them.
+    assert "propose_todo" not in onboarding.role_prompt(role, "signin", mode="debug")
 
 
 def test_the_todo_writes_sit_behind_the_pre_flight_gate():

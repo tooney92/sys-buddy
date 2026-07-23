@@ -988,6 +988,16 @@ def _report_on_todo(
             f"todo {row['id']} was dropped; there is nothing left to report on it"
         )
     todos.assert_party(row, identity.role, f"report '{requested}' on")
+    # ``verified`` IS terminal for a todo, even though it no longer is for the task: any
+    # further report would march a finished deliverable backwards, and the task's
+    # "N of 6 verified" rollup — and its own conclusion — would become a lie. Follow-up
+    # work on something already verified is a NEW todo.
+    if row["state"] == VERIFIED:
+        raise ValueError(
+            f"todo {row['id']} ('{row['title']}') is verified — nothing more is reported "
+            f"on it. Propose a NEW todo for follow-up work, or escalate the whole task "
+            f"with report_status('stuck', detail) if it needs humans."
+        )
 
     if status == STATUS_STUCK:
         return _report_todo_stuck(conn, identity, row, detail)

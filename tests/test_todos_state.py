@@ -512,6 +512,19 @@ def test_a_verified_todo_is_not_recontracted(conn):
         state.reopen_negotiations(conn, ag["backend"], "one more field", t)
 
 
+@pytest.mark.parametrize("status", ["ready", "checked", "blocked", "verified", "stuck"])
+def test_a_verified_todo_cannot_be_marched_backwards(conn, status):
+    """`verified` is still terminal for the TODO — otherwise a later report would
+    unverify a finished deliverable and the task's rollup would be a lie."""
+    ag = _agents(conn)
+    t, _ = _locked_todo(conn, ag, "backend", ["backend", "mobile"])
+    _verify_todo(conn, ag, t, "backend", "mobile")
+    with pytest.raises(ValueError, match="is verified"):
+        state.report_status(conn, ag["backend"], status, "wait, one more thing", t)
+    assert _todo_row(conn, t)["state"] == state.VERIFIED
+    assert _task_state(conn) == state.VERIFIED
+
+
 # --- regression: nothing changes for a task without todos ------------------
 def test_a_task_with_no_todos_is_behaviourally_unchanged(conn):
     ag = _agents(conn, roles=("backend", "frontend"))
