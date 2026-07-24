@@ -34,3 +34,6 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+
+# Playwright MCP scratch output (screenshots/snapshots from browser-driven checks)
+.playwright-mcp/
