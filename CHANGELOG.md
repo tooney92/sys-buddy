@@ -24,6 +24,11 @@ Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y
 - **Version is single-sourced.** `sys_buddy.__version__` now derives from the installed
   package metadata rather than a second hand-edited literal, so `pyproject.toml` is the
   one place to bump it; a test fails the build if the two ever drift.
+- **Docker packaging.** A multi-stage root `Dockerfile` (built with `uv`) and
+  `docker-compose.yml` run the broker as a single container, non-root, with a persisted
+  `sys-buddy-data` volume for the SQLite DB. Defaults to `serve` (auth-enforced) — never
+  `local`, which is unauthenticated and must not be reachable off-box. A `Makefile`
+  wraps the common flows and `.env.example` documents the tunnel setup for remote use.
 
 ### Backlog
 - Tracked in `v2.md` — stronger auth (mTLS / OAuth 2.1); image/screenshot attachments;
