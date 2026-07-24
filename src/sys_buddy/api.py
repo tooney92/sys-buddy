@@ -782,6 +782,27 @@ def register_api_routes(mcp, cfg: Config) -> None:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @mcp.custom_route("/api/version", methods=["GET"])
+    async def api_version(request):
+        """The version THIS broker process is running — the one number nothing else
+        can supply.
+
+        Deliberately UNAUTHENTICATED: it exposes only a version string (no task data),
+        and the two readers that need it — the desktop app deciding whether to nag a
+        restart, and the dashboard banner — may have no viewer token in hand. It stays
+        GET-only like every other route here (D11).
+
+        Why an endpoint at all, when ``__version__`` is importable? Because the caller
+        is usually a DIFFERENT process from this broker (the GUI attaches to whatever
+        broker is already on the port; the dashboard is a browser page; a remote/Docker
+        broker shares no memory at all). Reading a local ``__version__`` reports what is
+        INSTALLED, not what is RUNNING here — and a broker still serving last week's code
+        after an upgrade is exactly the drift this endpoint exists to expose.
+        """
+        from sys_buddy import __version__
+
+        return JSONResponse({"version": __version__})
+
     @mcp.custom_route("/ui", methods=["GET"])
     async def ui(request):
         """Serve the packaged single-file dashboard.

@@ -11,9 +11,24 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
 ## [Unreleased]
-- Backlog is tracked in `v2.md` — stronger auth (mTLS / OAuth 2.1); image/screenshot
-  attachments; non-HTTP / `interface_type` contracts; auto-revoke on completion +
-  reopenable tasks + token timer; multi-process presence & wait-cap accounting.
+
+### Added
+- **Version awareness in the desktop app.** A new unauthenticated `GET /api/version`
+  reports the version the broker process is actually *running*. The desktop app compares
+  three numbers — installed (on disk), running (from the endpoint), and, if the user opts
+  in, the latest published GitHub release — and shows a banner when they disagree: a
+  "restart needed" warning when the broker is serving older code than what's installed
+  (the drift that hid a migration in 1.1.0/1.1.1), or an "update available" note with the
+  release notes inline when GitHub has something newer. The GitHub check is strictly
+  opt-in — the app makes no external request unless the toggle is on.
+- **Version is single-sourced.** `sys_buddy.__version__` now derives from the installed
+  package metadata rather than a second hand-edited literal, so `pyproject.toml` is the
+  one place to bump it; a test fails the build if the two ever drift.
+
+### Backlog
+- Tracked in `v2.md` — stronger auth (mTLS / OAuth 2.1); image/screenshot attachments;
+  non-HTTP / `interface_type` contracts; auto-revoke on completion + reopenable tasks +
+  token timer; multi-process presence & wait-cap accounting.
 
 ## [1.1.1] — 2026-07-24
 
