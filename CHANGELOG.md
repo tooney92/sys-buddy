@@ -15,6 +15,18 @@ Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y
   attachments; non-HTTP / `interface_type` contracts; auto-revoke on completion +
   reopenable tasks + token timer; multi-process presence & wait-cap accounting.
 
+## [1.1.1] — 2026-07-24
+
+### Fixed
+- **Broker crashed on startup against a database created before 1.1.0.** The index on
+  `contracts(todo_id)` was declared in the schema block, which runs *before* the
+  migration that adds the column. On a fresh database the table is created with the
+  column so it worked; on an existing (pre-todos) database the `CREATE TABLE IF NOT
+  EXISTS` was a no-op and the index creation raised `no such column: todo_id`, aborting
+  boot. The index is now created after the migrations, once the column is guaranteed to
+  exist. Regression test added exercising an existing pre-todos database — the whole
+  test suite used fresh databases, which is why this shipped in 1.1.0.
+
 ## [1.1.0] — 2026-07-24
 
 Todos: a task can carry several deliverables instead of exactly one. Additive — a task
@@ -119,6 +131,8 @@ First tagged release — the sys-buddy broker for cross-human AI agent collabora
   told to review via `get_contract` but saw nothing until it locked — which it can't do
   until they sign. The `staging_url` stays the single trusted, signed source (SSRF-guarded).
 
-[Unreleased]: https://github.com/tooney92/sys-buddy/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/tooney92/sys-buddy/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/tooney92/sys-buddy/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/tooney92/sys-buddy/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/tooney92/sys-buddy/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/tooney92/sys-buddy/releases/tag/v1.0.0

@@ -394,6 +394,39 @@ def test_init_db_migrates_pre_ttl_schema(tmp_path):
     assert "expires_at" in cols
 
 
+def test_init_db_migrates_pre_todos_contracts_without_crashing(tmp_path):
+    """An existing db predates todos: its `contracts` table has no todo_id column.
+    init_db must add the column AND its index without crashing.
+
+    Regression: the idx_contracts_todo index used to live in SCHEMA, which runs via
+    executescript BEFORE the ALTER that adds contracts.todo_id. On a fresh db the
+    CREATE TABLE supplies the column so the index is fine; on an EXISTING db the
+    CREATE TABLE is a no-op and the index blew up with `no such column: todo_id`.
+    Every other test uses a fresh db, so only a real pre-todos db could hit it."""
+    import sqlite3
+
+    from sys_buddy import db
+
+    p = tmp_path / "pre-todos.db"
+    c = sqlite3.connect(p)
+    # A minimal pre-todos contracts table — the shape that matters is "no todo_id".
+    c.execute(
+        "CREATE TABLE contracts (id INTEGER PRIMARY KEY, task_id TEXT, version INTEGER, "
+        "spec_json TEXT, status TEXT, locked_at REAL, created_at REAL)"  # no todo_id
+    )
+    c.commit()
+    c.close()
+    db.init_db(p)  # must not raise "no such column: todo_id"
+    db.init_db(p)  # and must be idempotent
+    c = sqlite3.connect(p)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(contracts)").fetchall()}
+    idx = {r[0] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+    c.close()
+    assert "todo_id" in cols
+    assert "idx_contracts_todo" in idx
+
+
 def test_init_db_migrates_tasks_to_strict_connectivity(tmp_path):
     """An existing task predates the connectivity flag — it must migrate to 0
     (strict staging_url rules), never to "assume local"."""

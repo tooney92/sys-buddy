@@ -206,7 +206,10 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_todos_task ON todos(task_id, id);
-CREATE INDEX IF NOT EXISTS idx_contracts_todo ON contracts(todo_id);
+-- NOTE: the index on contracts(todo_id) is created in init_db AFTER the migrations,
+-- not here. `contracts` predates todos, so on an existing db the CREATE TABLE above is
+-- a no-op and the todo_id column is added by ALTER later — indexing it here would run
+-- inside executescript, before that ALTER, and fail with "no such column: todo_id".
 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_deliveries_agent ON deliveries(agent_id, acked_at);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
@@ -289,6 +292,10 @@ def init_db(db_path: Path | str | None = None) -> Path:
         # still renders on them; new rows carry the id directly.
         if "todo_id" not in msg_cols:
             conn.execute("ALTER TABLE messages ADD COLUMN todo_id INTEGER REFERENCES todos(id)")
+        # Index contracts.todo_id only now that the column is guaranteed to exist —
+        # whether it came from the fresh CREATE TABLE or the ALTER above. Kept out of
+        # SCHEMA on purpose (see the note there).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_contracts_todo ON contracts(todo_id)")
         conn.commit()
     finally:
         conn.close()
