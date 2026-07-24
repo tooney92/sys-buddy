@@ -452,6 +452,38 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 .link-btn:hover{background:var(--accent-2);transform:translateY(-1px)}
 .link-btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 
+/* ---------- version banner ---------- */
+.vbanner{
+  display:flex;
+  align-items:flex-start;
+  gap:12px;
+  margin:0 0 22px;
+  padding:12px 15px;
+  border-radius:12px;
+  border:1px solid var(--border-strong);
+  background:var(--surface);
+  font-size:.86rem;
+  line-height:1.45;
+  color:var(--text-2);
+}
+.vbanner[hidden]{display:none}
+.vbanner.warn{border-color:var(--err);background:color-mix(in srgb,var(--err) 8%,var(--surface))}
+.vbanner .vdot{width:9px;height:9px;border-radius:50%;flex:none;margin-top:5px;background:var(--accent)}
+.vbanner.warn .vdot{background:var(--err)}
+.vbanner .vbody{flex:1;min-width:0}
+.vbanner .vtitle{font-weight:600;color:var(--text)}
+.vbanner .vnotes{margin:5px 0 0;white-space:pre-wrap;color:var(--text-3);font-size:.82rem;
+  max-height:8.5em;overflow:auto}
+.vbanner .vmeta{margin-top:6px;font-size:.78rem;color:var(--text-3)}
+.vbanner a{color:var(--accent);text-decoration:none}
+.vbanner a:hover{text-decoration:underline}
+.vbanner .vclose{appearance:none;background:transparent;border:0;cursor:pointer;
+  color:var(--text-3);font-size:1rem;line-height:1;padding:2px 4px}
+.vbanner .vclose:hover{color:var(--text)}
+/* opt-in toggle in the footer */
+.updchk{display:inline-flex;align-items:center;gap:7px;font-size:.82rem;color:var(--text-3);cursor:pointer}
+.updchk input{accent-color:var(--accent);cursor:pointer}
+
 /* ---------- footer bridge check ---------- */
 .foot{
   margin-top:auto;
@@ -493,6 +525,18 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     </span>
     <span class="wordmark">sys<span class="mid">·</span>buddy</span>
   </header>
+
+  <!-- version-awareness banner: shown only when the broker is running stale code
+       (restart needed) or a newer release is published (opt-in). See updates.py. -->
+  <div class="vbanner" id="version-banner" role="status" aria-live="polite" hidden>
+    <span class="vdot" aria-hidden="true"></span>
+    <div class="vbody">
+      <div class="vtitle" id="vb-title"></div>
+      <div class="vnotes" id="vb-notes" hidden></div>
+      <div class="vmeta" id="vb-meta"></div>
+    </div>
+    <button type="button" class="vclose" id="vb-close" aria-label="Dismiss">×</button>
+  </div>
 
   <!-- ============ HOME ============ -->
   <section class="view active" id="view-home" aria-label="Home">
@@ -721,6 +765,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       <span class="pip" aria-hidden="true"></span>
       <span id="check-text">Bridge not checked.</span>
     </span>
+    <label class="updchk" title="When on, sys-buddy checks GitHub for newer releases on launch.">
+      <input type="checkbox" id="upd-optin"> Check GitHub for updates
+    </label>
   </footer>
 </main>
 
@@ -1269,6 +1316,72 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       setStatus('err', 'Bridge error: ' + (err && err.message ? err.message : String(err)));
     });
   });
+
+  // ---- version awareness ----------------------------------------------
+  // The opt-in lives in localStorage; the GitHub call only happens when it's on, so
+  // the app never phones out unless the user allowed it. The RESTART-NEEDED case needs
+  // no opt-in — it only asks the local broker what it's running.
+  var OPTIN_KEY = 'sysbuddy.checkUpdates';
+  var optedIn = false;
+  try { optedIn = localStorage.getItem(OPTIN_KEY) === '1'; } catch(e){}
+
+  var vb = document.getElementById('version-banner');
+  var vbTitle = document.getElementById('vb-title');
+  var vbNotes = document.getElementById('vb-notes');
+  var vbMeta = document.getElementById('vb-meta');
+  var optChk = document.getElementById('upd-optin');
+  if (optChk) optChk.checked = optedIn;
+
+  function renderVersion(s){
+    if (!s || s.error) { vb.hidden = true; return; }   // never nag on failure
+    vbNotes.hidden = true; vbNotes.textContent = '';
+    vbMeta.textContent = '';
+    if (s.restart_needed) {
+      // Actionable NOW, and independent of the GitHub opt-in — takes precedence.
+      vb.classList.add('warn');
+      vbTitle.textContent = 'Restart needed';
+      vbMeta.textContent = 'Installed ' + s.installed + ' · broker running ' + s.running
+        + ' — restart the broker to apply the update.';
+      vb.hidden = false;
+      return;
+    }
+    if (s.update_available) {
+      vb.classList.remove('warn');
+      vbTitle.textContent = (s.release_name || ('v' + s.published)) + ' is available';
+      if (s.notes) { vbNotes.textContent = s.notes; vbNotes.hidden = false; }
+      // Build the meta line safely (no innerHTML with remote content).
+      vbMeta.textContent = "You're on " + s.installed + '. ';
+      if (s.release_url) {
+        var a = document.createElement('a');
+        a.href = s.release_url; a.textContent = 'View release ↗';
+        a.target = '_blank'; a.rel = 'noopener';
+        vbMeta.appendChild(a);
+      }
+      vb.hidden = false;
+      return;
+    }
+    vb.hidden = true;   // installed == running, nothing newer
+  }
+
+  function runVersionCheck(){
+    var api = window.pywebview && window.pywebview.api;
+    if (!api || typeof api.check_version !== 'function') return;  // plain browser
+    Promise.resolve(api.check_version(optedIn)).then(renderVersion).catch(function(){});
+  }
+
+  if (document.getElementById('vb-close')) {
+    document.getElementById('vb-close').addEventListener('click', function(){ vb.hidden = true; });
+  }
+  if (optChk) {
+    optChk.addEventListener('change', function(){
+      optedIn = optChk.checked;
+      try { localStorage.setItem(OPTIN_KEY, optedIn ? '1' : '0'); } catch(e){}
+      runVersionCheck();   // re-check immediately so toggling on surfaces a release now
+    });
+  }
+  // Run once the native bridge is ready (and once now, in case it already is).
+  window.addEventListener('pywebviewready', runVersionCheck);
+  runVersionCheck();
 
 })();
 </script>

@@ -93,6 +93,21 @@ class GuiApi:
         """Liveness probe used by the page to prove the bridge is wired up."""
         return "pong"
 
+    def check_version(self, check_github: bool = False) -> dict:
+        """Version-awareness banner data (see :mod:`sys_buddy.updates`).
+
+        ``check_github`` is passed by the page from the user's opt-in toggle — the
+        GitHub call happens ONLY when it is true, so the app never phones out unless
+        the user allowed it. Always returns a dict; network failures degrade to
+        ``None`` fields rather than raising across the bridge.
+        """
+        try:
+            from . import updates
+
+            return updates.status(BASE_URL, check_github=bool(check_github))
+        except Exception as exc:  # never raise across the bridge
+            return {"error": str(exc)}
+
     def pair(self, link: str, name: str) -> dict:
         """Pair this agent against an invite ``link`` under ``name`` (Buddy flow)."""
         try:
