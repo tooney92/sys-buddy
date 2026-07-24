@@ -1,0 +1,37 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+*.egg-info
+.DS_Store
+
+# runtime db (mounted via volume, not baked into the image)
+*.db
+*.db-wal
+*.db-shm
+
+# dev/editor
+.vscode
+.idea
+.claude
+
+# docs & non-runtime project material
+sessions
+design
+reference
+CONTRIBUTING.md
+DOGFOOD.md
+DECISIONS.md
+KICKOFF.md
+SPEC.md
+v2.md
+
+# already produced by CI, not needed to build the image
+tests
+docker-compose.yml
+Dockerfile
+.dockerignore
+.env
+.env.example
