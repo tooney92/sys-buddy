@@ -12,7 +12,7 @@
 
 > **Status: built and dogfooding.** The broker, MCP tools, enforced state
 > machine, pairing (CLI + browser onboarding), dashboard API, live-updating
-> dashboard UI, and Slack are implemented and covered by 260+ tests plus a live
+> dashboard UI, and Slack are implemented and covered by 470+ tests plus a live
 > end-to-end. See the [Quickstart](#quickstart) to run it. Design/spec live in
 > `SPEC.md`, `KICKOFF.md`, and `DECISIONS.md`.
 
@@ -146,17 +146,22 @@ The full model is in `SPEC.md` §9. The short version:
 ## Repo layout
 
 ```
-SPEC.md      ← the complete specification. Start here.
-KICKOFF.md   ← build instructions for a coding agent
-design/      ← Claude Design handoff: the dashboard prototype (visual source of truth)
-reference/   ← agent_bus.py: working local-only predecessor + its ops guide
+SPEC.md          ← the complete specification. Start here.
+KICKOFF.md       ← build instructions for a coding agent
+DECISIONS.md     ← design decisions and spec deviations, with reasoning
+CHANGELOG.md     ← released changes (Keep a Changelog + SemVer)
+CONTRIBUTING.md  ← how to contribute: fork, branch, test, PR
+v2.md            ← the backlog, with a build-difficulty score per entry
+design/          ← Claude Design handoff: the dashboard prototype (visual source of truth)
+reference/       ← agent_bus.py: working local-only predecessor + its ops guide
+releases/        ← the fuller note per tagged release
 ```
 
 ## Development
 
 ```bash
 uv sync                        # install deps into .venv
-uv run pytest -q               # the full spec suite (260+ tests)
+uv run pytest -q               # the full spec suite (470+ tests)
 uv run sys-buddy --help        # the CLI surface
 ```
 
@@ -165,6 +170,51 @@ Source lives in `src/sys_buddy/`: `db` (schema/WAL) · `identity` + `middleware`
 `pairing` + `admin` (invites/tokens) · `api` (dashboard JSON) · `server` (assembly)
 · `ui.html` (single-file dashboard). Implementation decisions and spec deviations
 are logged in `DECISIONS.md`.
+
+## Versioning and releases
+
+sys-buddy follows [Semantic Versioning](https://semver.org/), and every notable
+change is recorded in [`CHANGELOG.md`](CHANGELOG.md) in
+[Keep a Changelog](https://keepachangelog.com/) format. Because this is a broker
+that agents talk to, the version boundaries are defined in terms of what an agent
+can see:
+
+- **MAJOR** — incompatible changes to the tool/wire contract or agent-visible behaviour.
+- **MINOR** — new, backwards-compatible capability.
+- **PATCH** — backwards-compatible fixes.
+
+Each release is git-tagged `vX.Y.Z` with a fuller note in `releases/vX.Y.Z.md`.
+
+## Contributing
+
+Contributions are welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full
+walkthrough: forking, environment setup with `uv`, branch and commit conventions,
+what to run before review, and how to open the PR.
+
+The short version:
+
+```bash
+# fork on GitHub, then:
+git clone https://github.com/YOUR_USERNAME/sys-buddy.git && cd sys-buddy
+git remote add upstream https://github.com/tooney92/sys-buddy.git
+uv sync && git checkout -b feat/my-change
+# ...change...
+uv run pytest -q                      # must be green
+git push -u origin feat/my-change && gh pr create --base main --fill
+```
+
+Three things worth knowing before you start:
+
+- `main` is branch-protected. **Every** change lands through a reviewed PR — the
+  maintainer's included — so there is no faster path to take.
+- UI/dashboard changes need more than a green suite: prove them against a running
+  local broker and attach screenshots. See `CLAUDE.md`.
+- Add a line to `CHANGELOG.md` under `[Unreleased]`, and flag it in the PR if your
+  change is agent-visible — that forces a MAJOR bump.
+
+## License
+
+[MIT](LICENSE).
 
 ## Credits
 
