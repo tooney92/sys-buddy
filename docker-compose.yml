@@ -1,0 +1,24 @@
+services:
+  sys-buddy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sys-buddy
+    container_name: sys-buddy
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SYS_BUDDY_DB: /data/sys_buddy.db
+      SYS_BUDDY_PORT: "8787"
+      # SYS_BUDDY_PUBLIC_URL: https://your-tunnel-origin
+      # SYS_BUDDY_TOKEN_TTL: "86400"
+      # SLACK_WEBHOOK_URL: https://hooks.slack.com/services/...
+    volumes:
+      - sys-buddy-data:/data
+
+volumes:
+  sys-buddy-data:

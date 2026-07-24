@@ -15,6 +15,14 @@ Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y
   contracts; staging_url at host setup + localhost for same-machine tasks; three-role /
   scoped-parties contracts).
 
+## [1.0.2] — 2026-07-23
+
+### Infrastructure
+No agent-visible or tool-contract changes; packaging/dev-tooling only.
+- **Docker packaging.** A multi-stage root `Dockerfile` (built with `uv`) and
+  `docker-compose.yml` run the broker as a single container with a persisted
+  `sys-buddy-data` volume for the SQLite DB.
+
 ## [1.0.1] — 2026-07-23
 
 ### Fixed
@@ -52,6 +60,7 @@ First tagged release — the sys-buddy broker for cross-human AI agent collabora
   told to review via `get_contract` but saw nothing until it locked — which it can't do
   until they sign. The `staging_url` stays the single trusted, signed source (SSRF-guarded).
 
-[Unreleased]: https://github.com/tooney92/sys-buddy/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/tooney92/sys-buddy/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/tooney92/sys-buddy/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/tooney92/sys-buddy/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/tooney92/sys-buddy/releases/tag/v1.0.0
