@@ -22,14 +22,6 @@ No agent-visible or tool-contract changes; packaging/dev-tooling only.
 - **Docker packaging.** A multi-stage root `Dockerfile` (built with `uv`) and
   `docker-compose.yml` run the broker as a single container with a persisted
   `sys-buddy-data` volume for the SQLite DB.
-- **Devcontainer workspace.** `.devcontainer/` provides a VS Code devcontainer that
-  *is* the broker host — it mounts the repo and syncs the venv, and you run
-  `uv run sys-buddy serve` (or `local`) inside it directly, rather than a separate
-  packaged-image container running alongside it. A `cloudflared` service exposes it
-  over a free quick tunnel (or a named tunnel via `CLOUDFLARE_TUNNEL_TOKEN`), and an
-  optional `tailscale` sidecar joins the workspace to a tailnet. All three share one
-  compose network so the tunnel/tailnet always reach whatever's listening on the
-  devcontainer's `:8787`.
 
 ## [1.0.1] — 2026-07-23
 
