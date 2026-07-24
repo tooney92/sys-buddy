@@ -155,6 +155,32 @@ def test_empty_task_has_sensible_empty_states(conn):
     assert set(detail["times"]) == {"open"}
 
 
+def test_lock_notification_renders_once_and_as_the_broker(conn):
+    """The human thread must show the lock ONE time and in the broker's voice.
+
+    Both feeds converge on the thread: `events` draws the lock divider, `messages`
+    draws bubbles. The broker's contract_locked push is 1:1 with the lock event, so
+    there is exactly one of each — and the bubble is attributed to `broker`, never to
+    the agent row whose signature happened to trigger it.
+    """
+    from sys_buddy import state
+    from tests.test_state import _agents, _valid_spec
+
+    ag = _agents(conn, roles=("backend", "frontend"))
+    state.propose_contract(conn, ag["backend"], _valid_spec())
+    state.lock_contract(conn, ag["frontend"], 1)
+    state.lock_contract(conn, ag["backend"], 1)  # locks
+
+    detail = api._task_detail(conn, "signin")
+
+    locked = [m for m in detail["messages"] if m["type"] == "contract_locked"]
+    assert len(locked) == 1
+    assert locked[0]["role"] == "broker"
+    assert len([e for e in detail["events"] if e[1] == "lock"]) == 1
+    # …and no second bubble smuggled in under the per-signature type.
+    assert [m["type"] for m in detail["messages"]].count("contract_lock") == 1  # frontend's
+
+
 def test_times_derived_from_transition_events(conn):
     seed_task(conn, "signin")
     base = time.time()

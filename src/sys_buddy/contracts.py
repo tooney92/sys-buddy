@@ -24,6 +24,11 @@ from urllib.parse import urlparse
 # resolves to a private IP — is a residual the fetch-time layer must also guard.)
 _BLOCKED_HOSTS = {"localhost", "metadata", "metadata.google.internal"}
 
+# Hostnames that are, by definition, THIS machine. Used only to recognise a
+# same-machine broker origin (see :func:`same_machine_origin`) — never to relax
+# anything on its own.
+_LOOPBACK_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost"}
+
 # The HTTP verbs a contract endpoint may declare (SPEC §6).
 VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 
@@ -32,20 +37,44 @@ VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 MAX_ENDPOINTS = 100
 
 
-def validate_spec(spec: dict, is_remote: bool = True) -> list[str]:
+def same_machine_origin(base_url: object, public_url: object = None) -> bool:
+    """POSITIVE evidence that a task never leaves this one machine.
+
+    True only when BOTH hold: there is no public/tunnel origin at all, and the
+    broker origin the agents pair against is a literal loopback address (or the
+    ``localhost`` name). Anything we cannot prove is loopback — a bare host, an
+    unparseable URL, a LAN/Tailscale/ngrok address, a blank base — returns False.
+
+    This is the *only* input that may relax :func:`_validate_staging_url`, so it is
+    written to fail closed: absence of evidence of remoteness is never taken as
+    evidence of same-machine-ness.
+    """
+    if public_url is not None and str(public_url).strip():
+        return False  # a real origin exists → someone else can reach this
+    if not isinstance(base_url, str) or not base_url.strip():
+        return False
+    parsed = urlparse(base_url.strip())
+    if not parsed.scheme or not parsed.hostname:
+        return False  # can't parse an origin out of it → can't prove anything
+    host = parsed.hostname.lower()
+    if host in _LOOPBACK_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False  # a hostname that isn't a loopback literal → not proven local
+
+
+def validate_spec(spec: dict, is_remote: bool = True, same_machine: bool = False) -> list[str]:
     """Return a list of human-fixable error strings; empty list means valid.
 
     We collect *all* errors in one pass rather than failing on the first, so an
     agent can correct a proposal in a single revision instead of round-tripping
     through the broker once per mistake.
 
-    ``is_remote`` controls how strict the ``staging_url`` check is. Remotely the
-    peer's test-runner is on ANOTHER machine, so the URL must be a reachable,
-    globally-routable ``https`` domain (the SSRF guard below). Locally both agents
-    are on the same box — the frontend just hits the backend on ``localhost`` — so
-    there is nothing to deploy and no cross-machine SSRF surface; any non-empty URL
-    (``http://localhost:3000`` etc.) is accepted. Defaults to the strict remote
-    rules so a caller that forgets to pass the mode fails safe.
+    ``is_remote``/``same_machine`` control how strict the ``staging_url`` check is —
+    see :func:`_validate_staging_url`. Both default to the strict remote rules so a
+    caller that forgets to pass them fails safe.
     """
     if not isinstance(spec, dict):
         return ["spec must be a JSON object"]
@@ -69,7 +98,7 @@ def validate_spec(spec: dict, is_remote: bool = True) -> list[str]:
     if "staging_url" not in spec:
         errors.append("missing required key 'staging_url'")
     else:
-        errors.extend(_validate_staging_url(spec["staging_url"], is_remote))
+        errors.extend(_validate_staging_url(spec["staging_url"], is_remote, same_machine))
 
     # --- version (optional, but if present must be a plain int) -------------
     if "version" in spec and not _is_int(spec["version"]):
@@ -118,7 +147,9 @@ def _validate_endpoint(index: int, endpoint: object) -> list[str]:
     return errors
 
 
-def _validate_staging_url(url: object, is_remote: bool = True) -> list[str]:
+def _validate_staging_url(
+    url: object, is_remote: bool = True, same_machine: bool = False
+) -> list[str]:
     """The staging URL is the security-load-bearing field: the test-runner agent will
     hit it (SPEC §9). It must be an absolute https URL, and — crucially — must NOT
     point at internal infrastructure. A backend that set it to http://169.254.169.254
@@ -126,13 +157,22 @@ def _validate_staging_url(url: object, is_remote: bool = True) -> list[str]:
     test-runner into an SSRF gadget, so private/reserved/loopback/link-local targets
     and known-internal hostnames are rejected here (OWASP SSRF Prevention).
 
-    Locally (``is_remote=False``) that whole threat model collapses — the frontend
-    and backend are the same person on one machine, so ``localhost``/``http`` is the
-    normal, correct target and we require only a non-empty string."""
+    Strictness is keyed on CONNECTIVITY, not on the broker's auth mode — the GUI
+    always runs the broker in remote mode (token auth needs it) even when both
+    "agents" are one human on one laptop. Two things unlock the lenient path:
+
+    * ``is_remote=False`` — the loopback, no-auth CLI broker (``sys-buddy local``).
+    * ``same_machine=True`` — a task the HOST declared as same-machine at setup:
+      loopback broker origin AND no public/tunnel URL (see :func:`same_machine_origin`).
+
+    On either, the SSRF threat model collapses: the "peer" test-runner is this same
+    box, ``http://localhost:PORT`` is the real and correct target, and there is
+    nothing to deploy — so any non-empty string is accepted. Every other task keeps
+    the full https + SSRF checks below, unchanged."""
     if not isinstance(url, str) or not url.strip():
         return ["'staging_url' must be a non-empty string"]
-    if not is_remote:
-        return []  # local: any non-empty URL is fine (localhost, http, a bare host…)
+    if same_machine or not is_remote:
+        return []  # one box: any non-empty URL is fine (localhost, http, a bare host…)
     parsed = urlparse(url)
     if parsed.scheme != "https":
         return [

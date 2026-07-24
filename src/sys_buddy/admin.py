@@ -20,7 +20,7 @@ import secrets
 import sqlite3
 import time
 
-from . import audit
+from . import audit, service, todos
 from .db import connect
 from .identity import new_invite_code, new_viewer_token, sha256_hex
 
@@ -60,12 +60,26 @@ def _write_event(conn: sqlite3.Connection, task_id: str, kind: str, detail: dict
     )
 
 
-def create_task(id: str | None, *, title: str, roles: list[str], mode: str = "contract") -> dict:
+def create_task(
+    id: str | None,
+    *,
+    title: str,
+    roles: list[str],
+    mode: str = "contract",
+    same_machine: bool = False,
+    staging_url: str | None = None,
+) -> dict:
     """Create a task in the ``open`` state with the given fixed cast of roles.
 
     ``mode`` selects the workflow: ``'contract'`` (the default) runs the full
     propose/lock/deploy state machine; ``'debug'`` is a lightweight mode where two
     buddies just fix a problem and mark it resolved, with no contract required.
+
+    ``same_machine`` records the task's CONNECTIVITY (not the broker's auth mode):
+    True only when the host proved everything lives on one box. It relaxes the
+    ``staging_url`` rules for this task, so it defaults to False — a caller that
+    doesn't say gets the strict remote validation. ``staging_url`` is the host-chosen
+    deployment target the producer agent inherits when it proposes a contract.
 
     ``id`` may be falsy (``None``/``""``): the id is then derived from ``title`` via
     :func:`new_task_id`, so a human only has to supply a Title. An explicit id is
@@ -82,6 +96,15 @@ def create_task(id: str | None, *, title: str, roles: list[str], mode: str = "co
         raise ValueError("a task needs at least one non-empty role")
     if len(roles) != len(set(roles)):
         raise ValueError("task roles must be unique (no duplicates)")
+    # `broker` is the broker's OWN voice: it authors pushes like contract_locked, and
+    # both the agent envelope and the dashboard thread attribute them to that role. A
+    # seat literally named 'broker' would be indistinguishable from the broker itself,
+    # so the name is reserved.
+    if any(r.lower() == service.BROKER_ROLE for r in roles):
+        raise ValueError(
+            f"'{service.BROKER_ROLE}' is reserved for the broker's own notifications — "
+            f"pick another role name"
+        )
     if mode == "contract" and len(roles) < 2:
         # Model B: the producer is whoever proposes the contract (no hardcoded role).
         # A contract still needs at least two roles — one to produce and one to build
@@ -99,14 +122,26 @@ def create_task(id: str | None, *, title: str, roles: list[str], mode: str = "co
         elif conn.execute("SELECT 1 FROM tasks WHERE id = ?", (id,)).fetchone() is not None:
             raise ValueError(f"task '{id}' already exists")
         now = time.time()
+        staging_url = (staging_url or "").strip() or None
         conn.execute(
-            "INSERT INTO tasks (id, title, state, mode, roles_json, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (id, title, "open", mode, json.dumps(list(roles)), now),
+            "INSERT INTO tasks (id, title, state, mode, roles_json, same_machine, staging_url, "
+            "created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                id, title, "open", mode, json.dumps(list(roles)),
+                1 if same_machine else 0, staging_url, now,
+            ),
         )
         _write_event(conn, id, "task", {"text": f"Task created: {id}"})
         conn.commit()
-        return {"id": id, "state": "open", "title": title, "roles": list(roles), "mode": mode}
+        return {
+            "id": id,
+            "state": "open",
+            "title": title,
+            "roles": list(roles),
+            "mode": mode,
+            "same_machine": bool(same_machine),
+            "staging_url": staging_url,
+        }
     finally:
         conn.close()
 
@@ -248,6 +283,56 @@ def close_task(task: str) -> None:
     finally:
         conn.close()
     audit.event("task_closed", task=task)
+
+
+def _assert_task(conn: sqlite3.Connection, task: str) -> None:
+    """Fail with the task id, not with "no todo N" — the host mistyped one of two args
+    and has to be told which."""
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task,)).fetchone() is None:
+        raise ValueError(f"unknown task '{task}'")
+
+
+def list_todos(task: str) -> tuple[list[dict], dict | None]:
+    """Every todo on ``task`` plus its rollup, for the host's CLI view.
+
+    Returns ``(todos, rollup)``; the rollup is ``None`` when the task has no live todos
+    (``todos.rollup``), i.e. exactly when the task still runs its own state machine.
+    Read-only — the host's one WRITE here is :func:`host_drop_todo`.
+    """
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        return todos.get_todos(conn, task), todos.rollup(conn, task)
+    finally:
+        conn.close()
+
+
+def host_drop_todo(task: str, todo: int, reason: str) -> tuple[dict, dict | None]:
+    """Drop a todo unilaterally, as the HOST. The escape hatch, and the only one.
+
+    A mutual ``drop_todo`` needs every named party's consent — including the party whose
+    human went offline and is the whole reason you want it gone — so that path deadlocks
+    on exactly the person who is missing. This is why the escape hatch is HUMAN and lives
+    here and in the desktop app rather than as a tool: no peer may ever remove a peer,
+    or the moment one objects to a shape the other removes it and locks without the
+    dissent ("both sides sign" quietly becomes "whoever proposes wins").
+
+    ``todos.host_drop_todo`` posts the who/why to the task thread as the BROKER's own
+    seat, so the absent party's agent finds an explanation instead of vanished work.
+
+    Returns ``(dropped_todo, task_rollup)`` — the rollup so the caller can print what the
+    task now reports, and ``None`` there when the last live todo just went (the task is
+    back on its own state machine).
+    """
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        result = todos.host_drop_todo(conn, task, todo, reason)
+        roll = todos.rollup(conn, task)
+    finally:
+        conn.close()
+    audit.event("todo_dropped", task=task, todo=result["id"], by=todos.HOST)
+    return result, roll
 
 
 def list_tasks() -> list[dict]:

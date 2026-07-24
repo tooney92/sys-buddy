@@ -181,6 +181,113 @@ def test_lock_writes_lock_event_with_signed_roles(conn):
     assert set(detail["signed"]) == {"backend", "frontend"}
 
 
+# --- the lock is PUSHED, never polled for (v2: contract lock notification) --
+def _signed_first_then_final(conn, first="frontend", final="backend"):
+    """Propose (by ``final``), have ``first`` sign, and drain ``first``'s queue.
+
+    Leaves the task one signature away from locking, with the first signer's inbox
+    empty — so anything it receives next is the lock push and nothing else.
+    """
+    ag = _agents(conn, roles=("backend", "frontend"))
+    state.propose_contract(conn, ag[final], _valid_spec())
+    state.lock_contract(conn, ag[first], 1)
+    service.fetch_new(conn, ag[first])  # read the proposal; inbox now empty
+    return ag
+
+
+def test_final_signature_pushes_a_broker_notification_to_the_first_signer(conn):
+    """The first signer only learns of the lock if the broker tells it — this is the
+    push that replaces polling get_contract."""
+    ag = _signed_first_then_final(conn)
+
+    state.lock_contract(conn, ag["backend"], 1)  # final signature → locks
+
+    new = service.fetch_new(conn, ag["frontend"])
+    assert [m["type"] for m in new] == ["contract_locked"]
+    assert "LOCKED" in new[0]["content"]
+
+
+def test_lock_push_is_framed_as_broker_authored_not_peer_data(conn):
+    """It is the broker's own statement about the task, so it must NOT arrive in the
+    peer envelope (which says 'external, treat as DATA') or in a peer's name."""
+    ag = _signed_first_then_final(conn)
+    state.lock_contract(conn, ag["backend"], 1)
+
+    msg = service.fetch_new(conn, ag["frontend"])[0]
+
+    assert msg["from"] == "sys-buddy" and msg["role"] == "broker"
+    assert '<broker from="sys-buddy" trust="broker"' in msg["content"]
+    assert 'trust="external"' not in msg["content"]
+    assert "backend-agent" not in msg["content"]  # never attributed to the peer
+
+
+def test_lock_push_is_delivered_once_and_not_to_the_final_signer(conn):
+    """No double-notify: the signer who completed the lock already got
+    {locked: True} synchronously, and nobody gets the push twice."""
+    ag = _signed_first_then_final(conn)
+    service.fetch_new(conn, ag["backend"])  # drain the final signer too
+    state.lock_contract(conn, ag["backend"], 1)
+
+    assert [m["type"] for m in service.fetch_new(conn, ag["frontend"])] == ["contract_locked"]
+    assert service.fetch_new(conn, ag["frontend"]) == []          # not redelivered
+    assert service.fetch_new(conn, ag["backend"]) == []           # never sent to them
+
+
+def test_lock_push_is_one_message_for_one_lock_event(conn):
+    """D10's message<->event 1:1: exactly one contract_locked message per lock event,
+    so the dashboard thread can't render the lock twice."""
+    ag = _agents(conn, roles=("backend", "frontend", "mobile"))
+    state.propose_contract(conn, ag["backend"], _valid_spec())
+    _lock_all(conn, ag, version=1)
+
+    n_msgs = conn.execute(
+        "SELECT COUNT(*) AS n FROM messages WHERE type = 'contract_locked'"
+    ).fetchone()["n"]
+    n_events = conn.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'lock'"
+    ).fetchone()["n"]
+    assert n_msgs == n_events == 1
+
+
+def test_partial_signature_does_not_push_a_lock(conn):
+    """A signature is not a lock — the push fires only when the contract actually
+    locks, so an agent woken by it can trust what it says."""
+    ag = _agents(conn, roles=("backend", "frontend", "mobile"))
+    state.propose_contract(conn, ag["backend"], _valid_spec())
+    state.lock_contract(conn, ag["backend"], 1)
+    state.lock_contract(conn, ag["frontend"], 1)
+
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM messages WHERE type = 'contract_locked'"
+    ).fetchone()["n"] == 0
+
+
+def test_parked_wait_for_message_wakes_on_the_lock(conn, monkeypatch):
+    """The whole point: an agent asleep in wait_for_message is woken BY the lock.
+
+    Before this existed, the lock was only an event + a synchronous return value, so a
+    parked first signer slept straight through the lock it was waiting for.
+    """
+    import asyncio
+
+    from sys_buddy import tools
+
+    ag = _signed_first_then_final(conn)
+    monkeypatch.setattr(tools, "POLL_INTERVAL", 0.05)  # keep the test quick
+
+    async def scenario():
+        waiter = asyncio.create_task(tools._op_wait(ag["frontend"], timeout_seconds=5))
+        await asyncio.sleep(0.2)
+        assert not waiter.done()  # genuinely parked: nothing has happened yet
+        state.lock_contract(conn, ag["backend"], 1)  # the final signature lands
+        return await asyncio.wait_for(waiter, 5)
+
+    woken_with = asyncio.run(scenario())
+
+    assert [m["type"] for m in woken_with] == ["contract_locked"]
+    assert state.get_contract(conn, "signin")["locked"] is True
+
+
 # --- get_contract: staging_url from the contract, not chat ------------------
 def test_get_contract_returns_locked_staging_url(conn):
     ag = _agents(conn, roles=("backend", "frontend"))
@@ -460,3 +567,120 @@ def test_non_backend_producer_full_flow(conn):
 
     r = state.report_status(conn, ag["mobile"], state.STATUS_VERIFIED, "all good")
     assert r["state"] == state.VERIFIED
+
+
+# --- staging_url strictness keys on CONNECTIVITY, not the broker's auth mode --
+# The GUI always runs the broker in remote mode (token auth needs it), so a
+# same-machine task must still be able to name http://localhost:PORT.
+def _remote_mode(conn):
+    from sys_buddy.config import Config, get_config, set_config
+    set_config(Config(mode="remote", db_path=get_config().db_path))
+
+
+def _preflight_passed(conn, ag):
+    for ident in ag.values():
+        conn.execute("UPDATE agents SET ready = 1 WHERE id = ?", (ident.agent_id,))
+    conn.commit()
+
+
+def _mark(conn, task="signin", *, same_machine=None, staging_url=None):
+    if same_machine is not None:
+        conn.execute(
+            "UPDATE tasks SET same_machine = ? WHERE id = ?", (1 if same_machine else 0, task)
+        )
+    if staging_url is not None:
+        conn.execute("UPDATE tasks SET staging_url = ? WHERE id = ?", (staging_url, task))
+    conn.commit()
+
+
+def test_propose_allows_localhost_on_same_machine_task_in_remote_mode(conn):
+    _remote_mode(conn)
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=True)
+    result = state.propose_contract(
+        conn, ag["backend"], _valid_spec(url="http://localhost:3000")
+    )
+    assert result["state"] == state.CONTRACT_PROPOSED
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:3000",
+    "http://api-staging.example.com",
+    "https://127.0.0.1/admin",
+    "https://169.254.169.254/latest/meta-data/",
+    "https://10.0.0.5/api",
+])
+def test_propose_rejects_localhost_and_ssrf_on_remote_task(conn, url):
+    """REGRESSION: a task with a real tunnel/public origin (same_machine = 0) keeps
+    the full https + SSRF rules — nothing about the new lenient path leaks into it."""
+    _remote_mode(conn)
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=False)
+    with pytest.raises(ValueError, match="staging_url"):
+        state.propose_contract(conn, ag["backend"], _valid_spec(url=url))
+    assert _task_state(conn) == state.OPEN
+
+
+def test_same_machine_flag_is_ignored_when_broker_has_a_public_origin(conn):
+    """Defence in depth: even a same_machine=1 row stays strict while THIS process is
+    reachable at a public origin — a peer may well be off-box."""
+    from sys_buddy.config import Config, get_config, set_config
+    set_config(Config(
+        mode="remote", db_path=get_config().db_path, public_url="https://abc.ngrok-free.app"
+    ))
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=True)
+    with pytest.raises(ValueError, match="staging_url"):
+        state.propose_contract(conn, ag["backend"], _valid_spec(url="http://localhost:3000"))
+
+
+def test_task_defaults_to_strict_when_nothing_declared(conn):
+    """A task created by any path that doesn't declare connectivity is strict."""
+    _remote_mode(conn)
+    ag = _agents(conn)  # seeded without touching same_machine
+    _preflight_passed(conn, ag)
+    with pytest.raises(ValueError, match="staging_url"):
+        state.propose_contract(conn, ag["backend"], _valid_spec(url="http://localhost:3000"))
+
+
+# --- the host-chosen staging_url is inherited by the proposal ---------------
+def _contract_spec(conn, task="signin", version=1) -> dict:
+    row = conn.execute(
+        "SELECT spec_json FROM contracts WHERE task_id = ? AND version = ?", (task, version)
+    ).fetchone()
+    import json as _json
+    return _json.loads(row["spec_json"])
+
+
+def test_proposal_inherits_the_host_chosen_staging_url(conn):
+    _remote_mode(conn)
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=True, staging_url="http://localhost:4321")
+    spec = _valid_spec()
+    del spec["staging_url"]                      # agent didn't invent one
+    state.propose_contract(conn, ag["backend"], spec)
+    assert _contract_spec(conn)["staging_url"] == "http://localhost:4321"
+
+
+def test_explicit_staging_url_still_wins_over_the_task_default(conn):
+    ag = _agents(conn)
+    _mark(conn, staging_url="https://host-chose.example.com")
+    state.propose_contract(conn, ag["backend"], _valid_spec(url="https://agent-chose.example.com"))
+    assert _contract_spec(conn)["staging_url"] == "https://agent-chose.example.com"
+
+
+def test_inherited_staging_url_is_still_validated(conn):
+    """Inheritance is a convenience, not a bypass: a remote task can't inherit a
+    localhost target."""
+    _remote_mode(conn)
+    ag = _agents(conn)
+    _preflight_passed(conn, ag)
+    _mark(conn, same_machine=False, staging_url="http://localhost:4321")
+    spec = _valid_spec()
+    del spec["staging_url"]
+    with pytest.raises(ValueError, match="staging_url"):
+        state.propose_contract(conn, ag["backend"], spec)

@@ -6,16 +6,23 @@ task, so ``/api/tasks`` returns exactly that one task and ``/api/task/{id}`` ref
 any other id with 403. The client never filters for security — the server only ever
 hands back what the token permits (SPEC §9, §12 "two corrections to the prototype").
 
-Every route is read-only. The query logic is factored into ``_``-prefixed helpers
-that take an open connection so they can be unit-tested without a running HTTP
-server (see ``tests/test_api.py``); the ``async def`` handlers are thin shells that
-resolve the viewer token, enforce scope, open/close a connection, and serialise.
+Every route is read-only, and stays that way (DECISIONS D11): the dashboard surfaces
+state and tells the human what to type — it never acts. The viewer token is
+read-scoped (D7), so a leaked ``?v=`` link must only ever be able to LOOK; a single
+write route here would be the first crack in that. Host ACTIONS live in the CLI
+(``sys-buddy todo drop``) and the desktop app, never behind this origin.
+
+The query logic is factored into ``_``-prefixed helpers that take an open connection
+so they can be unit-tested without a running HTTP server (see ``tests/test_api.py``);
+the ``async def`` handlers are thin shells that resolve the viewer token, enforce
+scope, open/close a connection, and serialise.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -26,13 +33,28 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import identity, readiness
+from . import identity, readiness, service, todos
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
 
 # HTTP verb set is small; the event ``kind`` set is fixed by the state machine.
-_EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "token"}
+# ``todo`` is ONE kind carrying the specific action inside its detail (todos._event),
+# so the dashboard's filter vocabulary stays fixed as the todo actions grow.
+_EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "token", "todo"}
+
+# Fallback for the UI's ``⟨api123⟩`` chip on rows written before the
+# ``messages.todo_id`` column existed: scrape "todo #N" from the body. New rows
+# carry the id in the column and never reach this; a matched id is validated against
+# the task's real todos either way (see ``_messages_for``), so a stale "#999" gets
+# no chip.
+_TODO_REF_RE = re.compile(r"\btodos?\s*#(\d+)", re.IGNORECASE)
+
+# Sort buckets for the todo panel. A PENDING todo is the only thing on that screen
+# blocking a human — it is a request, not progress — so it sorts to the top; a dropped
+# one no longer counts toward the task, so it sinks. Everything in between keeps
+# creation order, which is the order the humans discussed it in.
+_TODO_ORDER = {todos.PENDING: 0, todos.DROPPED: 2}
 
 
 # --------------------------------------------------------------------------- #
@@ -88,6 +110,20 @@ def _render_detail(kind: str, detail: dict) -> str:
         if passed:
             return "Tests passed"
         return f"Tests failed (strike {strike})" if strike is not None else "Tests failed"
+    if kind == "todo":
+        # One event kind, the action inside it (todos._event). Read the action back out
+        # so the log reads as a sentence instead of a JSON dump.
+        action = (detail.get("action") or "todo").removeprefix("todo_")
+        title = detail.get("title")
+        text = f"Todo #{detail.get('todo_id', '?')}"
+        if title:
+            text += f" '{title}'"
+        text += f" {action}"
+        if detail.get("by"):
+            text += f" by {detail['by']}"
+        if detail.get("reason"):
+            text += f": {detail['reason']}"
+        return text
     # Everything else (slack, token, task, resolved, …) carries free-form detail;
     # surface a text/message field if present, else a compact JSON dump.
     return detail.get("text") or detail.get("message") or json.dumps(detail)
@@ -151,17 +187,22 @@ def _list_tasks_for(conn, viewer: ViewerIdentity, *, now: float | None = None) -
 
     out = []
     for r in rows:
-        out.append(
-            {
-                "id": r["id"],
-                "title": r["title"],
-                "state": r["state"],
-                "mode": r["mode"] or "contract",
-                "roles": json.loads(r["roles_json"]),
-                "last": _time_ago(_last_activity(conn, r["id"], r["created_at"]), now=now),
-                "strikes": r["strikes"],
-            }
-        )
+        row = {
+            "id": r["id"],
+            "title": r["title"],
+            "state": r["state"],
+            "mode": r["mode"] or "contract",
+            "roles": json.loads(r["roles_json"]),
+            "last": _time_ago(_last_activity(conn, r["id"], r["created_at"]), now=now),
+            "strikes": r["strikes"],
+        }
+        # The list row carries the same rollup as the task view ("2/6 verified ⚠1") so a
+        # host can triage without opening anything. ABSENT — not empty — for a task with
+        # no todos, so a pre-todo row serialises byte-identically to before.
+        roll = todos.rollup(conn, r["id"])
+        if roll is not None:
+            row["todo_rollup"] = roll
+        out.append(row)
     return out
 
 
@@ -188,18 +229,33 @@ def _times_for(conn, task_id: str, created_at: float) -> dict:
     return times
 
 
-def _contract_for(conn, task_id: str) -> dict:
+def _contract_for(conn, task_id: str, *, todo_id: int | None = None) -> dict:
     """The contract block: versions, the default to show, and per-version data.
 
     ``default`` is the latest *locked* version (that's the one agents integrate
     against), or the latest version if none is locked yet, or ``None`` when no
     contract has been proposed. Empty state: ``exists=False`` with empty
     ``versions``/``data`` so the UI can render its "awaiting contract" panel.
+
+    ``todo_id=None`` means the TASK-level chain (``contracts.todo_id IS NULL``) — every
+    contract that existed before todos, and every task that never grows one. Passing a
+    todo id gives that deliverable's own chain, which is what the right-hand panel
+    renders when a todo is selected: same shape, same renderer, one level down. The two
+    are kept apart on purpose — folding six todos' contracts into the task card would
+    show a jumble of unrelated shapes under a single "API contract" heading.
     """
-    contracts = conn.execute(
-        "SELECT id, version, spec_json, status FROM contracts WHERE task_id = ? ORDER BY version",
-        (task_id,),
-    ).fetchall()
+    if todo_id is None:
+        contracts = conn.execute(
+            "SELECT id, version, spec_json, status FROM contracts "
+            "WHERE task_id = ? AND todo_id IS NULL ORDER BY version",
+            (task_id,),
+        ).fetchall()
+    else:
+        contracts = conn.execute(
+            "SELECT id, version, spec_json, status FROM contracts "
+            "WHERE task_id = ? AND todo_id = ? ORDER BY version",
+            (task_id, todo_id),
+        ).fetchall()
     if not contracts:
         return {"exists": False, "versions": [], "default": None, "data": {}}
 
@@ -241,6 +297,28 @@ def _contract_for(conn, task_id: str) -> dict:
     }
 
 
+def _todos_for(conn, task_id: str) -> list[dict]:
+    """The todo panel: every todo on the task, each with its own contract block.
+
+    The wire shape is ``todos.to_dict`` verbatim (so the dashboard and the agents'
+    ``get_todos`` never drift) plus two view-only additions: ``time`` for the mono
+    HH:MM the rest of the dashboard uses, and ``contract`` — this deliverable's own
+    chain in exactly the shape the task card already renders.
+
+    Nothing is withheld by stage: a todo is a title, a scope and a party list, with no
+    ``staging_url`` equivalent to protect until agreement (its contract block does the
+    withholding that needs doing, at the task level, as before).
+    """
+    out = []
+    for t in todos.get_todos(conn, task_id):
+        d = dict(t)
+        d["time"] = _hhmm(t["created_at"])
+        d["contract"] = _contract_for(conn, task_id, todo_id=t["id"])
+        out.append(d)
+    out.sort(key=lambda t: (_TODO_ORDER.get(t["status"], 1), t["id"]))
+    return out
+
+
 def _messages_for(conn, task_id: str) -> list[dict]:
     """Agent messages for the thread, oldest-first, with role joined in.
 
@@ -253,6 +331,19 @@ def _messages_for(conn, task_id: str) -> list[dict]:
     ``strike`` is otherwise derived for ``test_result`` messages by zipping them,
     in order, to the ``test`` events the state machine writes 1:1 for each — so a
     failing test shows "strike N" without trusting anything in the free-form body.
+
+    ``todo`` is the id of the deliverable a message belongs to, when it names one — the
+    UI's ``⟨api123⟩`` chip. ONE thread per task is deliberate (six threads would
+    fragment a conversation that is genuinely one conversation, and you would lose "we
+    discussed refunds while building payments"), so the chip is how a message is
+    attributed to a deliverable rather than filed under it. Absent when the message
+    belongs to no todo.
+
+    Broker-authored notifications (``service.BROKER_TYPES``, e.g. ``contract_locked``)
+    are attributed to the ``broker`` role rather than to the agent row that triggered
+    them: the human thread must not show broker words in a peer's voice. They render
+    once, as a single bubble — the ``lock`` EVENT is what draws the thread divider, and
+    the two are 1:1, so nothing is duplicated.
     """
     # Strikes recorded by the broker for each test cycle, in order.
     test_strikes = [
@@ -265,7 +356,7 @@ def _messages_for(conn, task_id: str) -> list[dict]:
 
     rows = conn.execute(
         """
-        SELECT m.id, m.type, m.body_json, m.to_role, m.created_at, a.role AS role
+        SELECT m.id, m.type, m.body_json, m.to_role, m.todo_id, m.created_at, a.role AS role
         FROM messages m
         JOIN agents a ON a.id = m.from_agent_id
         WHERE m.task_id = ?
@@ -276,9 +367,11 @@ def _messages_for(conn, task_id: str) -> list[dict]:
 
     out = []
     test_idx = 0
+    todo_ids: set[int] | None = None  # loaded lazily: a pre-todo task never queries it
     for r in rows:
         body = json.loads(r["body_json"])
-        msg: dict = {"id": r["id"], "role": r["role"], "type": r["type"], "to_role": r["to_role"], "time": _hhmm(r["created_at"]), "ts": r["created_at"]}
+        role = service.BROKER_ROLE if r["type"] in service.BROKER_TYPES else r["role"]
+        msg: dict = {"id": r["id"], "role": role, "type": r["type"], "to_role": r["to_role"], "time": _hhmm(r["created_at"]), "ts": r["created_at"]}
         if isinstance(body, dict):
             msg["body"] = body.get("text") or body.get("body") or ""
             if "code" in body:
@@ -294,6 +387,27 @@ def _messages_for(conn, task_id: str) -> list[dict]:
                 if strike is not None:
                     msg["strike"] = strike
                 test_idx += 1
+
+        # Which deliverable this message belongs to (the UI's ⟨todo⟩ chip). The
+        # authoritative source is the ``messages.todo_id`` column, set at post time.
+        # A row written before that column existed carries NULL, so we fall back to
+        # scraping "todo #N" from any body that references one. Either candidate is
+        # validated against this TASK's real todos, so a stale/foreign "#999" gets no
+        # chip rather than one pointing at nothing.
+        cand = r["todo_id"]
+        if cand is None:
+            ref = _TODO_REF_RE.search(str(msg.get("body") or ""))
+            cand = int(ref.group(1)) if ref is not None else None
+        if cand is not None:
+            if todo_ids is None:
+                todo_ids = {
+                    row["id"]
+                    for row in conn.execute(
+                        "SELECT id FROM todos WHERE task_id = ?", (task_id,)
+                    ).fetchall()
+                }
+            if cand in todo_ids:
+                msg["todo"] = cand
         out.append(msg)
     return out
 
@@ -327,12 +441,19 @@ def _agents_for(conn, task_id: str) -> list[dict]:
     FAILED attempt from a not-yet-attempted one — ``ready`` alone can't — and
     ``readiness_report`` carries the per-question results (parsed) so the human can see
     WHY it failed and coach the agent to retry.
+
+    ``listening`` is presence: the agent is parked in ``wait_for_message`` right now.
+    It's computed here (``listening_until > now``) rather than stored as a boolean, so
+    a broker crash that never cleared the stamp lapses on its own. ``listening_since``
+    is the streak start, for the dashboard's "listening — 42m".
     """
     rows = conn.execute(
-        "SELECT name, role, ready, readiness_status, readiness_report "
+        "SELECT name, role, ready, readiness_status, readiness_report, "
+        "listening_until, listening_since "
         "FROM agents WHERE task_id = ? AND revoked_at IS NULL ORDER BY id",
         (task_id,),
     ).fetchall()
+    now = time.time()
     out = []
     for r in rows:
         try:
@@ -345,6 +466,8 @@ def _agents_for(conn, task_id: str) -> list[dict]:
             "ready": bool(r["ready"]),
             "readiness_status": r["readiness_status"] or "pending",
             "readiness_report": report,
+            "listening": service.is_listening(r["listening_until"], now),
+            "listening_since": r["listening_since"],
         })
     return out
 
@@ -354,6 +477,14 @@ def _task_detail(conn, task_id: str) -> dict | None:
 
     Composes the building blocks above. Callers must already have checked viewer
     scope; this function is scope-agnostic (it's reused by both host and buddy).
+
+    The three ``todo*`` keys are ADDITIVE and OMITTED ENTIRELY for a task that has no
+    todos, so every pre-todo task serialises byte-identically to before this feature —
+    that is what keeps the deployed ``ui.html`` working, and it is the same "the single
+    switch" property ``todos.has_todos`` gives the tools. In the other direction,
+    ``ui.html`` is served from disk and can be NEWER than the running ``api.py`` across a
+    restart, so the page must treat all three as optional (``d.todos || []``) exactly as
+    it already falls back on the thread's raw ``ts``.
     """
     t = conn.execute(
         "SELECT id, title, state, mode, roles_json, strikes, created_at FROM tasks WHERE id = ?",
@@ -361,7 +492,7 @@ def _task_detail(conn, task_id: str) -> dict | None:
     ).fetchone()
     if t is None:
         return None
-    return {
+    detail = {
         "id": t["id"],
         "title": t["title"],
         "state": t["state"],
@@ -375,6 +506,16 @@ def _task_detail(conn, task_id: str) -> dict | None:
         "agents": _agents_for(conn, task_id),
         "readiness_preview": readiness.preview_questions(),
     }
+    todo_list = _todos_for(conn, task_id)
+    if todo_list:
+        # `has_todos` is the stepper switch and is NOT `len(todos) > 0`: a task whose
+        # todos were all DROPPED runs on its own state machine again (todos.has_todos),
+        # but the dropped rows stay visible so the human reads a decision rather than
+        # finding a hole. `todo_rollup` is None in exactly that case.
+        detail["has_todos"] = todos.has_todos(conn, task_id)
+        detail["todos"] = todo_list
+        detail["todo_rollup"] = todos.rollup(conn, task_id)
+    return detail
 
 
 # --------------------------------------------------------------------------- #
@@ -407,8 +548,15 @@ def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
         last = _last_activity(conn, tid, created_at)
 
         # List-level fingerprint: membership + coarse per-task state (NOT the
-        # wall-clock "last ago" string, which would churn every second).
-        list_parts.append(f"{tid}|{t['state']}|{t['strikes']}|{last!r}")
+        # wall-clock "last ago" string, which would churn every second). The rollup
+        # counts join it so the row's "2/6 verified ⚠1" refreshes live; the suffix is
+        # absent for a task with no todos, leaving pre-todo tokens unchanged.
+        roll = t.get("todo_rollup")
+        roll_part = (
+            f"|{roll['verified']}/{roll['total']}|{roll['pending']}|{roll['stuck']}|{roll['state']}"
+            if roll else ""
+        )
+        list_parts.append(f"{tid}|{t['state']}|{t['strikes']}|{last!r}{roll_part}")
 
         # Detail-level fingerprint: reuse the same helpers the /api/task route
         # composes from, then reduce to counts + the fields the UI actually renders.
@@ -419,14 +567,31 @@ def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
             "last": last,
             "messages": len(_messages_for(conn, tid)),
             "events": len(_events_for(conn, tid)),
+            # `listening` is in the fingerprint (the bool, never the raw expiry) so the
+            # live presence dot flips over SSE. It moves only on a start/stop — unlike
+            # the timestamp, which would churn the token every tick.
             "agents": [
-                [a["role"], a["ready"], a["readiness_status"]] for a in _agents_for(conn, tid)
+                [a["role"], a["ready"], a["readiness_status"], a["listening"]]
+                for a in _agents_for(conn, tid)
             ],
             "contract": [
                 [v["id"], v["locked"], len(contract["data"][v["id"]]["signed"])]
                 for v in contract["versions"]
             ],
         }
+        # Todos move the detail token on every part the panel renders — a new acceptance,
+        # a decline, a repropose, a march step, a stuck flag, a drop. Added as a key only
+        # when the task HAS todos, so a pre-todo task's token is byte-identical to before.
+        task_todos = _todos_for(conn, tid)
+        if task_todos:
+            fingerprint["todos"] = [
+                [
+                    d["id"], d["version"], d["status"], d["state"], d["stuck"],
+                    d["accepted_by"], d["declined_by"], d["parties"],
+                    d["contract_versions"], d["locked_versions"], d["drop_consents"],
+                ]
+                for d in task_todos
+            ]
         task_tokens[tid] = json.dumps(fingerprint, sort_keys=True)
 
     return json.dumps(sorted(list_parts)), task_tokens
@@ -533,6 +698,12 @@ def _resolve(request, conn) -> ViewerIdentity | None:
 # --------------------------------------------------------------------------- #
 def register_api_routes(mcp, cfg: Config) -> None:
     """Register the read-only dashboard routes on the FastMCP app.
+
+    Every route below is ``methods=["GET"]`` and that is a HARD invariant, not a
+    coincidence (D11): there is no POST/PUT/PATCH/DELETE on this surface, including for
+    the host's todo drop. A host acts through ``sys-buddy todo drop`` or the desktop app,
+    whose window loads from disk on a trusted origin; the dashboard's ``[Drop todo]``
+    only ever deep-links there, the way ``gui._DashApi.new_task`` already does.
 
     ``cfg`` is accepted for symmetry with ``register_tools`` and future use (e.g.
     mode-dependent behaviour); the routes themselves are mode-independent.

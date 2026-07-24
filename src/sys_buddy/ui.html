@@ -66,11 +66,31 @@ button{font-family:inherit}
 var SK={open:'open',contract_proposed:'proposed',contract_locked:'locked',backend_live:'live',testing:'testing',verified:'verified',stuck:'stuck'};
 var SLAB={open:'open',contract_proposed:'planning',contract_locked:'contract locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
 var ORDER={open:0,contract_proposed:1,contract_locked:2,backend_live:3,testing:4,verified:5};
-var RL={backend:{i:'B',c:'var(--role-backend)',label:'backend'},frontend:{i:'F',c:'var(--role-frontend)',label:'frontend'},mobile:{i:'M',c:'var(--role-mobile)',label:'mobile'}};
+// `broker` is not an agent seat — it's the broker's own voice, used for the
+// notifications it authors (e.g. contract_locked). Neutral system colour so it never
+// reads as one of the peers talking.
+var RL={backend:{i:'B',c:'var(--role-backend)',label:'backend'},frontend:{i:'F',c:'var(--role-frontend)',label:'frontend'},mobile:{i:'M',c:'var(--role-mobile)',label:'mobile'},broker:{i:'SB',c:'var(--role-system)',label:'sys-buddy'}};
 // The 'preflight' node has no matching task state — it's a sub-phase of 'open',
 // driven by per-agent readiness (see genSteps). ORDER above stays keyed on the REAL
 // task states; genSteps maps real→display indices around the inserted node.
 var STEPS=[['open','open'],['preflight','pre-flight assessments'],['contract_proposed','planning'],['contract_locked','locked'],['backend_live','backend live'],['testing','testing'],['verified','verified']];
+/* ---------- todos (v2) ----------
+   When a task has todos the stepper TRUNCATES, it does not die: `open` and `pre-flight
+   assessments` stay task-level (you pair once, at the task), and the five later phases
+   fan OUT into each todo. Same component, same visual language, three nodes.
+   EVERY todo branch below is dead for a task with no todos — the API omits the
+   `has_todos`/`todos`/`todo_rollup` keys entirely, so a pre-todo payload renders on
+   exactly the code paths that shipped before. */
+var STEPS_TODO=[['open','open'],['preflight','pre-flight assessments'],['todos','todos']];
+/* The mini-stepper INSIDE a todo — the five dropped phases folded to four nodes, so
+   nobody learns a second idiom; it is the familiar widget one level down. `testing`
+   shares the `build` node: a todo under test is still being built until it verifies. */
+var TODO_STEPS=[['planning','planning'],['locked','locked'],['build','build'],['verified','verified']];
+var TODO_MARCH={open:0,contract_proposed:0,contract_locked:1,backend_live:2,testing:2,verified:3};
+/* The AGREEMENT stage (todo.status) — NOT the march above. `pending` borrows the amber
+   `testing` palette on purpose: it is the one row on this screen asking a human for
+   something, so it reads as a request, and it is the row that carries the ⚠. */
+var TODO_STATUS={pending:'testing',accepted:'proposed',contracted:'locked',verified:'verified',dropped:'open'};
 var MAX_STRIKES=3;
 var MONO="'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace";
 
@@ -79,14 +99,22 @@ function stateChip(s){ var k=SK[s]||'open'; return {label:SLAB[s]||s, bg:'var(--
 function methodChip(m){ var k=({GET:'proposed',POST:'live',PUT:'locked',PATCH:'testing',DELETE:'stuck'})[m]||'open'; return {bg:'var(--st-'+k+'-bg)', fg:'var(--st-'+k+'-fg)'}; }
 function typeChip(type,pass){
   var map={question:['question','open'],answer:['answer','proposed'],status_update:['status','open'],
-    contract_proposal:['contract proposal','locked'],contract_lock:['contract lock','locked'],renegotiation:['replanning','proposed'],
-    deploy_confirmed:['deploy confirmed','live'],verified:['verified','verified'],stuck:['stuck','stuck']};
+    contract_proposal:['contract proposal','locked'],contract_lock:['contract lock','locked'],
+    contract_locked:['contract locked','locked'],renegotiation:['replanning','proposed'],
+    deploy_confirmed:['deploy confirmed','live'],verified:['verified','verified'],stuck:['stuck','stuck'],
+    /* the todo conversation (v2). Additive: no pre-todo task ever carries these types. */
+    todo_proposal:['todo proposed','proposed'],todo_accept:['todo accepted','verified'],
+    todo_decline:['todo declined','stuck'],todo_drop:['todo drop','open'],
+    todo_dropped:['todo dropped','open']};
   var label,key;
   if(type==='test_result'){ label=pass?'test · pass':'test · fail'; key=pass?'verified':'stuck'; }
   else { var e=map[type]||['message','open']; label=e[0]; key=e[1]; }
   return {label:label, bg:'var(--st-'+key+'-bg)', fg:'var(--st-'+key+'-fg)'};
 }
-function eventColor(kind){ return ({transition:'var(--st-proposed-dot)',lock:'var(--st-locked-dot)',deploy:'var(--st-live-dot)',test:'var(--st-testing-dot)',slack:'var(--accent)',token:'var(--st-open-dot)',task:'var(--st-open-dot)'})[kind]||'var(--st-open-dot)'; }
+/* `todo` is ONE event kind carrying the specific action inside (api._event), so this
+   vocabulary stays fixed as the todo actions grow. Every other palette dot is already
+   spoken for, hence accent-2 — distinct from slack's accent, and not a role colour. */
+function eventColor(kind){ return ({transition:'var(--st-proposed-dot)',lock:'var(--st-locked-dot)',deploy:'var(--st-live-dot)',test:'var(--st-testing-dot)',slack:'var(--accent)',token:'var(--st-open-dot)',task:'var(--st-open-dot)',todo:'var(--accent-2)'})[kind]||'var(--st-open-dot)'; }
 
 /* small inline SVGs */
 function svg(w,inner){ return '<svg width="'+w+'" height="'+w+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'+inner+'</svg>'; }
@@ -125,6 +153,10 @@ var state = {
   loadingDetail:false,
   error:null,        // null | 'no-token' | 'unauthorized' | 'forbidden' | 'not-found' | 'network'
   expanded:{}, version:{}, eventFilter:'all', eventLogOpen:true,
+  /* which todo the right column is showing, keyed by task id (like `version`) so it
+     survives a poll refresh and leaving/returning to the task. Empty = the todo LIST.
+     MUST appear in sig() below or selecting a todo would never re-render. */
+  selectedTodo:{},
   mobileTab:'thread', switcherOpen:false, isMobile: window.innerWidth<900,
   lastRefresh:0, refreshing:false
 };
@@ -193,6 +225,27 @@ function preflightPassed(agents){
   return agents.every(function(a){ return a.readiness_status==='passed' || a.ready; });
 }
 
+/* ONE stepper node's circle + label colour, shared by all three steppers (the seven-node
+   task stepper, the truncated three-node one, and the per-todo mini-stepper) so they are
+   literally the same widget at different sizes. The glyph sizes are derived from `size`
+   and reproduce the original 28px node exactly (14/8/6). */
+function stepVisual(done,current,stuckStep,size){
+  size=size||28;
+  var chk=Math.round(size*0.5), dot=Math.round(size*0.29), pip=Math.round(size*0.215);
+  var node='width:'+size+'px;height:'+size+'px;border-radius:50%;display:flex;align-items:center;justify-content:center;position:relative;z-index:2;';
+  if(stuckStep) node+='background:var(--st-stuck-dot);';
+  else if(done) node+='background:var(--st-verified-dot);';
+  else if(current) node+='background:var(--accent);';
+  else node+='background:var(--surface);border:2px solid var(--border-strong);';
+  var inner;
+  if(done) inner='<svg width="'+chk+'" height="'+chk+'" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2"><path d="M20 6L9 17l-5-5"/></svg>';
+  else if(current) inner='<span style="width:'+dot+'px;height:'+dot+'px;border-radius:50%;background:#fff"></span><span style="position:absolute;inset:0;border-radius:50%;border:2px solid var(--accent);animation:ring 1.6s ease-out infinite"></span>';
+  else if(stuckStep) inner='<span style="color:#fff;font-weight:700;font-size:'+chk+'px">!</span>';
+  else inner='<span style="width:'+pip+'px;height:'+pip+'px;border-radius:50%;background:var(--border-strong)"></span>';
+  return {nodeStyle:node, inner:inner,
+    labelColor:(done||current)?'var(--text)':(stuckStep?'var(--st-stuck-fg)':'var(--text-3)')};
+}
+
 function genSteps(stateName, times, agents){
   times=times||{};
   var isStuck = stateName==='stuck';
@@ -221,20 +274,37 @@ function genSteps(stateName, times, agents){
   return STEPS.map(function(s,i){
     var key=s[0], m=meta[i];
     var done=m.done, current=m.current, stuckStep=m.stuck;
-    var node='width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;position:relative;z-index:2;';
-    if(stuckStep) node+='background:var(--st-stuck-dot);';
-    else if(done) node+='background:var(--st-verified-dot);';
-    else if(current) node+='background:var(--accent);';
-    else node+='background:var(--surface);border:2px solid var(--border-strong);';
+    var v=stepVisual(done,current,stuckStep,28);
     var leftColor = i===0 ? 'transparent' : (reached(m) ? 'var(--st-verified-dot)' : 'var(--border-strong)');
     var rightColor = i===last ? 'transparent' : (reached(meta[i+1]) ? 'var(--st-verified-dot)' : 'var(--border-strong)');
-    var labelColor = (done||current) ? 'var(--text)' : (stuckStep ? 'var(--st-stuck-fg)' : 'var(--text-3)');
-    var inner='';
-    if(done) inner='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2"><path d="M20 6L9 17l-5-5"/></svg>';
-    else if(current) inner='<span style="width:8px;height:8px;border-radius:50%;background:#fff"></span><span style="position:absolute;inset:0;border-radius:50%;border:2px solid var(--accent);animation:ring 1.6s ease-out infinite"></span>';
-    else if(stuckStep) inner='<span style="color:#fff;font-weight:700;font-size:14px">!</span>';
-    else inner='<span style="width:6px;height:6px;border-radius:50%;background:var(--border-strong)"></span>';
-    return {key:key, label:s[1], time:(done||current||stuckStep)?(times[key]||''):'', nodeStyle:node, inner:inner, leftColor:leftColor, rightColor:rightColor, labelColor:labelColor};
+    return {key:key, label:s[1], time:(done||current||stuckStep)?(times[key]||''):'', nodeStyle:v.nodeStyle, inner:v.inner, leftColor:leftColor, rightColor:rightColor, labelColor:v.labelColor};
+  });
+}
+
+/* The THREE-node task stepper for a task WITH todos. `open` is done the moment the task
+   exists; `pre-flight` keeps its per-seat meaning; the tail is the fan-out, summarised
+   by todoProgressTail below. Returns the identical node shape genSteps does, so
+   taskHTML's renderer is untouched. */
+function genStepsTodo(d){
+  var times=d.times||{};
+  var roll=d.todo_rollup||{};
+  var preDone=preflightPassed(d.agents);
+  var complete=!!roll.complete;
+  var meta=[
+    {done:true,current:false},
+    {done:preDone,current:!preDone},
+    /* only the frontier pulses: todos can't be the live node until pre-flight passed
+       (the broker locks the action tools until then, so this is belt-and-braces) */
+    {done:complete,current:preDone&&!complete}
+  ];
+  var last=STEPS_TODO.length-1;
+  var reached=function(m){ return m.done||m.current; };
+  return STEPS_TODO.map(function(s,i){
+    var m=meta[i], v=stepVisual(m.done,m.current,false,28);
+    return {key:s[0], label:s[1], time:(s[0]==='open'?(times.open||''):''),
+      nodeStyle:v.nodeStyle, inner:v.inner, labelColor:v.labelColor,
+      leftColor: i===0?'transparent':(reached(m)?'var(--st-verified-dot)':'var(--border-strong)'),
+      rightColor: i===last?'transparent':(reached(meta[i+1])?'var(--st-verified-dot)':'var(--border-strong)')};
   });
 }
 
@@ -247,15 +317,48 @@ function agentFor(role, name){
   for(var i=0;i<ags.length;i++){ if(ags[i].role===role || (name&&ags[i].name===name)) return ags[i]; }
   return null;
 }
-/* A small corner badge on an agent's avatar reflecting the pre-flight state:
-   green ✓ once they've passed (ready===true), amber 🔒 while they haven't.
-   '' only when the agent/readiness is unknown (no agents list). */
+/* ---------- live presence (agent parked in wait_for_message) ---------- */
+/* The broker stores an EXPIRY and the API hands us the already-computed booleans.
+   DEFENSIVE: ui.html is served fresh from disk while api.py runs from memory, so a
+   broker restarted mid-upgrade can serve this file against an older API with no
+   `listening` fields at all. Missing → "not listening", and every badge falls back
+   to exactly what shipped before (same precedent as the 1.0.1 thread-ordering fix). */
+function isListening(ag){ return !!(ag && ag.listening); }
+/* "42m" for the streak start; '' when the API is stale or the value is nonsense. */
+function listenAgo(ag){
+  var since = ag && ag.listening_since;
+  if(!since) return '';
+  var secs = Math.floor(Date.now()/1000 - since);
+  if(!isFinite(secs) || secs < 0) return '';
+  if(secs < 60) return secs+'s';
+  if(secs < 3600) return Math.floor(secs/60)+'m';
+  var h=Math.floor(secs/3600), m=Math.floor((secs%3600)/60);
+  return m ? h+'h '+m+'m' : h+'h';
+}
+function listenLabel(ag){ var d=listenAgo(ag); return d ? 'listening — '+d : 'listening'; }
+var LISTEN_TIP="Parked in wait_for_message right now — new mail wakes it immediately.";
+/* The same signal spelled out, for rows with room for words. '' when not listening
+   (and always '' against an older API, since isListening is then false). */
+function listenPill(ag){
+  if(!isListening(ag)) return '';
+  return '<span title="'+esc(LISTEN_TIP)+'" style="display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--st-verified-bg);color:var(--st-verified-fg);white-space:nowrap">'+
+    '<span style="width:6px;height:6px;border-radius:50%;background:var(--st-verified-dot);animation:pulsedot 1.8s ease-in-out infinite;flex:none"></span>'+esc(listenLabel(ag))+'</span>';
+}
+
+/* A small corner badge on an agent's avatar. Pre-flight state first — amber 🔒 while
+   they haven't passed — then it HANDS OFF: once an agent is through pre-flight the
+   badge carries the live signal, a pulsing green dot while it's listening and the
+   static green ✓ when it isn't. '' only when the agent is unknown (no agents list). */
 var LOCK_TIP="Hasn't passed the pre-flight readiness check — can't send messages or change status yet.";
 var READY_TIP="Passed the pre-flight readiness check — action tools unlocked.";
 function lockBadge(role, name){
   var ag=agentFor(role, name);
   if(!ag) return '';
   if(ag.ready){
+    if(isListening(ag)){
+      return '<span title="'+esc(listenLabel(ag)+' · '+LISTEN_TIP)+'" style="position:absolute;bottom:-3px;right:-3px;width:13px;height:13px;border-radius:50%;background:var(--surface);border:1.5px solid var(--surface);display:flex;align-items:center;justify-content:center">'+
+        '<span style="width:8px;height:8px;border-radius:50%;background:var(--st-verified-dot);animation:pulsedot 1.8s ease-in-out infinite"></span></span>';
+    }
     return '<span title="'+esc(READY_TIP)+'" style="position:absolute;bottom:-3px;right:-3px;width:13px;height:13px;border-radius:50%;background:var(--st-verified-bg);color:var(--st-verified-fg);border:1.5px solid var(--surface);display:flex;align-items:center;justify-content:center">'+
       '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>';
   }
@@ -306,7 +409,8 @@ function preflightRow(d){
            : {bg:'var(--st-open-bg)',fg:'var(--st-open-fg)',lbl:'pending'};
     return '<div style="display:flex;align-items:center;gap:8px;padding:5px 10px;background:var(--bg);border:1px solid var(--border);border-radius:9px">'+
       avatarChip(ag.role,20,9)+'<span style="font-size:12px;font-weight:600;color:var(--text)">'+esc(a.label)+'</span>'+
-      '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:'+cfg.bg+';color:'+cfg.fg+'">'+cfg.lbl+'</span></div>';
+      '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:'+cfg.bg+';color:'+cfg.fg+'">'+cfg.lbl+'</span>'+
+      listenPill(ag)+'</div>';
   }).join('');
   return '<div style="margin-top:14px;padding-top:13px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
     '<span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">Pre-flight</span>'+
@@ -456,12 +560,15 @@ function listHTML(){
     var c=stateChip(t.state);
     var avs = (t.roles||[]).map(function(r){ return avatarChip(r,22,10.5); }).join('');
     var strike = t.strikes>0 ? '<span style="display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;background:var(--st-stuck-bg);color:var(--st-stuck-fg)"><span style="width:5px;height:5px;border-radius:50%;background:var(--st-stuck-dot)"></span>strike '+t.strikes+' of '+MAX_STRIKES+'</span>' : '';
+    /* the rollup, so a host triages the list without opening anything. `todo_rollup` is
+       absent on a row with no live todos, so those rows are exactly as they were. */
+    var roll = t.todo_rollup ? rollupBadgeHTML(t.todo_rollup) : '';
     return '<div data-open="'+esc(t.id)+'" class="sb-row" style="display:flex;align-items:center;gap:16px;padding:15px 18px;background:var(--surface);border:1px solid var(--border);border-radius:14px;cursor:pointer;transition:border-color .15s,box-shadow .15s">'+
       '<span style="width:10px;height:10px;border-radius:50%;background:'+c.dot+';flex:none"></span>'+
       '<div style="flex:1;min-width:0">'+
         '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
           '<span style="font-size:15px;font-weight:600;color:var(--text)">'+esc(t.title)+'</span>'+
-          '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:600;background:'+c.bg+';color:'+c.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+c.dot+'"></span>'+esc(c.label)+'</span>'+
+          '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:600;background:'+c.bg+';color:'+c.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+c.dot+'"></span>'+esc(c.label)+'</span>'+roll+
         '</div>'+
         '<div style="display:flex;align-items:center;gap:6px;margin-top:9px">'+avs+'</div>'+
       '</div>'+
@@ -538,6 +645,9 @@ function threadItemHTML(it){
     var ta=av(m.to_role);
     toChip='<span title="directed to '+esc(ta.label)+'" style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:999px;font-family:'+MONO+';font-size:10px;font-weight:600;color:'+ta.c+';background:transparent;border:1px solid '+ta.c+'">→ '+esc(ta.label)+'</span>';
   }
+  /* ⟨todo⟩ chip: which deliverable this message belongs to. The API adds `todo` ONLY
+     when the message names one, so a pre-todo thread renders with no chip at all. */
+  var tdChip = (m.todo!=null) ? todoChipHTML(m.todo) : '';
   var code = m.code ? '<pre style="margin:11px 0 2px;background:var(--surface-3);border:1px solid var(--border);border-radius:9px;padding:11px 13px;font-family:'+MONO+';font-size:11.5px;line-height:1.55;color:var(--text-2);overflow-x:auto;white-space:pre">'+esc(m.code)+'</pre>' : '';
   var strikePill='';
   if(m.type==='test_result' && m.strike!=null){
@@ -552,7 +662,7 @@ function threadItemHTML(it){
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">'+
         '<span style="font-size:13px;font-weight:600;color:var(--text)">'+esc(a.label)+'</span>'+
         '<span style="background:'+chip.bg+';color:'+chip.fg+';padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:600">'+esc(chip.label)+'</span>'+
-        toChip+
+        toChip+tdChip+
         '<span style="font-size:11px;color:var(--text-3);font-family:'+MONO+'">'+esc(m.time)+'</span>'+
       '</div>'+
       '<div style="'+bubbleStyle(m.type,pass)+'"><span>'+esc(m.body)+'</span>'+code+strikePill+'</div>'+confetti+
@@ -575,14 +685,21 @@ function threadHTML(d){
     inner=items.map(threadItemHTML).join('');
   }
   var avs=(d.roles||[]).map(function(r){ return avatarChip(r,22,10); }).join('');
+  // Spell the presence out next to the avatars — one pill per listening agent (none
+  // when nobody is parked, or when the API predates the field).
+  var lps=((d&&d.agents)||[]).filter(isListening).map(listenPill).join('');
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
-    '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">'+
+    '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">'+
       '<span style="font-weight:600;font-size:14px;color:var(--text)">Message thread</span>'+
-      '<div style="display:flex;gap:4px">'+avs+'</div></div>'+
+      '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+lps+'<div style="display:flex;gap:4px">'+avs+'</div></div></div>'+
     '<div style="padding:20px 18px;display:flex;flex-direction:column;gap:17px;max-height:640px;overflow-y:auto">'+inner+'</div></div>';
 }
 
-/* ---------- contract panel ---------- */
+/* ---------- contract panel ----------
+   `d` needs only `id` and `contract`. The per-todo panel passes a SYNTHETIC
+   {id:'<task>#<todo>', contract:<todo.contract>} so a todo's version selection and
+   expanded endpoints are keyed apart from the task-level chain while rendering through
+   this one renderer — the todo's contract is the same shape, one level down. */
 function contractHTML(d){
   var c=d.contract||{exists:false};
   var body;
@@ -596,7 +713,9 @@ function contractHTML(d){
   }
   var selId = state.version[d.id] || c.default || (c.versions[0]&&c.versions[0].id);
   var vbtns = c.versions.map(function(v){
-    return '<button data-version="'+esc(v.id)+'" style="'+vBtnStyle(v.id===selId)+';cursor:pointer">'+(v.locked?IC.lockSmall:'')+esc(v.id)+'</button>';
+    /* data-vkey carries WHICH chain this button selects a version for — the task's, or
+       one todo's. bind() falls back to state.taskId, so the task card is unchanged. */
+    return '<button data-version="'+esc(v.id)+'" data-vkey="'+esc(d.id)+'" style="'+vBtnStyle(v.id===selId)+';cursor:pointer">'+(v.locked?IC.lockSmall:'')+esc(v.id)+'</button>';
   }).join('');
   var data = (c.data&&c.data[selId]) || {locked:false,signed:[],endpoints:[]};
   var draft = !data.locked;
@@ -653,9 +772,204 @@ function contractHTML(d){
     '<div style="padding:6px">'+eps+'</div></div>';
 }
 
+/* ---------- todo panel (the right column, when a task has todos) ----------
+   Everything from here to the event log is guarded by hasTodos(): the API omits the
+   todo keys for a pre-todo task, so none of it runs and that task's right column is
+   still contractHTML(d), untouched. */
+function hasTodos(d){ return !!(d && d.has_todos && (d.todos||[]).length); }
+function todoById(d,id){
+  var ts=(d&&d.todos)||[];
+  for(var i=0;i<ts.length;i++){ if(ts[i].id===id) return ts[i]; }
+  return null;
+}
+function selectedTodo(d){ return d ? todoById(d, state.selectedTodo[d.id]) : null; }
+
+/* The agreement stage as a chip, in the shared state palette. `stuck` is an orthogonal
+   FLAG on a todo (it must not brick the other deliverables), so it overrides the label. */
+function todoStatusChip(t){
+  var k = t.stuck ? 'stuck' : (TODO_STATUS[t.status]||'open');
+  var label = t.stuck ? 'stuck' : t.status;
+  return '<span style="display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:600;background:var(--st-'+k+'-bg);color:var(--st-'+k+'-fg);white-space:nowrap">'+
+    '<span style="width:5px;height:5px;border-radius:50%;background:var(--st-'+k+'-dot)"></span>'+esc(label)+'</span>';
+}
+
+/* "2/6 verified ⚠1" — the SAME shape on the task-list row and the panel header, so a
+   host reads one rollup in both places and can triage without opening anything.
+   `total` counts LIVE todos: a dropped deliverable is not work any more, so it is
+   reported separately rather than padding the denominator. */
+function rollupBadgeHTML(r){
+  if(!r) return '';
+  var warn = r.pending ? '<span title="'+r.pending+' awaiting acceptance" style="color:var(--st-testing-fg);font-weight:700">⚠'+r.pending+'</span>' : '';
+  var stuck = r.stuck ? '<span title="'+r.stuck+' stuck" style="color:var(--st-stuck-fg);font-weight:700">!'+r.stuck+'</span>' : '';
+  var k = r.complete ? 'verified' : 'open';
+  return '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-family:'+MONO+';font-size:11px;font-weight:600;background:var(--st-'+k+'-bg);color:var(--st-'+k+'-fg);white-space:nowrap">'+
+    (r.verified||0)+'/'+(r.total||0)+' verified'+warn+stuck+'</span>';
+}
+
+/* The tail under the `todos` stepper node: the fan-out summarised as a bar + counts,
+   sitting where the other nodes put their timestamp. */
+function todoProgressTail(d){
+  var r=d.todo_rollup;
+  if(!r) return '<span style="margin-top:3px;height:12px"></span>';
+  var total=r.total||0, done=r.verified||0;
+  var pct = total ? Math.round(done/total*100) : 0;
+  var warn = r.pending ? '<span style="font-size:10px;font-weight:700;color:var(--st-testing-fg);white-space:nowrap">⚠ '+r.pending+' awaiting acceptance</span>' : '';
+  var stuck = r.stuck ? '<span style="font-size:10px;font-weight:700;color:var(--st-stuck-fg);white-space:nowrap">⚠ '+r.stuck+' stuck</span>' : '';
+  var dropped = r.dropped ? '<span style="font-size:9.5px;color:var(--text-3);white-space:nowrap">'+r.dropped+' dropped</span>' : '';
+  return '<div style="margin-top:7px;display:flex;flex-direction:column;align-items:center;gap:3px;width:100%;max-width:190px">'+
+    '<div style="width:100%;height:6px;border-radius:999px;background:var(--surface-3);overflow:hidden"><div style="width:'+pct+'%;height:100%;border-radius:999px;background:var(--st-verified-dot)"></div></div>'+
+    '<span style="font-size:10.5px;font-weight:600;color:var(--text-2);font-family:'+MONO+'">'+done+' of '+total+' verified</span>'+
+    warn+stuck+dropped+'</div>';
+}
+
+/* ⟨#3 Login endpoint⟩ — which deliverable a message belongs to. ONE thread for the whole
+   task (six threads would fragment a conversation that is genuinely one conversation, and
+   you'd lose "we discussed refunds while building payments"); the chip does the grouping.
+   Clicking it selects that todo in the right column. */
+function todoChipHTML(id){
+  var t=todoById(state.detail,id);
+  if(!t) return '';
+  var title=String(t.title||'');
+  if(title.length>22) title=title.slice(0,21)+'…';
+  return '<button data-todo="'+t.id+'" title="'+esc('todo #'+t.id+' — '+t.title)+'" style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-family:'+MONO+';font-size:10px;font-weight:600;color:var(--accent-2);background:transparent;border:1px solid var(--accent);cursor:pointer">⟨#'+t.id+' '+esc(title)+'⟩</button>';
+}
+
+/* The list: every todo on the task, PENDING first with a ⚠ (the API already sorts
+   pending-first / dropped-last). A pending todo is the only thing on this screen blocking
+   a human — everything else is progress, that one is a request. */
+function todoListHTML(d){
+  var rows=(d.todos||[]).map(function(t){
+    var pending = t.status==='pending', dropped = t.status==='dropped';
+    var parties=(t.parties||[]).map(function(p){
+      var a=av(p);
+      return '<span title="'+esc(a.label)+'" style="width:16px;height:16px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>';
+    }).join('');
+    var note = dropped ? ('dropped'+(t.drop_reason?' — '+t.drop_reason:''))
+             : t.stuck ? (t.stuck_reason||'stuck — humans notified')
+             : pending ? ('awaiting '+((t.awaiting||[]).join(', ')||'acceptance'))
+             : t.scope;
+    var warn = pending ? '<span title="awaiting acceptance — this one is asking you for something" style="color:var(--st-testing-fg);font-size:13px;line-height:1;flex:none;padding-top:2px">⚠</span>' : '';
+    return '<button data-todo="'+t.id+'" style="width:100%;display:flex;align-items:flex-start;gap:9px;padding:10px 13px;background:transparent;border:none;border-top:1px solid var(--border);cursor:pointer;text-align:left;font-family:inherit;opacity:'+(dropped?'.55':'1')+'">'+
+      warn+
+      '<span style="flex:1;min-width:0">'+
+        '<span style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">'+
+          '<span style="font-size:12.5px;font-weight:600;color:var(--text)'+(dropped?';text-decoration:line-through':'')+'">'+esc(t.title)+'</span>'+
+          '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+t.id+'</span>'+
+          todoStatusChip(t)+
+        '</span>'+
+        '<span style="display:block;font-size:11.5px;color:var(--text-2);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(note)+'</span>'+
+      '</span>'+
+      '<span style="display:flex;gap:3px;flex:none;padding-top:2px">'+parties+'</span>'+
+      '<span style="flex:none;display:flex;padding-top:1px">'+IC.chevR+'</span></button>';
+  }).join('');
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
+    '<div style="padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">'+
+      '<span style="font-weight:600;font-size:14px;color:var(--text)">Todos</span>'+rollupBadgeHTML(d.todo_rollup)+'</div>'+
+    rows+'</div>';
+}
+
+/* The per-todo mini-stepper — genSteps' widget at 20px, one level down. */
+function todoMiniStepperHTML(t){
+  var o=TODO_MARCH[t.state]!=null?TODO_MARCH[t.state]:0;
+  var verified = t.state==='verified';
+  var last=TODO_STEPS.length-1;
+  var meta=TODO_STEPS.map(function(s,i){
+    return {done:(i<o)||(verified&&i===o), current:(i===o)&&!verified&&!t.stuck, stuck:!!t.stuck&&i===o};
+  });
+  var reached=function(m){ return m.done||m.current||m.stuck; };
+  var nodes=TODO_STEPS.map(function(s,i){
+    var m=meta[i], v=stepVisual(m.done,m.current,m.stuck,20);
+    var lc = i===0?'transparent':(reached(m)?'var(--st-verified-dot)':'var(--border-strong)');
+    var rc = i===last?'transparent':(reached(meta[i+1])?'var(--st-verified-dot)':'var(--border-strong)');
+    return '<div style="display:flex;flex-direction:column;align-items:center;flex:1;position:relative">'+
+      '<div style="position:absolute;top:9px;left:0;width:50%;height:2px;background:'+lc+'"></div>'+
+      '<div style="position:absolute;top:9px;right:0;width:50%;height:2px;background:'+rc+'"></div>'+
+      '<div style="'+v.nodeStyle+'">'+v.inner+'</div>'+
+      '<span style="margin-top:5px;font-size:9.5px;font-weight:600;text-align:center;color:'+v.labelColor+'">'+esc(s[1])+'</span></div>';
+  }).join('');
+  return '<div style="display:flex;align-items:flex-start;padding:13px 16px 11px;border-bottom:1px solid var(--border)">'+nodes+'</div>';
+}
+
+/* HOST [Drop todo] — READ-ONLY, per DECISIONS.md D11. The dashboard NEVER issues a
+   command: this prints the exact line the human types in their OWN terminal, exactly the
+   way shortcodesHTML teaches every other action. There is deliberately no button and no
+   write path — a leaked ?v= link must only ever be able to LOOK. Host viewers only; a
+   buddy can't run a host CLI, so showing it to them would be a lie. */
+function dropTodoHTML(d,t){
+  if(t.status==='dropped'||t.status==='verified') return '';
+  if(!(t.status==='pending'||t.stuck)) return '';
+  if(!(state.viewer && state.viewer.mode!=='buddy')) return '';
+  var why = t.stuck ? 'This deliverable is stuck.'
+          : 'Nothing here moves until '+esc((t.awaiting||[]).join(' and ')||'every party')+' accepts.';
+  var cmd = 'sys-buddy todo drop '+d.id+' '+t.id+' --reason "…"';
+  return '<div style="margin:12px 16px 0;padding:11px 13px;border:1px dashed var(--border-strong);border-radius:11px">'+
+    '<div style="display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;color:var(--text-2)">'+
+      '<span style="display:flex;color:var(--st-testing-fg)">'+IC.warn+'</span>Drop todo (host)</div>'+
+    '<p style="margin:6px 0 8px;font-size:11.5px;color:var(--text-2);line-height:1.5">'+why+
+      ' If it isn’t worth waiting for, drop it from your own terminal — this dashboard only ever reads.</p>'+
+    '<div style="font-family:'+MONO+';font-size:11px;color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;overflow-x:auto;white-space:pre">'+esc(cmd)+'</div></div>';
+}
+
+/* Selecting a todo swaps the panel to today's contract card scoped to THAT todo, under
+   its own header + mini-stepper. Back returns to the list. */
+function todoDetailHTML(d,t){
+  var parties=(t.parties||[]).map(function(p){
+    var a=av(p);
+    var yes=(t.accepted_by||[]).indexOf(p)>=0, no=(t.declined_by||[]).indexOf(p)>=0;
+    var mark = yes ? '<span style="color:var(--st-verified-fg);font-weight:700">✓</span>'
+             : no  ? '<span style="color:var(--st-stuck-fg);font-weight:700">✕</span>'
+             : '<span style="color:var(--text-3);font-weight:700">…</span>';
+    var tip = a.label+' — '+(yes?'accepted':(no?('declined: '+((t.decline_reasons||{})[p]||'')):'awaiting acceptance'));
+    return '<span title="'+esc(tip)+'" style="display:inline-flex;align-items:center;gap:5px;padding:2px 9px 2px 2px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border);font-size:10.5px;font-weight:600;color:var(--text-2)">'+
+      '<span style="width:16px;height:16px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+esc(a.label)+mark+'</span>';
+  }).join('');
+
+  var declines=Object.keys(t.decline_reasons||{}).map(function(r){
+    return '<div style="font-size:11.5px;color:var(--st-stuck-fg);line-height:1.5"><strong>'+esc(r)+'</strong> declined: '+esc(t.decline_reasons[r])+'</div>';
+  }).join('');
+  if(declines) declines='<div style="margin:10px 16px 0;padding:8px 11px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:10px;display:flex;flex-direction:column;gap:4px">'+declines+'</div>';
+
+  var stuckLine = t.stuck ? '<div style="margin:10px 16px 0;padding:8px 11px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:10px;font-size:11.5px;font-weight:600;color:var(--st-stuck-fg)">'+esc(t.stuck_reason||'stuck — humans notified 📣')+'</div>' : '';
+  var dropLine = t.status==='dropped' ? '<div style="margin:10px 16px 0;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;font-size:11.5px;color:var(--text-2)">Dropped by '+esc(t.dropped_by||'mutual consent')+(t.drop_reason?' — '+esc(t.drop_reason):'')+'</div>' : '';
+
+  var strikeLine='';
+  if(t.strikes>0){
+    var dots='';
+    for(var i=1;i<=MAX_STRIKES;i++){ dots+='<span style="width:6px;height:6px;border-radius:50%;background:'+(i<=t.strikes?'var(--st-stuck-dot)':'var(--border-strong)')+'"></span>'; }
+    strikeLine='<div style="margin:10px 16px 0"><span style="display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border-radius:999px;background:var(--surface);border:1px solid var(--st-stuck-dot);font-size:11.5px;font-weight:600;color:var(--st-stuck-fg)"><span style="display:flex;gap:3px">'+dots+'</span>strike '+t.strikes+' of '+MAX_STRIKES+'</span></div>';
+  }
+
+  var head='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px">'+
+    '<div style="padding:13px 16px;display:flex;align-items:flex-start;gap:10px;border-bottom:1px solid var(--border)">'+
+      '<button data-todoback="1" title="Back to all todos" style="display:flex;align-items:center;justify-content:center;width:26px;height:26px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;cursor:pointer;color:var(--text-2);flex:none">'+IC.back+'</button>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">'+
+          '<span style="font-size:13.5px;font-weight:600;color:var(--text)">'+esc(t.title)+'</span>'+
+          '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+t.id+' v'+t.version+'</span>'+
+          todoStatusChip(t)+'</div>'+
+        '<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-2);line-height:1.5">'+esc(t.scope)+'</p>'+
+      '</div></div>'+
+    todoMiniStepperHTML(t)+
+    '<div style="padding:12px 16px 0;display:flex;gap:5px;flex-wrap:wrap">'+parties+'</div>'+
+    declines+stuckLine+dropLine+strikeLine+dropTodoHTML(d,t)+
+    '<div style="height:14px"></div></div>';
+
+  /* the SAME contract card the task view has always rendered, scoped to this todo */
+  return head+contractHTML({id:d.id+'#'+t.id, contract:t.contract});
+}
+
+function todoPanelHTML(d){
+  var t=selectedTodo(d);
+  return t ? todoDetailHTML(d,t) : todoListHTML(d);
+}
+
 /* ---------- event log ---------- */
 function eventLogHTML(d){
   var FILTERS=['all','transition','lock','deploy','test','slack','token'];
+  /* `todo` joins the vocabulary only for a task that HAS todos (incl. one whose todos
+     were all dropped — its log still carries them), so a pre-todo task's filter row is
+     exactly the row that shipped. */
+  if(d && (d.todos||[]).length) FILTERS=FILTERS.concat(['todo']);
   var filter=state.eventFilter;
   var fbtns=FILTERS.map(function(f){ return '<button data-filter="'+f+'" style="'+filterStyle(filter===f)+'">'+f+'</button>'; }).join('');
   var evs=(d.events||[]).filter(function(e){ return filter==='all'||e[1]===filter; });
@@ -805,13 +1119,18 @@ function taskHTML(){
   if(d.mode==='debug') return debugTaskHTML(d);
   var m=state.isMobile;
   var chip=stateChip(d.state);
-  var steps=genSteps(d.state, d.times, d.agents);
+  /* The stepper TRUNCATES when this task has todos — same component, three nodes. A task
+     with no todos (and a task whose todos were all dropped, where has_todos is false)
+     keeps today's full seven-node stepper, unchanged. */
+  var todos=hasTodos(d);
+  var steps=todos ? genStepsTodo(d) : genSteps(d.state, d.times, d.agents);
   var stuck=d.state==='stuck';
 
   var stepsHTML=steps.map(function(s){
-    // The pre-flight node shows host/buddy status pills in place of a timestamp.
-    var tail = s.key==='preflight'
-      ? preflightPills(d)
+    // The pre-flight node shows host/buddy status pills in place of a timestamp; the
+    // `todos` node shows the fan-out's progress bar and counts.
+    var tail = s.key==='preflight' ? preflightPills(d)
+      : s.key==='todos' ? todoProgressTail(d)
       : '<span style="margin-top:3px;font-size:10px;font-family:'+MONO+';color:var(--text-3);height:12px">'+esc(s.time)+'</span>';
     return '<div style="display:flex;flex-direction:column;align-items:center;flex:1;position:relative;padding-top:4px">'+
       '<div style="position:absolute;top:18px;left:0;width:50%;height:2px;background:'+s.leftColor+'"></div>'+
@@ -826,7 +1145,7 @@ function taskHTML(){
 
   var mobileTabs = m ? '<div style="display:flex;background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:16px">'+
     '<button data-tab="thread" style="'+tabStyle(state.mobileTab==='thread')+'">Thread</button>'+
-    '<button data-tab="contract" style="'+tabStyle(state.mobileTab==='contract')+'">Contract</button>'+
+    '<button data-tab="contract" style="'+tabStyle(state.mobileTab==='contract')+'">'+(todos?'Todos':'Contract')+'</button>'+
     '<button data-tab="log" style="'+tabStyle(state.mobileTab==='log')+'">Log</button></div>' : '';
 
   var threadDisp = m ? (state.mobileTab==='thread'?'block':'none') : 'block';
@@ -845,7 +1164,9 @@ function taskHTML(){
     stepper+readinessFailPanel(d)+mobileTabs+
     '<div style="'+rowStyle+'">'+
       '<div style="display:'+threadDisp+'">'+threadHTML(d)+'</div>'+
-      '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+contractHTML(d)+'</div>'+
+      /* the right column becomes the TODO LIST when the task has todos; selecting one
+         swaps this same slot to that todo's contract card */
+      '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+(todos?todoPanelHTML(d):contractHTML(d))+'</div>'+
     '</div>'+
     '<div style="display:'+logDisp+'">'+eventLogHTML(d)+'</div>'+
     readinessPreviewHTML(d)+
@@ -856,11 +1177,13 @@ function taskHTML(){
 
 /* ---------- render ---------- */
 function sig(){
-  var tasksLite=(state.tasks||[]).map(function(t){ return {id:t.id,title:t.title,state:t.state,roles:t.roles,strikes:t.strikes}; });
+  /* `todo_rollup` rides along so a rollup change (2/6 → 3/6) repaints the list badge. */
+  var tasksLite=(state.tasks||[]).map(function(t){ return {id:t.id,title:t.title,state:t.state,roles:t.roles,strikes:t.strikes,roll:t.todo_rollup||null}; });
   return JSON.stringify({
     view:state.view, taskId:state.taskId, error:state.error, theme:state.theme, isMobile:state.isMobile,
     viewer:state.viewer, tasks:tasksLite, detail:state.detail,
-    expanded:state.expanded, version:state.version, eventFilter:state.eventFilter,
+    expanded:state.expanded, version:state.version, selectedTodo:state.selectedTodo,
+    eventFilter:state.eventFilter,
     eventLogOpen:state.eventLogOpen, mobileTab:state.mobileTab, switcherOpen:state.switcherOpen,
     loading:state.detail?0:state.loadingDetail
   });
@@ -908,7 +1231,11 @@ function bind(){
   var sw=app.querySelector('[data-switcher]'); if(sw) sw.onclick=function(e){ e.stopPropagation(); state.switcherOpen=!state.switcherOpen; render(); };
   var tt=app.querySelector('[data-theme-toggle]'); if(tt) tt.onclick=toggleTheme;
   var nt=app.querySelector('[data-newtask]'); if(nt) nt.onclick=function(){ try{ window.pywebview.api.new_task(); }catch(e){} };
-  app.querySelectorAll('[data-version]').forEach(function(el){ el.onclick=function(){ state.version[state.taskId]=el.getAttribute('data-version'); render(); }; });
+  /* data-vkey names the contract chain (task id, or '<task>#<todo>'); absent = the task's */
+  app.querySelectorAll('[data-version]').forEach(function(el){ el.onclick=function(){ state.version[el.getAttribute('data-vkey')||state.taskId]=el.getAttribute('data-version'); render(); }; });
+  /* select a todo — from a panel row OR from a ⟨todo⟩ chip in the thread */
+  app.querySelectorAll('[data-todo]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.selectedTodo[state.taskId]=parseInt(el.getAttribute('data-todo'),10); state.mobileTab='contract'; render(); }; });
+  var tback=app.querySelector('[data-todoback]'); if(tback) tback.onclick=function(){ delete state.selectedTodo[state.taskId]; render(); };
   app.querySelectorAll('[data-ep]').forEach(function(el){ el.onclick=function(){ var k=el.getAttribute('data-ep'); state.expanded[k]=!state.expanded[k]; render(); }; });
   app.querySelectorAll('[data-filter]').forEach(function(el){ el.onclick=function(){ state.eventFilter=el.getAttribute('data-filter'); render(); }; });
   app.querySelectorAll('[data-tab]').forEach(function(el){ el.onclick=function(){ state.mobileTab=el.getAttribute('data-tab'); render(); }; });

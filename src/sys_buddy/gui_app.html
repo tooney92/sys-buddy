@@ -582,6 +582,16 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
           <input class="input" type="text" id="in-public-url" autocomplete="off" spellcheck="false"
                  placeholder="https://…">
         </div>
+
+        <!-- The deployment target the HUMAN owns. Its rules follow the connectivity
+             choice above: same machine → localhost/http is the real thing; a tunnel
+             or private network → a reachable https address. -->
+        <div class="field" id="staging-url-wrap">
+          <label for="in-staging-url">Where will you test? <span class="hint" style="display:inline">optional</span></label>
+          <input class="input" type="text" id="in-staging-url" autocomplete="off" spellcheck="false"
+                 placeholder="http://localhost:3000">
+          <p class="hint" id="staging-hint"></p>
+        </div>
       </div>
 
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:2px">
@@ -924,6 +934,8 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var connHint     = document.getElementById('conn-hint');
   var connUrlWrap  = document.getElementById('conn-url-wrap');
   var publicUrlEl  = document.getElementById('in-public-url');
+  var stagingUrlEl = document.getElementById('in-staging-url');
+  var stagingHint  = document.getElementById('staging-hint');
   var hostBtn    = document.getElementById('btn-host');
   var hostGate   = document.getElementById('host-gate');
   var hostNote   = document.getElementById('host-note');
@@ -1007,15 +1019,21 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var CONN = {
     local: {
       hint: 'Same machine — your buddy’s agent runs on this computer. Nothing to set up.',
-      url: false
+      url: false,
+      staging: 'http://localhost:3000',
+      stagingHint: 'The URL the work actually runs at on this machine — <code>http://localhost:PORT</code> is exactly right here, because nobody off this computer is calling it. Goes straight into the contract, so your agents never invent one.'
     },
     ngrok: {
       hint: 'Public tunnel — a public https URL points at your broker, guarded by tokens. Run <code>ngrok http 8787</code>, then paste the URL it prints. Port <code>8787</code> is the default — use any port you like, just point the tunnel at the one the broker runs on.',
-      url: true, placeholder: 'https://abc-123.ngrok-free.app'
+      url: true, placeholder: 'https://abc-123.ngrok-free.app',
+      staging: 'https://api-staging.example.com',
+      stagingHint: 'The deployed URL your buddy’s agent will call. Must be a reachable public <code>https</code> address — localhost and private addresses are refused, since their machine can’t reach yours.'
     },
     tailscale: {
       hint: 'Private network — nothing is exposed to the public internet. You and your buddy must both be on the same Tailscale network. Run <code>tailscale serve 8787</code>, then paste your <code>https://…ts.net</code> URL.',
-      url: true, placeholder: 'https://your-machine.tailnet.ts.net'
+      url: true, placeholder: 'https://your-machine.tailnet.ts.net',
+      staging: 'https://api-staging.example.com',
+      stagingHint: 'The deployed URL your buddy’s agent will call. Must be a reachable <code>https</code> address — localhost and private addresses are refused, since their machine can’t reach yours.'
     }
   };
   function applyConn(){
@@ -1024,6 +1042,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     connHint.innerHTML = c.hint;
     connUrlWrap.hidden = !c.url;
     if (c.url) publicUrlEl.setAttribute('placeholder', c.placeholder || 'https://…');
+    // The staging target's rules follow the connectivity choice, so re-hint it too.
+    if (stagingUrlEl) stagingUrlEl.setAttribute('placeholder', c.staging || 'https://…');
+    if (stagingHint) stagingHint.innerHTML = c.stagingHint || '';
   }
   connRadios.forEach(function(r){ r.addEventListener('change', applyConn); });
   applyConn();
@@ -1050,13 +1071,15 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     // connectivity → public URL (only for the remote modes)
     var connMode = (connRadios.filter(function(r){ return r.checked; })[0] || {}).value || 'local';
     var publicUrl = connMode === 'local' ? '' : (publicUrlEl && publicUrlEl.value || '').trim();
+    // the human-owned deployment target (optional — the agents can still agree one)
+    var stagingUrl = (stagingUrlEl && stagingUrlEl.value || '').trim();
 
     // starting state — swap to the full-page loader so the running screen lands
     // on its own page (no scrolling past the form to find the invites).
     hostBtn.disabled = true;
     var loader = startLoader();
 
-    Promise.resolve(api.start_host(title, roles, hostRole, publicUrl, mode)).then(function(res){
+    Promise.resolve(api.start_host(title, roles, hostRole, publicUrl, mode, stagingUrl)).then(function(res){
       // Keep the loader visible for a minimum beat so it never flickers on a fast
       // start, then reveal the running page (or drop back to the form on error).
       loader.finish(function(){
@@ -1113,7 +1136,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     // running line + base url
     hostRunLn.innerHTML =
       '✓ Broker running · task “<span class="tid">' + esc(res.task_id) + '</span>”' +
-      (res.base_url ? '<span class="base-url">' + esc(res.base_url) + '</span>' : '');
+      (res.base_url ? '<span class="base-url">' + esc(res.base_url) + '</span>' : '') +
+      // echo the target back so the human sees the contract will carry THEIR url
+      (res.staging_url ? '<span class="base-url">testing at ' + esc(res.staging_url) + '</span>' : '');
 
     // the host's OWN seat (only when they picked a role for themselves)
     renderHostSeat(res.host_seat || null);
