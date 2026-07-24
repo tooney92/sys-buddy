@@ -164,7 +164,64 @@ appear no matter what the agents do.
 
 ---
 
-## Reproducing these screens
+---
+
+# Handoff for Claude Design
+
+Everything below is for producing the release video and marketing assets.
+
+## Read this first
+
+**The dashboard does not exist as a static file.** `src/sys_buddy/ui.html` is a single
+file of vanilla JS that builds its entire DOM at runtime from `fetch('/api/*')`. There
+is no static markup, no component tree, no Storybook. Open it directly in a browser and
+you get an error screen — it needs a running broker, a seeded database and a viewer
+token before one pixel of real UI exists.
+
+That gives you two paths, and which one you need depends on the shot:
+
+| You need… | Do this |
+|---|---|
+| The 8 screens already captured | Use `screens/*.png` in this folder. Nothing to run. |
+| Any *other* screen, state, or motion | Boot a local broker (below). It cannot be derived from source. |
+
+## The screens in this folder
+
+All captured at **1440×1000** against real seeded data — no mockups, no Figma.
+
+| # | File | Shows | Theme |
+|---|---|---|---|
+| 01 | `01-task-list-rollup-light.png` | Task list; the `1/5 verified ⚠1` rollup badge | light |
+| 02 | `02-todo-task-panel-light.png` | Todo task with a todo's detail panel open | light |
+| 03 | `03-todo-task-list-light.png` | **Hero.** 3-node stepper + todo list + `⟨todo⟩` chips | light |
+| 04 | `04-todo-detail-host-drop-light.png` | Todo detail; the read-only host drop | light |
+| 05 | `05-todo-task-dark.png` | The hero view in dark | dark |
+| 06 | `06-todo-contract-mini-stepper-dark.png` | Per-todo contract card + mini-stepper | dark |
+| 07 | `07-listening-presence-dark.png` | `listening — 42m` presence pills | dark |
+| 08 | `08-no-todo-task-unchanged-light.png` | A task with **no** todos — the old view, unchanged | light |
+
+### Suggested narrative order
+
+1. **03** — the whole idea in one frame: a task that is now six deliverables.
+2. **04** — pending todo with the `⚠`. *This is the emotional beat:* one row is asking a
+   human for something; everything else is just progress.
+3. **06** — open a todo and the familiar contract card is still there, one level down.
+   Nobody learned a second idiom.
+4. **07** — presence: your buddy's agent is genuinely parked, waiting on mail.
+5. **08** — the close. Nothing broke. Every existing task renders exactly as before.
+
+### Constraints worth knowing
+
+- **Desktop only.** Below 900px the dashboard deliberately renders a "please switch to a
+  desktop" gate, so there is no mobile layout to film. Do not shoot a phone frame.
+- **Both themes are real**, toggled top-right. Every colour is a CSS variable; nothing is
+  hardcoded, so dark is not an afterthought.
+- **The pulsing dots and the stepper's ring are CSS animations.** They will not survive a
+  static PNG — capture video or a GIF if you want them.
+- **Don't invent UI.** If a shot needs a screen that isn't here, boot the broker and
+  capture the real thing rather than mocking it.
+
+## Booting it yourself
 
 ```bash
 uv run python features/v1.1.0/seed_demo.py /tmp/demo.db
@@ -172,9 +229,36 @@ SYS_BUDDY_PORT=8799 SYS_BUDDY_DB=/tmp/demo.db uv run sys-buddy local
 open "http://127.0.0.1:8799/ui?v=sbv_hosttoken"
 ```
 
-`seed_demo.py` creates three tasks on purpose: `signin` (six todos, one pending, one
-dropped, one verified), `checkout` (no todos — proves the old view is unchanged), and
-`dbg` (debug mode). Toggle light/dark with the control in the top-right.
+Use port **8799**, not 8787 — 8787 is usually a real broker on a developer's machine.
 
-Note the dashboard renders **nothing** as a static file — it builds its DOM at runtime
-from `/api/*`. A running broker with seeded data is required to see any of it.
+`seed_demo.py` creates three tasks on purpose:
+
+- **`signin`** — six todos: one pending (the `⚠`), one accepted, two contracted, one
+  verified, one dropped. This is the task in most of the screenshots.
+- **`checkout`** — no todos at all. This is what proves the pre-todo view is unchanged;
+  it is the shot for the "nothing broke" beat.
+- **`dbg`** — a debug-mode task, also unchanged.
+
+It also stamps a long "listening" window on three agents (`signin` backend + mobile, and
+`checkout` frontend) so the presence pills are visible whenever you run it. In the real
+product that window is short-lived and set by an agent actually parked in
+`wait_for_message`, so without the seed the dot would expire before you finished
+recording.
+
+It is demo data: it writes straight to the schema and skips the broker's validation, so
+never point it at a real database.
+
+## The one claim to get right
+
+If the video says anything about backwards compatibility, this is the accurate wording:
+
+> A task with no todos renders exactly as it did before.
+
+That was verified at the DOM level, not asserted — the dashboard's rendered output was
+diffed before and after the change. A debug task is byte-for-byte identical; a no-todo
+contract task differs only by a single inert HTML attribute. Screen **08** is that claim
+on camera.
+
+Avoid "we rebuilt the dashboard" — the opposite is true, and the restraint is the story:
+the stepper *truncates* rather than being replaced, and the contract card is reused
+verbatim one level down.
