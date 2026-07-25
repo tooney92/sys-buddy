@@ -10,6 +10,14 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [1.2.0](https://github.com/tooney92/sys-buddy/compare/v1.1.1...v1.2.0) (2026-07-25)
+
+
+### Added
+
+* version awareness — /api/version, single-sourced version, GUI banner ([2506b8a](https://github.com/tooney92/sys-buddy/commit/2506b8a26a107061585600ac7a116d0ffd87f3b7))
+* version awareness (/api/version + GUI update banner) ([4e23c5b](https://github.com/tooney92/sys-buddy/commit/4e23c5b1eaa5b94cd5bab07414719e22368ffec9))
+
 ## [Unreleased]
 
 ### Added
