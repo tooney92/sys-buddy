@@ -114,28 +114,45 @@ Behavioural changes need tests. Cover the new path *and* the case that proves yo
 didn't break the old one — backwards compatibility for existing tasks, contracts,
 and tokens is a hard requirement, not a nice-to-have.
 
-### 7. Note it in the changelog
+### 7. You don't touch the version or the changelog
 
-Add a line to `CHANGELOG.md` under `## [Unreleased]` describing the change from a
-user's point of view. The project follows
-[Keep a Changelog](https://keepachangelog.com/) and
-[Semantic Versioning](https://semver.org/) — if your change is incompatible with
-the existing tool/wire contract or agent-visible behaviour, say so explicitly in
-the PR, because that forces a MAJOR bump.
+Do **not** edit `pyproject.toml`'s version, `src/sys_buddy/__init__.py`, or
+`CHANGELOG.md` in a normal PR — a CI check will fail the PR if you do. The version is
+single-sourced and the changelog is generated automatically at release time from your
+commit history. All you owe is a well-formed **PR title** (next step); that title is
+what decides the version bump and writes the changelog line for you.
 
-Pure-docs changes can skip this.
+### 8. Commit & PR title — Conventional Commits
 
-### 8. Commit
+We squash-merge, so **your PR title becomes the commit on `main`** — and a release bot
+([release-please](https://github.com/googleapis/release-please)) reads those titles to
+compute the next version ([SemVer](https://semver.org/)) and generate the changelog.
+So the title isn't cosmetic; it's an instruction to the release machinery.
 
-Short, imperative, conventional-commit prefix:
+Format: `<type>: <imperative summary>` (a CI check enforces this on the PR title).
+
+| type | version effect | use for |
+|---|---|---|
+| `feat:` | **minor** (1.2.0) | a new, backwards-compatible capability |
+| `fix:` | **patch** (1.1.2) | a bug fix |
+| `feat!:` (or a `BREAKING CHANGE:` footer) | **major** (2.0.0) | an incompatible change to the tool/wire contract or agent-visible behaviour |
+| `docs:` | none | documentation only |
+| `chore:` | none | tooling, deps, housekeeping |
+| `refactor:` | none | internal change, no behaviour change |
+| `test:` | none | tests only |
+| `ci:` | none | pipeline / workflow changes |
 
 ```
 feat: containerize the broker for deployment
 fix: sort dashboard thread by sub-second timestamp
 docs: expand the contributor guide
+feat!: rename the report_status verbs   ← the ! marks a breaking change
 ```
 
-Explain *why* in the body if it isn't obvious from the diff.
+The version never over-counts: a release bundles every PR since the last one and bumps
+**once**, by the largest change in the batch — five `feat:` PRs still ship as a single
+minor release, not five. Explain the *why* in the PR body if the diff doesn't make it
+obvious.
 
 ### 9. Open the pull request
 

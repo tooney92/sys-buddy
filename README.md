@@ -64,6 +64,20 @@ git clone https://github.com/tooney92/sys-buddy && cd sys-buddy
 uv sync                      # creates .venv with everything
 ```
 
+That tracks `main` — the latest, still-moving code. For a **stable, frozen version**,
+check out a release tag instead:
+
+```bash
+git clone https://github.com/tooney92/sys-buddy && cd sys-buddy
+git checkout v1.1.1          # a released version — see the Releases page for the latest
+uv sync
+```
+
+> **Coming with the next release:** `pip install sys-buddy` and a prebuilt container
+> (`docker pull ghcr.io/tooney92/sys-buddy`). These activate automatically the first
+> time a release is cut through the new publish pipeline — until then, use the clone
+> methods above.
+
 The CLI runs as `uv run sys-buddy ...`. The examples below drop that prefix — so
 **alias it once** (or activate the venv) and the commands work as written:
 
@@ -183,7 +197,12 @@ can see:
 - **MINOR** — new, backwards-compatible capability.
 - **PATCH** — backwards-compatible fixes.
 
-Each release is git-tagged `vX.Y.Z` with a fuller note in `releases/vX.Y.Z.md`.
+Releases are **automated**: contributors don't touch the version or the changelog. Merged
+PR titles follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:` →
+minor, `fix:` → patch, `feat!:` → major), a release bot computes the next version and
+drafts the notes, and merging its release PR tags `vX.Y.Z` and publishes. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the commit conventions. Each release is git-tagged
+with a fuller note in `releases/vX.Y.Z.md`.
 
 ## Contributing
 
