@@ -1,0 +1,38 @@
+name: PR Title
+
+# We squash-merge, so the PR TITLE becomes the commit on main — and release-please
+# reads those commits to compute the version and changelog. This check refuses a PR
+# whose title isn't a valid Conventional Commit, so the release machinery never sees
+# a malformed message. See CONTRIBUTING.md §8 for the types.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint-title:
+    name: conventional PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Must match the type→bump table in CONTRIBUTING.md §8.
+          types: |
+            feat
+            fix
+            docs
+            chore
+            refactor
+            test
+            ci
+          # Subject after the "type:" — just require it to be non-empty and not
+          # Sentence-cased-into-a-Title, keeping titles terse and imperative.
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            The subject after "type:" should start lower-case and be a short
+            imperative summary, e.g. "feat: add docker packaging".

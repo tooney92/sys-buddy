@@ -1,0 +1,46 @@
+name: CI
+
+# Runs on every PR and on pushes to main. Making these checks *required* in branch
+# protection is what turns them from advisory into a merge gate — see the PR that adds
+# this file for the one-time settings step.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Run the suite
+        run: uv run pytest -q
+
+  version-guard:
+    name: version not hand-edited
+    # Only on PRs, and skip release-please's own release PR — that one legitimately
+    # bumps the version. Everyone else must leave the version to the release pipeline.
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fail if the version was bumped by hand
+        run: |
+          base="origin/${{ github.base_ref }}"
+          if git diff "$base"...HEAD -- pyproject.toml | grep -qE '^\+[[:space:]]*version[[:space:]]*='; then
+            echo "::error::Don't bump the version in a PR — releases are automated (see CONTRIBUTING.md §8). Remove the pyproject.toml version change; the release bot sets it."
+            exit 1
+          fi
+          if git diff "$base"...HEAD -- src/sys_buddy/__init__.py | grep -qE '^\+.*__version__[[:space:]]*='; then
+            echo "::error::Don't set __version__ by hand — it derives from the package metadata."
+            exit 1
+          fi
+          echo "OK — no manual version edit."
