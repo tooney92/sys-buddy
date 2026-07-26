@@ -185,7 +185,8 @@ def role_prompt(
             "wakes on it.\n\n"
         )
         test_note = (
-            "Progress: once your side is live for the peer to build on, `report_status(\"ready\")`. "
+            "Progress: once your side is live for the peer to build on, `report_status(\"ready\")` "
+            "— and hand them the floor so they pick it up (\"over to you — I'm live on staging\"). "
             "`verified` when it all works end-to-end; `stuck` if you need the humans.\n\n"
         )
     else:
@@ -204,9 +205,16 @@ def role_prompt(
             "wakes on it.\n\n"
         )
         test_note = (
-            "Progress: once the backend reports `ready`, do your dependent work and "
-            "`report_status(\"checked\")` when it works against their side, or `blocked` if it "
-            "doesn't. `verified` when it all works end-to-end; `stuck` if you need the humans.\n\n"
+            "Progress & your cue to act: the backend reporting `ready` is the signal its side is "
+            "LIVE and hands you the floor — THAT is when you do your dependent work. Confirm "
+            "you've seen that `ready` before you point tests at the `staging_url`: the broker "
+            "won't let you report a check before the producer is ready, but nothing stops your "
+            "suite from hitting a not-yet-deployed URL and drowning in errors — so wait for the "
+            "live signal first. Then `report_status(\"checked\")` when it works against their side "
+            "(reporting a check is what moves the task into `testing`), or `blocked` if it "
+            "doesn't — but only AFTER you've actually run the tests; a status is a claim about "
+            "work you did, never a reflex to the backend going live. `verified` when it all works "
+            "end-to-end; `stuck` if you need the humans.\n\n"
             "Testing tip (optional): you'll likely integrate/verify against the `staging_url` "
             "using the Playwright MCP. If you don't have it set up, in Claude Code run "
             "`claude mcp add playwright npx '@playwright/mcp@latest'` (needs Node/npx; then restart "
