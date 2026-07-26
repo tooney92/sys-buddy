@@ -1066,17 +1066,21 @@ function shortcodesHTML(d){
   if(contract){
     rows +=
       grp('Contract')+
-      cmd('pc', 'propose a contract (the shared interface)')+
-      cmd('gc', 'show the current contract')+
-      cmd('sign', 'sign / lock the contract')+
-      cmd('locked?', 'poll until the contract is locked')+
+      cmd('pc [#N]', 'propose a contract — add #N to scope it to todo N')+
+      cmd('gc [#N]', 'show the contract (of todo N with #N)')+
+      cmd('sign [#N]', 'sign / lock the contract')+
       cmd('reopen', 'reopen planning to re-sign a new version')+
+      grp('Todos')+
+      cmd('todos', 'list the deliverables (todos) on this task')+
+      cmd('todo <title>', 'propose a new todo')+
+      cmd('yes #N', 'accept todo N')+
+      cmd('no #N <why>', 'decline todo N')+
       grp('Status')+
-      cmd('ready', 'producer: my side is ready to build on')+
-      cmd('ok', 'consumer: it works against the producer’s side')+
-      cmd('block', 'consumer: it doesn’t work (a strike — 3 → stuck)')+
-      cmd('done', 'verified: this part is complete')+
-      cmd('stuck', 'give up; ping the humans');
+      cmd('ready [#N]', 'producer: my side is ready to build on')+
+      cmd('ok [#N]', 'consumer: it works against the producer’s side')+
+      cmd('block [#N]', 'consumer: it doesn’t work (a strike — 3 → stuck)')+
+      cmd('done [#N]', 'verified — #N required on a task with todos')+
+      cmd('stuck [#N]', 'give up; ping the humans (with #N: just that todo)');
   } else {
     rows +=
       grp('Status')+
