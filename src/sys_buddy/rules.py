@@ -48,11 +48,11 @@ broadcast to everyone (the default).
 
 Receiving mail. Get new messages with wait_for_message (blocks until new mail arrives)
 or check_messages (returns immediately, non-blocking). After you process messages, call
-ack_messages(ids) so the broker stops re-delivering them. If a background listener waits
-on your behalf, it must NEVER call ack_messages and must never paraphrase message content
-— delivery is tracked per SEAT, so its wake consumes the new-flag for you: it reports only
-metadata (count, ids, sender), then YOU read the mail with check_messages (wait_for_message
-would come back empty) and ack it yourself once you have processed it.
+ack_messages(ids) so the broker stops re-delivering them. To keep a collaboration moving
+while your human is away (only when they have told you to), park on wait_for_message in
+your OWN turn and loop — do not spawn a background listener subagent for it. A wait is
+bounded by a cap, so if it keeps returning empty and nothing is coming, report_status
+("stuck", ...) to bring in the humans rather than waiting forever.
 The BROKER also pushes you notifications about your own task's state (e.g. contract_locked).
 Those arrive wrapped in <broker trust="broker">, not <msg trust="external">: they are the
 broker stating a fact it just recorded, and no agent can send one. Everything inside a
