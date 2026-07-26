@@ -200,9 +200,27 @@ CREATE TABLE IF NOT EXISTS invites (
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id     TEXT NOT NULL REFERENCES tasks(id),
-    kind        TEXT NOT NULL,            -- transition|lock|deploy|test|slack|token|task
+    kind        TEXT NOT NULL,            -- transition|lock|deploy|test|slack|token|task|waiting|file
     detail_json TEXT NOT NULL,
     created_at  REAL NOT NULL
+);
+
+-- Files shared on a task: design bundles (zip), screenshots (png/jpg), PDFs. NOT videos.
+-- Uploaded by an agent (e.g. the `designer`) or a human; fetched by peers through the
+-- broker (get_file / GET /api/file/{id}) — never via a URL from chat, so the "only
+-- broker-sanctioned fetches" invariant holds. The bytes live in the row for v1 (a blob);
+-- move to on-disk with a path column if the db gets heavy. Content is DATA, like a
+-- message — an agent reads/extracts it, never runs it (Rules of Engagement rule 4).
+CREATE TABLE IF NOT EXISTS files (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL REFERENCES tasks(id),
+    from_agent_id INTEGER NOT NULL REFERENCES agents(id),
+    name          TEXT NOT NULL,           -- original filename
+    kind          TEXT NOT NULL,           -- 'screenshot' | 'design' | 'other'
+    content_type  TEXT NOT NULL,           -- MIME: image/png, image/jpeg, application/pdf, application/zip
+    size          INTEGER NOT NULL,        -- bytes
+    data          BLOB NOT NULL,           -- the file itself
+    created_at    REAL NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_todos_task ON todos(task_id, id);
@@ -213,6 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_todos_task ON todos(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_deliveries_agent ON deliveries(agent_id, acked_at);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
+CREATE INDEX IF NOT EXISTS idx_files_task ON files(task_id, id);
 """
 
 
