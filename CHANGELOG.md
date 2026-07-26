@@ -10,6 +10,19 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [1.3.0](https://github.com/tooney92/sys-buddy/compare/v1.2.0...v1.3.0) (2026-07-26)
+
+
+### Added
+
+* add a soft 'waiting' status — nudge the humans without marking stuck ([f7a87da](https://github.com/tooney92/sys-buddy/commit/f7a87dada44940cb3dd526ac3e8cfdea3c98f43d))
+* add a soft 'waiting' status to nudge humans without marking stuck ([#29](https://github.com/tooney92/sys-buddy/issues/29)) ([f7a87da](https://github.com/tooney92/sys-buddy/commit/f7a87dada44940cb3dd526ac3e8cfdea3c98f43d))
+
+
+### Fixed
+
+* stop prompting agents to spawn a listener subagent ([#28](https://github.com/tooney92/sys-buddy/issues/28)) ([3fdd48d](https://github.com/tooney92/sys-buddy/commit/3fdd48dd6a20c626ed4b5e8baf7955db95f74644))
+
 ## [1.2.0](https://github.com/tooney92/sys-buddy/compare/v1.1.1...v1.2.0) (2026-07-25)
 
 
