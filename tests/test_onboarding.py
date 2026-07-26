@@ -152,21 +152,23 @@ def test_role_prompt_consumer_mentions_optional_playwright():
 
 
 @pytest.mark.parametrize("mode", ["contract", "debug"])
-def test_role_prompt_teaches_the_listener_protocol_conditionally(mode):
-    """BOTH variants carry STAY LISTENING, and every constraint that makes a shared-seat
-    listener safe: general-purpose subagent (a scoped type doesn't inherit the MCP
-    tools), never ack, metadata only, and the main agent re-reads with check_messages
-    because wait_for_message would come back empty."""
+def test_role_prompt_teaches_the_agent_owned_wait_loop_not_a_subagent(mode):
+    """BOTH variants tell the agent to stay responsive by parking on wait_for_message in
+    its OWN turn — NOT by spawning a listener subagent (that reloads its whole context
+    per spawn and is expensive). And they carry the give-up rule: a silent peer escalates
+    via report_status("stuck") rather than parking forever."""
     text = onboarding.role_prompt("backend", "signin", mode=mode)
     low = text.lower()
-    assert "stay listening" in low
-    # Conditional — harnesses without background subagents must be unaffected.
-    assert "if your harness supports background subagents" in low
-    assert "general-purpose" in low
-    assert "wait_for_message(timeout_seconds=500)" in text
-    assert "never calls `ack_messages`" in low
-    assert "metadata only" in low and "paraphrase" in low
-    assert "check_messages" in text
+    assert "staying in the loop" in low
+    assert "wait_for_message" in text
+    # The whole point of the change: no subagent-listener guidance anymore.
+    assert "subagent" not in low or "don't spawn a separate 'listener' subagent" in text
+    assert "listener parked" not in low
+    assert "wait_for_message(timeout_seconds=500)" not in text  # the old spawn recipe is gone
+    # Give-up → escalate, not hang.
+    assert 'report_status("stuck"' in text
+    # Explicit turn-taking: the floor-passing signals so neither side stalls or over-waits.
+    assert "over to you" in low and "i'll follow up" in low and "done for now" in low
 
 
 def test_role_prompt_debug_has_no_contract():

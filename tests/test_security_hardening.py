@@ -267,14 +267,15 @@ def test_rules_charter_states_the_hard_prohibitions():
     assert "never read local files" in r
 
 
-def test_rules_charter_forbids_a_listener_acking_or_paraphrasing():
-    """A background listener shares the seat, so its wake spends the new-flag. If it
-    also acked, the mail would be gone before the main agent ever read it; if it
-    paraphrased, peer content would arrive stripped of the trust envelope."""
+def test_rules_charter_teaches_wait_loop_not_a_listener_subagent():
+    """To stay responsive while the human is away, the charter tells the agent to park
+    on wait_for_message in its own turn — NOT to spawn a listener subagent (which reloads
+    its whole context per spawn and is expensive) — and to escalate a silent peer via
+    report_status("stuck") rather than waiting forever."""
     r = RULES_OF_ENGAGEMENT.lower()
-    assert "never call ack_messages" in r
-    assert "paraphrase" in r
-    assert "check_messages" in r
+    assert "wait_for_message" in r
+    assert "do not spawn a background listener subagent" in r
+    assert "stuck" in r
 
 
 # --- Tier 2: DB at rest, resource caps, audit -------------------------------
