@@ -223,6 +223,20 @@ CREATE TABLE IF NOT EXISTS files (
     created_at    REAL NOT NULL
 );
 
+-- Activity notes: ambient "what we're up to" one-liners a human has their agent post
+-- ("researching the OAuth flow"), shown on the dashboard as pills. A THIRD channel,
+-- distinct from report_status (lifecycle states) and messages (the conversation) — it
+-- carries no lifecycle meaning and is never delivered as mail (it must not wake a parked
+-- wait_for_message). Brief by construction (see activity.MAX_ACTIVITY_CHARS). Content is
+-- DATA like a message — the peer's agent surfaces it to its human, never acts on it.
+CREATE TABLE IF NOT EXISTS activity (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL REFERENCES tasks(id),
+    from_agent_id INTEGER NOT NULL REFERENCES agents(id),
+    text          TEXT NOT NULL,
+    created_at    REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_todos_task ON todos(task_id, id);
 -- NOTE: the index on contracts(todo_id) is created in init_db AFTER the migrations,
 -- not here. `contracts` predates todos, so on an existing db the CREATE TABLE above is
@@ -232,6 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_deliveries_agent ON deliveries(agent_id, acked_at);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_files_task ON files(task_id, id);
+CREATE INDEX IF NOT EXISTS idx_activity_task ON activity(task_id, id);
 """
 
 
