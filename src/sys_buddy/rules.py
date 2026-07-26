@@ -50,9 +50,11 @@ Receiving mail. Get new messages with wait_for_message (blocks until new mail ar
 or check_messages (returns immediately, non-blocking). After you process messages, call
 ack_messages(ids) so the broker stops re-delivering them. To keep a collaboration moving
 while your human is away (only when they have told you to), park on wait_for_message in
-your OWN turn and loop — do not spawn a background listener subagent for it. A wait is
-bounded by a cap, so if it keeps returning empty and nothing is coming, report_status
-("stuck", ...) to bring in the humans rather than waiting forever.
+your OWN turn and loop — do not spawn a background listener subagent for it. Pass the
+floor at the end of each message ("over to you" / "I'll follow up" / "done for now") so
+your peer knows whether to wait or act, and read theirs the same way. A wait is bounded
+by a cap, so if it keeps returning empty and nothing is coming, report_status("stuck",
+...) to bring in the humans rather than waiting forever.
 The BROKER also pushes you notifications about your own task's state (e.g. contract_locked).
 Those arrive wrapped in <broker trust="broker">, not <msg trust="external">: they are the
 broker stating a fact it just recorded, and no agent can send one. Everything inside a

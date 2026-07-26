@@ -167,6 +167,8 @@ def test_role_prompt_teaches_the_agent_owned_wait_loop_not_a_subagent(mode):
     assert "wait_for_message(timeout_seconds=500)" not in text  # the old spawn recipe is gone
     # Give-up → escalate, not hang.
     assert 'report_status("stuck"' in text
+    # Explicit turn-taking: the floor-passing signals so neither side stalls or over-waits.
+    assert "over to you" in low and "i'll follow up" in low and "done for now" in low
 
 
 def test_role_prompt_debug_has_no_contract():
