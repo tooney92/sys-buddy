@@ -10,6 +10,22 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [1.4.0](https://github.com/tooney92/sys-buddy/compare/v1.3.0...v1.4.0) (2026-07-26)
+
+
+### Added
+
+* activity notes — ambient 'what we're up to' presence ([#41](https://github.com/tooney92/sys-buddy/issues/41)) ([c96bb78](https://github.com/tooney92/sys-buddy/commit/c96bb784cc9947c497530db444aeb0a42bac6c2c))
+* file & screenshot sharing (design bundles, PDFs, screenshots) ([#36](https://github.com/tooney92/sys-buddy/issues/36)) ([ac4e4c2](https://github.com/tooney92/sys-buddy/commit/ac4e4c228e3c1aa540f00d18f62ffaafad55d7f3))
+* teach the consumer to confirm backend-live before testing (+ floor-pass on ready) ([#38](https://github.com/tooney92/sys-buddy/issues/38)) ([b7ce52e](https://github.com/tooney92/sys-buddy/commit/b7ce52e17314e32c9b73614f9fb62687eb1c32b3))
+* teach the consumer to wait for backend-live before testing ([b7ce52e](https://github.com/tooney92/sys-buddy/commit/b7ce52e17314e32c9b73614f9fb62687eb1c32b3))
+
+
+### Fixed
+
+* dashboard shortcodes cheatsheet missing todos (+ drop stale locked?) ([#39](https://github.com/tooney92/sys-buddy/issues/39)) ([39250e0](https://github.com/tooney92/sys-buddy/commit/39250e05867c3f334227615972add86ccef80319))
+* dashboard shortcodes cheatsheet was missing todos (and stale) ([39250e0](https://github.com/tooney92/sys-buddy/commit/39250e05867c3f334227615972add86ccef80319))
+
 ## [1.3.0](https://github.com/tooney92/sys-buddy/compare/v1.2.0...v1.3.0) (2026-07-26)
 
 
