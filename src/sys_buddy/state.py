@@ -56,6 +56,7 @@ STATUS_TEST_FAILED = "test_failed"  # client role: e2e suite went red (a strike)
 STATUS_VERIFIED = "verified"        # feature confirmed end-to-end (terminal)
 STATUS_STUCK = "stuck"              # give up; humans needed (terminal)
 STATUS_RESOLVED = "resolved"        # debug task: the issue is fixed (terminal)
+STATUS_WAITING = "waiting"          # soft nudge: needs a human's attention, NOT terminal
 
 TEST_STATUSES = frozenset({STATUS_TEST_PASSED, STATUS_TEST_FAILED})
 
@@ -919,6 +920,19 @@ def report_status(
     requested = status
     status = _STATUS_ALIASES.get(status, status)
 
+    # 'waiting' is a soft, mode-agnostic NUDGE — handled before the mode gate so it works
+    # on both contract and debug tasks. It pings the humans without changing state, touching
+    # strikes, or ending anything: the rung below 'stuck' for "a peer's gone quiet, a human's
+    # attention would help" (see the give-up rule in the prompt). Task-level only — to flag
+    # ONE deliverable, use 'stuck' with a todo id.
+    if status == STATUS_WAITING:
+        if todo_id is not None:
+            raise ValueError(
+                "'waiting' is a task-level nudge for the humans — it takes no todo id. To "
+                "flag one deliverable, use report_status('stuck', detail, todo=<id>)."
+            )
+        return _report_waiting(conn, identity, detail)
+
     # Mode gate: debug tasks have a single 'resolved' status; contract tasks have
     # the full deploy/test/verified vocabulary. Keep the two vocabularies disjoint.
     mode = _task_mode(conn, identity.task_id)
@@ -1358,6 +1372,24 @@ def _report_stuck(conn, identity: Identity, detail: str) -> dict:
     _slack(conn, identity.task_id, f"[{identity.task_id}] STUCK: {detail}")
     conn.commit()
     return {"status": STATUS_STUCK, "state": state}
+
+
+def _report_waiting(conn, identity: Identity, detail: str) -> dict:
+    """A soft nudge for the humans — NOT a state change and NOT terminal.
+
+    The give-up rung below ``stuck``: when a peer has gone quiet and a human's attention
+    would help, this pings Slack (and the desktop operator via Claude remote when the agent
+    yields) and drops a message + event on the thread — WITHOUT transitioning the task,
+    touching strikes, or ending anything. The task keeps whatever state it had, and the
+    agent (or the humans) can nudge again later. Only blocked on a genuinely terminal task,
+    where there is nothing left to wait for."""
+    _assert_live(conn, identity.task_id)
+    state = _state(conn, identity.task_id)
+    service.post_message(conn, identity, "waiting", detail)
+    _event(conn, identity.task_id, "waiting", {"text": detail})
+    _slack(conn, identity.task_id, f"[{identity.name}] WAITING — needs a human: {detail}")
+    conn.commit()
+    return {"status": STATUS_WAITING, "state": state}
 
 
 def _strikes(conn, task_id: str) -> int:
