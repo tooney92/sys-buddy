@@ -41,7 +41,7 @@ from .identity import ViewerIdentity
 # HTTP verb set is small; the event ``kind`` set is fixed by the state machine.
 # ``todo`` is ONE kind carrying the specific action inside its detail (todos._event),
 # so the dashboard's filter vocabulary stays fixed as the todo actions grow.
-_EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "token", "todo"}
+_EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "token", "todo", "waiting"}
 
 # Fallback for the UI's ``⟨api123⟩`` chip on rows written before the
 # ``messages.todo_id`` column existed: scrape "todo #N" from the body. New rows
