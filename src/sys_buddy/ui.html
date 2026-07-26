@@ -1020,6 +1020,7 @@ function debugTaskHTML(d){
       '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
     '</div>'+
     statusHeader+
+    activityStripHTML(d)+
     readinessFailPanel(d)+
     threadHTML(d)+
     attachmentsHTML(d)+
@@ -1221,6 +1222,35 @@ function lightboxHTML(){
   '</div>';
 }
 
+/* ---------- activity strip ---------- */
+/* Ambient activity notes: a bounded, scrollable strip of role-colored chat bubbles.
+   Full-width, sits directly UNDER the stepper (above the thread/contract grid) in BOTH the
+   contract and debug task views. The API hands `activity` back oldest-first, so we reverse
+   for a NEWEST-FIRST display. Read-only (D11) — notes are posted via the agent tool, never
+   here, so there is no compose box. Renders NOTHING when the task has no activity (guarded
+   on length), so a task with no notes looks EXACTLY as before. `activity` rides inside
+   state.detail, which sig() already serializes — no new state to register. */
+function activityStripHTML(d){
+  var acts=(d&&d.activity)||[];
+  if(!acts.length) return '';
+  var rows=acts.slice().reverse().map(function(a){
+    var av0=av(a.role);
+    return '<div style="display:flex;align-items:flex-start;gap:9px;padding:8px 11px;border-radius:11px;background:var(--surface-2);border:1px solid var(--border)">'+
+      '<span title="'+esc(av0.label)+'" style="width:20px;height:20px;border-radius:6px;background:'+av0.c+';color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;margin-top:1px">'+esc(av0.i)+'</span>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="display:flex;align-items:baseline;gap:8px">'+
+          '<span style="font-size:11.5px;font-weight:600;color:'+av0.c+'">'+esc(av0.label)+'</span>'+
+          '<span style="font-size:10px;color:var(--text-3);font-family:'+MONO+';margin-left:auto;flex:none">'+esc(a.time||'')+'</span></div>'+
+        '<div style="font-size:12.5px;color:var(--text-2);line-height:1.45;margin-top:2px;word-break:break-word">'+esc(a.text||'')+'</div>'+
+      '</div></div>';
+  }).join('');
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px">'+
+    '<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px">'+
+      '<span style="font-weight:600;font-size:14px;color:var(--text)">Activity</span>'+
+      '<span style="font-size:12px;color:var(--text-2)">'+acts.length+'</span></div>'+
+    '<div style="padding:12px 16px;display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto">'+rows+'</div></div>';
+}
+
 /* ---------- task view ---------- */
 function taskHTML(){
   if(!state.detail){
@@ -1274,7 +1304,7 @@ function taskHTML(){
       '<h1 style="font-size:20px;font-weight:700;margin:0;color:var(--text);letter-spacing:-.02em">'+esc(d.title)+'</h1>'+
       '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
       '<div style="flex:1"></div>'+eventBtn+'</div>'+
-    stepper+readinessFailPanel(d)+mobileTabs+
+    stepper+activityStripHTML(d)+readinessFailPanel(d)+mobileTabs+
     '<div style="'+rowStyle+'">'+
       '<div style="display:'+threadDisp+'">'+threadHTML(d)+'</div>'+
       /* the right column becomes the TODO LIST when the task has todos; selecting one
