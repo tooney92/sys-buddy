@@ -157,6 +157,10 @@ var state = {
      survives a poll refresh and leaving/returning to the task. Empty = the todo LIST.
      MUST appear in sig() below or selecting a todo would never re-render. */
   selectedTodo:{},
+  /* which shared file the screenshot lightbox is enlarging (its id, as a string), or
+     null when the overlay is closed. MUST appear in sig() below or opening/closing the
+     lightbox would never re-render. Cleared on navigation (openTask/goHome). */
+  lightbox:null,
   mobileTab:'thread', switcherOpen:false, isMobile: window.innerWidth<900,
   lastRefresh:0, refreshing:false
 };
@@ -204,11 +208,11 @@ function fetchDetail(id){
 /* ---------- navigation ---------- */
 function openTask(id){
   state.view='task'; state.taskId=id; state.detail=null; state.loadingDetail=true;
-  state.switcherOpen=false; state.mobileTab='thread';
+  state.switcherOpen=false; state.mobileTab='thread'; state.lightbox=null;
   if(state.error==='not-found'||state.error==='forbidden') state.error=null;
   render(); fetchDetail(id);
 }
-function goHome(){ state.view='list'; state.switcherOpen=false; state.detail=null; state.taskId=null; render(); }
+function goHome(){ state.view='list'; state.switcherOpen=false; state.detail=null; state.taskId=null; state.lightbox=null; render(); }
 function toggleTheme(){ state.theme = state.theme==='dark'?'light':'dark'; localStorage.setItem('sb-theme',state.theme); render(); }
 
 /* ---------- style helpers ---------- */
@@ -1018,11 +1022,12 @@ function debugTaskHTML(d){
     statusHeader+
     readinessFailPanel(d)+
     threadHTML(d)+
+    attachmentsHTML(d)+
     eventLogHTML(d)+
     readinessPreviewHTML(d)+
     shortcodesHTML(d)+
     tipsHTML()+
-  '</div>';
+  '</div>'+lightboxHTML();
 }
 
 /* ---------- tips (compact, collapsed-by-default legend) ---------- */
@@ -1108,6 +1113,110 @@ function readinessPreviewHTML(d){
       '<ol style="margin:0;padding-left:20px">'+items+'</ol></div></details>';
 }
 
+/* ---------- shared files & screenshots (read-only, D11) ----------
+   The API adds a `files` array to GET /api/task/{id} (screenshots + designs + other
+   attachments the agents uploaded via a tool / the desktop app). This dashboard NEVER
+   writes — there is no upload control here, only surfacing. EVERY branch below is
+   guarded on `d.files`/length, so a task with no files (or an older API that omits the
+   key entirely) renders EXACTLY as it did before — the same precedent as todos above.
+
+   Each file's bytes are served (GET only) at a same-origin relative URL `/api/file/{id}`;
+   the `sb_view` HttpOnly cookie rides along automatically on the <img>/<a> request, so
+   there is no token in the URL to leak (JS can't read the cookie anyway — same auth model
+   as every other /api/* call). The server sets Content-Disposition inline for images and
+   attachment for everything else, so a plain <a> downloads non-images on its own. */
+function fileURL(id){ return '/api/file/'+encodeURIComponent(id); }
+/* screenshots = anything the browser can render inline: an image content-type, or the
+   broker's explicit `screenshot` kind (covers a screenshot whose type didn't survive). */
+function isImageFile(f){ return (f.content_type && String(f.content_type).indexOf('image/')===0) || f.kind==='screenshot'; }
+function humanSize(n){
+  n=+n; if(!isFinite(n)||n<0) return '';
+  if(n<1024) return n+' B';
+  var u=['KB','MB','GB','TB'], i=-1;
+  do{ n/=1024; i++; }while(n>=1024 && i<u.length-1);
+  return (n>=10?Math.round(n):Math.round(n*10)/10)+' '+u[i];
+}
+function fileKindChip(kind){
+  return '<span style="font-family:'+MONO+';font-size:9.5px;font-weight:600;color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:1px 6px;flex:none">'+esc(kind||'other')+'</span>';
+}
+/* uploader avatar + label, shared by both sections */
+function fileUploader(f){
+  var a=av(f.role);
+  return '<span title="'+esc(a.label)+'" style="display:inline-flex;align-items:center;gap:5px;min-width:0">'+
+    '<span style="width:15px;height:15px;border-radius:4px;background:'+a.c+';color:#fff;font-size:8px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+
+    '<span style="font-size:10.5px;color:var(--text-2);font-weight:500">'+esc(a.label)+'</span></span>';
+}
+var IC_DOWNLOAD='<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12M7 11l5 5 5-5M5 21h14"/></svg>';
+
+/* Screenshots — inline thumbnails, click to enlarge (lightboxHTML below). */
+function screenshotsCardHTML(imgs){
+  if(!imgs.length) return '';
+  var thumbs=imgs.map(function(f){
+    return '<button data-lightbox="'+esc(f.id)+'" title="'+esc(f.name||'')+' — click to enlarge" style="display:flex;flex-direction:column;gap:6px;padding:0;border:none;background:transparent;cursor:pointer;font-family:inherit;width:104px;flex:none">'+
+      '<span style="width:104px;height:78px;border-radius:9px;overflow:hidden;background:var(--surface-2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center">'+
+        '<img src="'+esc(fileURL(f.id))+'" alt="'+esc(f.name||'')+'" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block"></span>'+
+      '<span style="font-size:10.5px;font-weight:500;color:var(--text);max-width:104px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">'+esc(f.name||'')+'</span>'+
+      '<span style="display:flex;align-items:center;gap:6px">'+fileUploader(f)+'<span style="font-size:10px;color:var(--text-3);font-family:'+MONO+'">'+esc(f.time||'')+'</span></span>'+
+    '</button>';
+  }).join('');
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-top:16px">'+
+    '<div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px">'+
+      '<span style="font-weight:600;font-size:14px;color:var(--text)">Screenshots</span>'+
+      '<span style="font-size:12px;color:var(--text-2)">'+imgs.length+'</span></div>'+
+    '<div style="padding:16px;display:flex;flex-wrap:wrap;gap:14px">'+thumbs+'</div></div>';
+}
+
+/* Files — everything else, each a download link. */
+function filesCardHTML(others){
+  if(!others.length) return '';
+  var rows=others.map(function(f){
+    var size=humanSize(f.size);
+    return '<a href="'+esc(fileURL(f.id))+'" title="Download '+esc(f.name||'')+'" style="display:flex;align-items:center;gap:12px;padding:11px 16px;border-top:1px solid var(--border);text-decoration:none;color:var(--text)">'+
+      '<span style="display:flex;color:var(--text-3);flex:none">'+IC.doc+'</span>'+
+      '<span style="flex:1;min-width:0">'+
+        '<span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="font-size:12.5px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px">'+esc(f.name||'')+'</span>'+fileKindChip(f.kind)+'</span>'+
+        '<span style="display:flex;align-items:center;gap:10px;margin-top:5px;flex-wrap:wrap">'+fileUploader(f)+
+          (size?'<span style="font-size:10.5px;color:var(--text-3);font-family:'+MONO+'">'+esc(size)+'</span>':'')+
+          '<span style="font-size:10.5px;color:var(--text-3);font-family:'+MONO+'">'+esc(f.time||'')+'</span></span>'+
+      '</span>'+
+      '<span style="display:flex;color:var(--text-3);flex:none">'+IC_DOWNLOAD+'</span></a>';
+  }).join('');
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-top:16px">'+
+    '<div style="padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:10px">'+
+      '<span style="font-weight:600;font-size:14px;color:var(--text)">Files</span>'+
+      '<span style="font-size:12px;color:var(--text-2)">'+others.length+'</span></div>'+
+    rows+'</div>';
+}
+
+/* Both sections, split by type. '' when the task has no files → identical to before. */
+function attachmentsHTML(d){
+  var files=(d&&d.files)||[];
+  if(!files.length) return '';
+  var imgs=[], others=[];
+  files.forEach(function(f){ (isImageFile(f)?imgs:others).push(f); });
+  return screenshotsCardHTML(imgs)+filesCardHTML(others);
+}
+
+/* Full-screen enlarge for a screenshot. State-driven (state.lightbox = the file id) so it
+   rides the normal render/bind/sig loop; '' when closed or the id no longer resolves. The
+   dark scrim is its own surface, so its white caption text is intentionally theme-fixed. */
+function lightboxHTML(){
+  if(state.lightbox==null) return '';
+  var d=state.detail; if(!d) return '';
+  var f=null; (d.files||[]).forEach(function(x){ if(String(x.id)===String(state.lightbox)) f=x; });
+  if(!f) return '';
+  var a=av(f.role);
+  return '<div data-lb-backdrop="1" style="position:fixed;inset:0;z-index:9998;background:rgba(20,15,10,.74);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:44px 24px;gap:14px">'+
+    '<img src="'+esc(fileURL(f.id))+'" alt="'+esc(f.name||'')+'" style="max-width:min(1100px,92vw);max-height:78vh;object-fit:contain;border-radius:12px;box-shadow:0 14px 44px rgba(0,0,0,.5);background:var(--surface)">'+
+    '<div style="display:flex;align-items:center;gap:10px;color:#fff;font-size:13px;flex-wrap:wrap;justify-content:center">'+
+      '<span style="width:20px;height:20px;border-radius:6px;background:'+a.c+';color:#fff;font-size:9px;font-weight:700;display:inline-flex;align-items:center;justify-content:center">'+esc(a.i)+'</span>'+
+      '<span style="font-weight:600">'+esc(f.name||'')+'</span>'+
+      '<span style="opacity:.8;font-family:'+MONO+'">'+esc(a.label)+' · '+esc(f.time||'')+'</span>'+
+      '<a href="'+esc(fileURL(f.id))+'" target="_blank" rel="noopener" style="color:#fff;text-decoration:underline;opacity:.85">open original</a></div>'+
+    '<button data-lb-close="1" title="Close (Esc)" style="position:fixed;top:20px;right:24px;width:38px;height:38px;border-radius:10px;border:none;background:rgba(255,255,255,.16);color:#fff;font-size:19px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center">✕</button>'+
+  '</div>';
+}
+
 /* ---------- task view ---------- */
 function taskHTML(){
   if(!state.detail){
@@ -1165,14 +1274,16 @@ function taskHTML(){
     '<div style="'+rowStyle+'">'+
       '<div style="display:'+threadDisp+'">'+threadHTML(d)+'</div>'+
       /* the right column becomes the TODO LIST when the task has todos; selecting one
-         swaps this same slot to that todo's contract card */
-      '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+(todos?todoPanelHTML(d):contractHTML(d))+'</div>'+
+         swaps this same slot to that todo's contract card. The shared screenshots + files
+         sit under it (so on mobile they live inside the existing Contract/Todos tab — no
+         new tab). attachmentsHTML('') when the task has no files, so this is unchanged. */
+      '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+(todos?todoPanelHTML(d):contractHTML(d))+attachmentsHTML(d)+'</div>'+
     '</div>'+
     '<div style="display:'+logDisp+'">'+eventLogHTML(d)+'</div>'+
     readinessPreviewHTML(d)+
     shortcodesHTML(d)+
     tipsHTML()+
-  '</div>';
+  '</div>'+lightboxHTML();
 }
 
 /* ---------- render ---------- */
@@ -1183,6 +1294,7 @@ function sig(){
     view:state.view, taskId:state.taskId, error:state.error, theme:state.theme, isMobile:state.isMobile,
     viewer:state.viewer, tasks:tasksLite, detail:state.detail,
     expanded:state.expanded, version:state.version, selectedTodo:state.selectedTodo,
+    lightbox:state.lightbox,
     eventFilter:state.eventFilter,
     eventLogOpen:state.eventLogOpen, mobileTab:state.mobileTab, switcherOpen:state.switcherOpen,
     loading:state.detail?0:state.loadingDetail
@@ -1236,6 +1348,11 @@ function bind(){
   /* select a todo — from a panel row OR from a ⟨todo⟩ chip in the thread */
   app.querySelectorAll('[data-todo]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.selectedTodo[state.taskId]=parseInt(el.getAttribute('data-todo'),10); state.mobileTab='contract'; render(); }; });
   var tback=app.querySelector('[data-todoback]'); if(tback) tback.onclick=function(){ delete state.selectedTodo[state.taskId]; render(); };
+  /* screenshot lightbox: a thumbnail opens it; the backdrop (click outside the image) and
+     the ✕ close it. Escape also closes — see the document keydown handler below. */
+  app.querySelectorAll('[data-lightbox]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.lightbox=el.getAttribute('data-lightbox'); render(); }; });
+  var lbb=app.querySelector('[data-lb-backdrop]'); if(lbb) lbb.onclick=function(e){ if(e.target===lbb){ state.lightbox=null; render(); } };
+  app.querySelectorAll('[data-lb-close]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.lightbox=null; render(); }; });
   app.querySelectorAll('[data-ep]').forEach(function(el){ el.onclick=function(){ var k=el.getAttribute('data-ep'); state.expanded[k]=!state.expanded[k]; render(); }; });
   app.querySelectorAll('[data-filter]').forEach(function(el){ el.onclick=function(){ state.eventFilter=el.getAttribute('data-filter'); render(); }; });
   app.querySelectorAll('[data-tab]').forEach(function(el){ el.onclick=function(){ state.mobileTab=el.getAttribute('data-tab'); render(); }; });
@@ -1245,6 +1362,10 @@ function bind(){
     el.onmouseleave=function(){ el.style.borderColor='var(--border)'; el.style.boxShadow='none'; };
   });
 }
+/* Esc closes the screenshot lightbox */
+document.addEventListener('keydown', function(e){
+  if(e.key==='Escape' && state.lightbox!=null){ state.lightbox=null; render(); }
+});
 /* close switcher on outside click */
 document.addEventListener('click', function(e){
   if(state.switcherOpen && !e.target.closest('[data-switcher]') && !e.target.closest('[data-open]')){
