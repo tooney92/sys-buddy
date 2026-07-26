@@ -59,31 +59,36 @@ Nobody relayed a message.
 
 ### Install
 
+**From PyPI (recommended)** — a pinned, released version, isolated from any checkout:
+
 ```bash
-git clone https://github.com/tooney92/sys-buddy && cd sys-buddy
-uv sync                      # creates .venv with everything
+uv tool install sys-buddy        # installs the `sys-buddy` command globally
+# or:  pipx install sys-buddy    #  or:  pip install sys-buddy
 ```
 
-That tracks `main` — the latest, still-moving code. For a **stable, frozen version**,
-check out a release tag instead:
+Upgrade when a new version ships — `uv tool upgrade sys-buddy` — or pin/roll back
+exactly with `uv tool install sys-buddy==1.3.0`.
+
+**With Docker** — a prebuilt container from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/tooney92/sys-buddy:latest        # or a pinned tag, e.g. :1.3.0
+docker run -p 127.0.0.1:8787:8787 -v sysbuddy:/data ghcr.io/tooney92/sys-buddy
+```
+
+The image defaults to `serve` (auth enforced) — never `local`, which is
+unauthenticated. Put an https tunnel in front for a real remote deployment.
+
+**From source** — only if you're hacking on sys-buddy itself:
 
 ```bash
 git clone https://github.com/tooney92/sys-buddy && cd sys-buddy
-git checkout v1.1.1          # a released version — see the Releases page for the latest
 uv sync
+uv run sys-buddy ...             # runs your local checkout instead of the release
 ```
 
-> **Coming with the next release:** `pip install sys-buddy` and a prebuilt container
-> (`docker pull ghcr.io/tooney92/sys-buddy`). These activate automatically the first
-> time a release is cut through the new publish pipeline — until then, use the clone
-> methods above.
-
-The CLI runs as `uv run sys-buddy ...`. The examples below drop that prefix — so
-**alias it once** (or activate the venv) and the commands work as written:
-
-```bash
-alias sys-buddy="uv run sys-buddy"     # add to ~/.zshrc / ~/.bashrc to keep it
-```
+Once installed, the CLI is just `sys-buddy ...` — the examples below use that. Full
+step-by-step, including the remote/tunnel setup, is in **[SETUP.md](SETUP.md)**.
 
 ### Local — 60 seconds, no auth (solo dev, many repos on one machine)
 
@@ -163,6 +168,7 @@ The full model is in `SPEC.md` §9. The short version:
 SPEC.md          ← the complete specification. Start here.
 KICKOFF.md       ← build instructions for a coding agent
 DECISIONS.md     ← design decisions and spec deviations, with reasoning
+SETUP.md         ← install + run: PyPI, Docker (ghcr), source, pairing, remote
 CHANGELOG.md     ← released changes (Keep a Changelog + SemVer)
 CONTRIBUTING.md  ← how to contribute: fork, branch, test, PR
 v2.md            ← the backlog, with a build-difficulty score per entry
