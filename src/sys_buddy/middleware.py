@@ -25,14 +25,16 @@ from .identity import get_current, resolve_agent_token, set_current
 
 # The action tools that change collaboration state. They stay LOCKED until the agent
 # passes the pre-flight readiness check (agents.ready = 1) — read-only tools (rules,
-# check_messages, wait_for_message, get_contract, get_todos, readiness_check,
-# submit_readiness) are never gated, so the agent can read the briefing + answer the
-# check first.
+# check_messages, wait_for_message, get_contract, get_todos, list_files, get_file,
+# readiness_check, submit_readiness) are never gated, so the agent can read the briefing
+# + answer the check first.
 #
 # The todo writes are gated for exactly the reason propose_contract is: proposing or
 # accepting a todo IS an agreement (it binds seats to a deliverable and fixes who must
 # sign its contract), and an agreement made by an agent that never proved it read the
 # briefing is worthless. get_todos stays open — reading the work is not agreeing to it.
+# upload_file is gated too: it WRITES task data (a file others act on), so it waits on
+# readiness like every other write. list_files/get_file are reads and stay open.
 ACTION_TOOLS = frozenset({
     "send_message",
     "propose_contract",
@@ -43,6 +45,7 @@ ACTION_TOOLS = frozenset({
     "decline_todo",
     "repropose_todo",
     "drop_todo",
+    "upload_file",
 })
 
 # Anti-brute-force on the auth path (OWASP API2): throttle repeated *failed* token

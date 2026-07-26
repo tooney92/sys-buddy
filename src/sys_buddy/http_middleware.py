@@ -12,9 +12,18 @@ rejects an oversized body at the edge, before it is read into memory.
 
 from __future__ import annotations
 
-# 1 MiB: comfortably above a full MCP JSON-RPC tool call (contract specs and message
-# bodies are already capped at 64 KB per field) while blocking multi-MB body DoS.
-REQUEST_MAX_BYTES = 1024 * 1024
+from .files import MAX_FILE_BYTES
+
+# The request-body ceiling. It must clear an ``upload_file`` MCP call, whose file rides
+# in the JSON-RPC body base64-encoded (~1.34x) plus framing — base64(8 MB) ≈ 10.7 MB —
+# so we size it to 2x the file cap (16 MiB), comfortably over the encoded payload. The
+# cap is imported from ``files`` so the two move together; the limit only needs to cover
+# encoding overhead, since ``files.upload_file`` re-checks the real 8 MB limit AFTER
+# decode. DoS tradeoff, accepted and BOUNDED: a single POST can now buffer up to 16 MiB,
+# but the edge still rejects anything larger by declared Content-Length before reading
+# it, and everything else (contract specs, message bodies) is capped at 64 KB per field
+# well under this. Self-hosting a per-path limit would let /mcp be the only 16 MiB route.
+REQUEST_MAX_BYTES = 2 * MAX_FILE_BYTES  # 16 MiB
 
 # Content-Security-Policy for the dashboard. The page is self-contained inline JS/CSS
 # (so 'unsafe-inline' is required), but this still blocks external scripts, data
