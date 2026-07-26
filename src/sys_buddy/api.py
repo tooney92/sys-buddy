@@ -30,10 +30,11 @@ from starlette.responses import (
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
     StreamingResponse,
 )
 
-from . import identity, readiness, service, todos
+from . import files, identity, readiness, service, todos
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -472,6 +473,29 @@ def _agents_for(conn, task_id: str) -> list[dict]:
     return out
 
 
+def _files_for(conn, task_id: str) -> list[dict]:
+    """The files panel: metadata for every file on the task (NO bytes), oldest-first,
+    each with the mono ``time`` HH:MM the rest of the dashboard uses.
+
+    Shape is ``files.list_files`` verbatim (id, name, kind, content_type, size,
+    created_at, role) plus ``time`` = ``_hhmm(created_at)``. The bytes themselves are
+    NOT inlined here — they are fetched one at a time from ``GET /api/file/{id}`` (an
+    ``<img src>``/``<a href>``), so the task payload stays small no matter how many
+    8 MB blobs hang on the task.
+
+    Like the ``todo*`` keys, this is ADDITIVE and the caller OMITS it entirely for a
+    task with no files, so a pre-file task serialises byte-identically to before (the
+    deployed ``ui.html`` reads that payload and uses ``d.files || []``, which is happy
+    with the key absent OR present).
+    """
+    out = []
+    for f in files.list_files(conn, task_id):
+        d = dict(f)
+        d["time"] = _hhmm(f["created_at"])
+        out.append(d)
+    return out
+
+
 def _task_detail(conn, task_id: str) -> dict | None:
     """Full per-task payload (SPEC §11 ``/api/task/{id}``), or ``None`` if absent.
 
@@ -515,6 +539,14 @@ def _task_detail(conn, task_id: str) -> dict | None:
         detail["has_todos"] = todos.has_todos(conn, task_id)
         detail["todos"] = todo_list
         detail["todo_rollup"] = todos.rollup(conn, task_id)
+    # `files` follows the same additive/omit-when-empty rule as the todo keys, and for
+    # the same reason: a task that has never had a file uploaded serialises exactly as
+    # it did before file sharing, so an older on-disk `ui.html` sees nothing new. A
+    # newer `ui.html` reads `d.files || []`, so the absent key and an empty list are
+    # indistinguishable to it — we choose ABSENT to keep the pre-file payload identical.
+    file_list = _files_for(conn, task_id)
+    if file_list:
+        detail["files"] = file_list
     return detail
 
 
@@ -694,6 +726,60 @@ def _resolve(request, conn) -> ViewerIdentity | None:
 
 
 # --------------------------------------------------------------------------- #
+# file download/view (GET /api/file/{id}) — still read-only (D11)
+# --------------------------------------------------------------------------- #
+def _file_for(conn, viewer: ViewerIdentity, file_id) -> dict | None:
+    """One file's bytes + metadata, IF this token is allowed to read the task it hangs
+    on. Two lookups on purpose: first find WHICH task owns the file, then apply the
+    same ``viewer_can_see`` gate the JSON routes use — a token scoped to task A must
+    never pull task B's file (SPEC §11, D7), and scoping is enforced here on the server,
+    never in the browser.
+
+    Returns ``None`` for a missing OR a foreign file — the two are deliberately
+    indistinguishable to the caller (both 404), so a buddy can't probe another task's
+    file ids by watching 403-vs-404. A non-integer id is likewise just "not found".
+    """
+    try:
+        fid = int(file_id)
+    except (TypeError, ValueError):
+        return None
+    row = conn.execute("SELECT task_id FROM files WHERE id = ?", (fid,)).fetchone()
+    if row is None or not viewer_can_see(viewer, row["task_id"]):
+        return None
+    # Scoped again inside get_file (id AND task_id), so this can only return the file we
+    # just authorised.
+    return files.get_file(conn, row["task_id"], fid)
+
+
+def _safe_filename(name: str) -> str:
+    """A filename safe to drop into a quoted ``Content-Disposition``. The suggested
+    download name is cosmetic — the file is identified by id — so we simply strip the
+    characters that would break the header or inject one (double-quote, backslash,
+    CR/LF), never trusting the stored name to be header-clean."""
+    return re.sub(r'[\r\n"\\]', "", name or "").strip() or "download"
+
+
+def _file_response(f: dict) -> Response:
+    """Serve a file's raw bytes with its stored Content-Type. Images render ``inline``
+    so the dashboard can point an ``<img src>`` at this URL; everything else (zip/pdf)
+    is an ``attachment`` so the browser downloads it under its original name.
+
+    This is the ONLY route that returns bytes rather than JSON, and it is still strictly
+    read-only (D11): it hands bytes OUT, it never takes them IN — uploads happen through
+    the MCP ``upload_file`` tool, never against this dashboard origin.
+    """
+    if f["content_type"].startswith("image/"):
+        disposition = "inline"
+    else:
+        disposition = f'attachment; filename="{_safe_filename(f["name"])}"'
+    return Response(
+        content=f["data"],
+        media_type=f["content_type"],
+        headers={"Content-Disposition": disposition},
+    )
+
+
+# --------------------------------------------------------------------------- #
 # route registration
 # --------------------------------------------------------------------------- #
 def register_api_routes(mcp, cfg: Config) -> None:
@@ -755,6 +841,29 @@ def register_api_routes(mcp, cfg: Config) -> None:
             if exists is None:
                 return JSONResponse({"error": "not found"}, status_code=404)
             return JSONResponse(_events_for(conn, task_id, filter))
+        finally:
+            conn.close()
+
+    @mcp.custom_route("/api/file/{id}", methods=["GET"])
+    async def api_file(request):
+        """Download/view one shared file's bytes, token-scoped to its task.
+
+        Same viewer auth as the sibling ``/api/*`` routes (cookie/bearer/``?v=``) and
+        the same server-side scoping: the file must hang on a task this token may see,
+        else it 404s — indistinguishable from a file that doesn't exist, so a buddy
+        can't probe another task's file ids. GET only; this surface never accepts an
+        upload (D11).
+        """
+        file_id = request.path_params["id"]
+        conn = connect()
+        try:
+            viewer = _resolve(request, conn)
+            if viewer is None:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            f = _file_for(conn, viewer, file_id)
+            if f is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return _file_response(f)
         finally:
             conn.close()
 
