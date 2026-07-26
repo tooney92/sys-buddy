@@ -145,6 +145,8 @@ def role_prompt(
             "- `wm` wait_for_message · `ch` check for new messages now (read + ack), don't block\n"
             "- `sm <text>` send_message · `sm @role <text>` direct it to one role\n"
             "- `files` list_files · `getfile <id>` get_file · `upload <path>` upload_file\n"
+            "- `upto <text>` share_activity — an ambient \"what we're up to\" note "
+            "(planning/researching); NOT a message or a status\n"
             "- `resolved` / `stuck` → report_status(resolved / stuck)\n"
             "- `pf` re-run pre-flight · `st` status recap · `rules` re-read the charter\n\n"
             "Don't start yet. Pass pre-flight, read `rules()`, then wait for your human's "

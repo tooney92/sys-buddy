@@ -34,7 +34,7 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import files, identity, readiness, service, todos
+from . import activity, files, identity, readiness, service, todos
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -496,6 +496,24 @@ def _files_for(conn, task_id: str) -> list[dict]:
     return out
 
 
+def _activity_for(conn, task_id: str) -> list[dict]:
+    """The activity strip: every ambient "what we're up to" note on the task, oldest-first,
+    each reduced to what the dashboard renders — ``{id, text, role, time}`` where ``time``
+    is the mono HH:MM the rest of the dashboard uses.
+
+    Source is ``activity.list_activity`` (id/text/created_at/role); we swap the raw
+    ``created_at`` for a formatted ``time`` here rather than shipping both, because — unlike
+    the thread — a note has no per-second re-sort to drive, so the float buys the UI nothing.
+
+    Like ``files`` and the ``todo*`` keys this is ADDITIVE, and the caller OMITS it entirely
+    for a task with no notes, so a pre-activity task serialises byte-identically to before.
+    """
+    return [
+        {"id": a["id"], "text": a["text"], "role": a["role"], "time": _hhmm(a["created_at"])}
+        for a in activity.list_activity(conn, task_id)
+    ]
+
+
 def _task_detail(conn, task_id: str) -> dict | None:
     """Full per-task payload (SPEC §11 ``/api/task/{id}``), or ``None`` if absent.
 
@@ -547,6 +565,13 @@ def _task_detail(conn, task_id: str) -> dict | None:
     file_list = _files_for(conn, task_id)
     if file_list:
         detail["files"] = file_list
+    # `activity` follows the exact same additive/omit-when-empty rule as `files`: a task
+    # with no notes carries no `activity` key, so its payload is byte-identical to before
+    # this feature and an older on-disk `ui.html` sees nothing new (a newer page reads
+    # `d.activity || []`, happy either way).
+    activity_list = _activity_for(conn, task_id)
+    if activity_list:
+        detail["activity"] = activity_list
     return detail
 
 
@@ -624,6 +649,14 @@ def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
                 ]
                 for d in task_todos
             ]
+        # Activity notes are append-only and never edited or deleted, so a plain COUNT
+        # is a sufficient fingerprint: it moves 0→1→2… as notes are posted, flipping the
+        # detail token so the dashboard's presence strip refreshes live over SSE. Added
+        # as a key only when the task HAS notes, so a pre-activity task's token stays
+        # byte-identical to before (same rule the todos/files keys follow above).
+        task_activity = _activity_for(conn, tid)
+        if task_activity:
+            fingerprint["activity"] = len(task_activity)
         task_tokens[tid] = json.dumps(fingerprint, sort_keys=True)
 
     return json.dumps(sorted(list_parts)), task_tokens
