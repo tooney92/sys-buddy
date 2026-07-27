@@ -89,8 +89,16 @@ var STEPS=[['open','open'],['preflight','pre-flight assessments'],['contract_pro
 var STEPS_TODO=[['open','open'],['preflight','pre-flight assessments'],['todos','todos']];
 /* The mini-stepper INSIDE a todo — the five dropped phases folded to four nodes, so
    nobody learns a second idiom; it is the familiar widget one level down. `testing`
-   shares the `build` node: a todo under test is still being built until it verifies. */
-var TODO_STEPS=[['planning','planning'],['locked','locked'],['build','build'],['verified','verified']];
+   shares the `ready` node: a todo under test is still standing on the producer's
+   delivery until it verifies.
+
+   The labels name what is HAPPENING, not the event that just fired. Locking is an
+   instant, not a phase — so `contract_locked` lights `building`, because that is what
+   the humans are doing for the whole time the todo sits there. The old labels were a
+   step behind reality: `locked` sat current while people built, and `build` only lit
+   up once the producer was already live, i.e. once building was over. `ready` matches
+   the shorthand the producer actually types (`ready #N`). */
+var TODO_STEPS=[['planning','planning'],['building','building'],['ready','ready'],['verified','verified']];
 var TODO_MARCH={open:0,contract_proposed:0,contract_locked:1,backend_live:2,testing:2,verified:3};
 /* The AGREEMENT stage (todo.status) — NOT the march above. `pending` borrows the amber
    `testing` palette on purpose: it is the one row on this screen asking a human for
