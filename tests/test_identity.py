@@ -93,3 +93,64 @@ def test_revoked_viewer_is_rejected(conn):
     conn.commit()
 
     assert identity.resolve_viewer_token(conn, "sbv_buddy") is None
+
+
+# --------------------------------------------------------------------------- #
+# ensure_local_identity is keyed on the NAME, not the role
+# --------------------------------------------------------------------------- #
+# Regression: the lookup used to match on `role`, but inserts set role=name. Once an
+# agent's role differed from its name (reassigned, or seeded then corrected), the lookup
+# missed and inserted a SECOND agent with the same name — and appended that name to
+# roles_json as a phantom role, so the task showed duplicate agents and pre-flight chips
+# that no flow could ever clear.
+def test_ensure_local_identity_is_idempotent_after_a_role_change(conn):
+    from sys_buddy import service
+
+    first = service.ensure_local_identity(conn, "demo", "be-agent")
+    conn.execute("UPDATE agents SET role = ? WHERE id = ?", ("backend", first.agent_id))
+    conn.commit()
+
+    again = service.ensure_local_identity(conn, "demo", "be-agent")
+
+    assert again.agent_id == first.agent_id, "must find the existing agent, not duplicate it"
+    assert again.role == "backend", "must return the CURRENT role, not the name"
+
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM agents WHERE task_id = ? AND name = ?", ("demo", "be-agent")
+    ).fetchone()[0]
+    assert rows == 1
+
+
+def test_ensure_local_identity_does_not_grow_roles_json_on_reseen_agent(conn):
+    import json
+
+    from sys_buddy import service
+
+    ident = service.ensure_local_identity(conn, "demo2", "be-agent")
+    conn.execute("UPDATE agents SET role = ? WHERE id = ?", ("backend", ident.agent_id))
+    conn.commit()
+
+    before = json.loads(
+        conn.execute("SELECT roles_json FROM tasks WHERE id = ?", ("demo2",)).fetchone()[0]
+    )
+    service.ensure_local_identity(conn, "demo2", "be-agent")
+    after = json.loads(
+        conn.execute("SELECT roles_json FROM tasks WHERE id = ?", ("demo2",)).fetchone()[0]
+    )
+
+    assert before == after, "re-seeing an agent must not append a phantom role"
+
+
+def test_ensure_local_identity_still_provisions_a_genuinely_new_agent(conn):
+    import json
+
+    from sys_buddy import service
+
+    service.ensure_local_identity(conn, "demo3", "be-agent")
+    second = service.ensure_local_identity(conn, "demo3", "fe-agent")
+
+    assert second.role == "fe-agent"  # name doubles as role on first sight
+    roles = json.loads(
+        conn.execute("SELECT roles_json FROM tasks WHERE id = ?", ("demo3",)).fetchone()[0]
+    )
+    assert roles == ["be-agent", "fe-agent"]

@@ -39,25 +39,39 @@ def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
             "INSERT INTO tasks (id, title, state, roles_json, created_at) VALUES (?,?,?,?,?)",
             (task_id, task_id, "open", json.dumps([agent_name]), now),
         )
+        row_roles: list[str] = [agent_name]
     else:
-        roles = json.loads(row["roles_json"])
-        if agent_name not in roles:
-            roles.append(agent_name)
-            conn.execute("UPDATE tasks SET roles_json = ? WHERE id = ?", (json.dumps(roles), task_id))
+        row_roles = json.loads(row["roles_json"])
 
+    # Look the agent up by NAME, not by role. The name is the identity here ("make sure
+    # THIS agent exists"); the role merely defaults to it on first sight. Keying on role
+    # meant that once an agent's role differed from its name — reassigned on the task, or
+    # seeded then corrected — this lookup missed and inserted a SECOND agent with the same
+    # name, and appended that name to roles_json as a phantom role. The task then showed
+    # duplicate agents and bogus pre-flight chips that no flow could ever clear.
     agent = conn.execute(
-        "SELECT id, task_id, name, role FROM agents WHERE task_id = ? AND role = ?",
+        "SELECT id, task_id, name, role FROM agents WHERE task_id = ? AND name = ?",
         (task_id, agent_name),
     ).fetchone()
-    if agent is None:
-        cur = conn.execute(
-            "INSERT INTO agents (task_id, name, role, token_hash, created_at) VALUES (?,?,?,?,?)",
-            (task_id, agent_name, agent_name, None, now),
-        )
+    if agent is not None:
         conn.commit()
-        return Identity(agent_id=cur.lastrowid, task_id=task_id, name=agent_name, role=agent_name)
+        return Identity(
+            agent_id=agent["id"], task_id=agent["task_id"], name=agent["name"], role=agent["role"]
+        )
+
+    # Genuinely new agent: register its name as a role (local mode's name-doubles-as-role
+    # convention) only now, so re-seeing an existing agent can never grow roles_json.
+    if agent_name not in row_roles:
+        row_roles.append(agent_name)
+        conn.execute(
+            "UPDATE tasks SET roles_json = ? WHERE id = ?", (json.dumps(row_roles), task_id)
+        )
+    cur = conn.execute(
+        "INSERT INTO agents (task_id, name, role, token_hash, created_at) VALUES (?,?,?,?,?)",
+        (task_id, agent_name, agent_name, None, now),
+    )
     conn.commit()
-    return Identity(agent_id=agent["id"], task_id=agent["task_id"], name=agent["name"], role=agent["role"])
+    return Identity(agent_id=cur.lastrowid, task_id=task_id, name=agent_name, role=agent_name)
 
 
 def ensure_broker_identity(conn, task_id: str) -> Identity:
