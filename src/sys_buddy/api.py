@@ -34,7 +34,7 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import activity, files, identity, readiness, service, slack, todos
+from . import activity, files, identity, readiness, service, slack, state, todos
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -307,9 +307,15 @@ def _todos_for(conn, task_id: str) -> list[dict]:
     """The todo panel: every todo on the task, each with its own contract block.
 
     The wire shape is ``todos.to_dict`` verbatim (so the dashboard and the agents'
-    ``get_todos`` never drift) plus two view-only additions: ``time`` for the mono
-    HH:MM the rest of the dashboard uses, and ``contract`` — this deliverable's own
-    chain in exactly the shape the task card already renders.
+    ``get_todos`` never drift) plus three view-only additions: ``time`` for the mono
+    HH:MM the rest of the dashboard uses, ``contract`` — this deliverable's own
+    chain in exactly the shape the task card already renders — and ``next``.
+
+    ``next`` is ``state.next_step``: who owes the next move and the literal shorthand
+    they type. It is computed SERVER-SIDE, beside the gates ``report_status`` enforces,
+    precisely so it cannot become a second copy of the rules living in the dashboard's
+    JS — a "next step" that drifts from what the broker allows sends a human to type a
+    command that will be refused.
 
     Nothing is withheld by stage: a todo is a title, a scope and a party list, with no
     ``staging_url`` equivalent to protect until agreement (its contract block does the
@@ -320,6 +326,7 @@ def _todos_for(conn, task_id: str) -> list[dict]:
         d = dict(t)
         d["time"] = _hhmm(t["created_at"])
         d["contract"] = _contract_for(conn, task_id, todo_id=t["id"])
+        d["next"] = state.next_step(conn, task_id, t["id"])
         out.append(d)
     out.sort(key=lambda t: (_TODO_ORDER.get(t["status"], 1), t["id"]))
     return out

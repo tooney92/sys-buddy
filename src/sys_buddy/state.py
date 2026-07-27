@@ -303,6 +303,187 @@ def _producer_role(conn, task_id: str, todo_id: int | None = None) -> str | None
     return row["role"] if row else None
 
 
+# --------------------------------------------------------------------------- #
+# "what happens next" — the ONE move that unblocks a todo
+# --------------------------------------------------------------------------- #
+# The failure this exists to fix: a human stares at a locked todo that will not move
+# and has no way to know the next move is his own agent typing `ready #1`. Nothing on
+# the dashboard said what it was waiting for.
+#
+# It lives HERE, next to the gates, and is computed from the SAME predicates
+# ``report_status`` enforces — ``_newest_contract``, ``_current_locked``,
+# ``_producer_role``, ``todos.status_of``, the todo's own march — rather than being a
+# second, hand-maintained copy of the rules in JS. A "next step" that drifts from what
+# the broker actually allows is worse than none: it sends a human to type a command
+# that will be refused.
+#
+# The shorthand strings are the ones the agent prompt teaches and the dashboard
+# cheatsheet mirrors (`yes #N`, `pc #N`, `sign #N`, `ready #N`, `ok #N`, `done #N`).
+# Naming the literal thing to TYPE is the whole point — "backend must report ready" is
+# still a puzzle if you don't know what to say to your agent.
+
+# The verb each shorthand maps to, for the tooltip/aria text. Kept beside the codes so
+# the two cannot drift.
+_NEXT_TOOLS = {
+    "yes": "accept_todo({id})",
+    "no": "decline_todo({id}, reason)",
+    "pc": "propose_contract(spec, todo={id})",
+    "sign": "lock_contract(version, todo={id})",
+    "ready": "report_status('ready', detail, todo={id})",
+    "ok": "report_status('checked', detail, todo={id})",
+    "block": "report_status('blocked', detail, todo={id})",
+    "done": "report_status('verified', detail, todo={id})",
+}
+
+
+def _who_label(roles: list[str]) -> str:
+    """``backend`` · ``backend or mobile`` · ``backend, mobile or frontend``."""
+    if not roles:
+        return "nobody"
+    if len(roles) == 1:
+        return roles[0]
+    return ", ".join(roles[:-1]) + " or " + roles[-1]
+
+
+def _next(stage, who, cmd, text, *, alt=None, todo_id=None, human=False, done=False):
+    return {
+        "stage": stage,
+        "who": list(who or []),
+        "who_label": _who_label(list(who or [])) if who else None,
+        "cmd": cmd,
+        "alt": alt,
+        "tool": (
+            _NEXT_TOOLS[cmd.split()[0]].format(id=todo_id)
+            if cmd and cmd.split()[0] in _NEXT_TOOLS
+            else None
+        ),
+        "text": text,
+        "human": human,
+        "done": done,
+    }
+
+
+def next_step(conn, task_id: str, todo_id: int) -> dict:
+    """The one move that unblocks todo ``todo_id``: WHO owes it and WHAT they type.
+
+    The branch order deliberately mirrors the guard order the writes enforce, so the
+    answer can never promise a move the broker would refuse:
+
+    * dropped / verified — terminal, nothing is owed (``_report_on_todo``);
+    * three strikes — the broker pulled the cord, HUMANS own it (``_report_on_todo``);
+    * not every party has accepted — ``_resolve_contract_todo`` refuses a contract on a
+      todo that is still ``pending``, so the move is the missing ``yes``;
+    * no contract at all — one of the parties proposes. There is NO producer yet (the
+      producer is derived from whoever proposed the lock), so we say "one of you"
+      rather than inventing a name;
+    * a proposal in flight — the outstanding signatures. ``_report_todo_deployed``
+      refuses ``ready`` while the newest version is unsigned, even when an older one is
+      locked, which is exactly why this branch sits above the producer branches;
+    * locked but not live — the producer, and only the producer, reports ``ready``;
+    * live — the CONSUMERS (every party but the producer) check it;
+    * testing — any party may call it verified, once a check has actually run.
+    """
+    row = todos.get_row(conn, task_id, todo_id)
+    tid = row["id"]
+    parties = todos.parties_of(row)
+    status = todos.status_of(conn, row)
+
+    if status == todos.DROPPED:
+        return _next(
+            "dropped", [], None,
+            "Dropped — it no longer counts toward this task. Nothing is owed.",
+            todo_id=tid, done=True,
+        )
+    if row["state"] == VERIFIED:
+        return _next(
+            "verified", [], None,
+            "Done — this deliverable is verified end to end. Nothing left to do; "
+            "follow-up work is a NEW todo.",
+            todo_id=tid, done=True,
+        )
+
+    # The three-strike cord (SPEC §8) is enforced off the DB count, and once it is
+    # pulled no agent report is accepted at all — so no shorthand would work here.
+    if row["strikes"] >= MAX_STRIKES:
+        return _next(
+            "cord_pulled", [], None,
+            f"{MAX_STRIKES} fix cycles reached — the broker pulled the cord and the "
+            f"humans own this one. Drop it from your terminal, or agree a fresh todo.",
+            todo_id=tid, human=True,
+        )
+
+    # --- agree on WHAT ------------------------------------------------------
+    if status == todos.PENDING:
+        d = todos.decisions(conn, tid, row["version"])
+        awaiting = [p for p in parties if d.get(p, {}).get("decision") != todos.ACCEPT]
+        return _next(
+            "pending", awaiting, f"yes #{tid}",
+            f"{_who_label(awaiting)} still has to agree to the SCOPE — their agent types "
+            f"`yes #{tid}` (or `no #{tid} <why>` to send it back for a reshape). "
+            f"Nothing here moves until then.",
+            alt=f"no #{tid} <why>", todo_id=tid,
+        )
+
+    # --- agree on HOW -------------------------------------------------------
+    newest = _newest_contract(conn, task_id, todo_id=tid)
+    if newest is None:
+        return _next(
+            "accepted", parties, f"pc #{tid}",
+            f"Everyone agreed on WHAT. Next is HOW: one of you proposes the contract — "
+            f"`pc #{tid}`. Whoever proposes it becomes the PRODUCER for this "
+            f"deliverable, so there is no producer yet.",
+            todo_id=tid,
+        )
+
+    if newest["status"] != "locked":
+        signed = set(_signatures_for(conn, newest["id"]))
+        awaiting = [p for p in parties if p not in signed]
+        return _next(
+            "contract_proposed", awaiting, f"sign #{tid}",
+            f"Contract v{newest['version']} is proposed and waiting on "
+            f"{_who_label(awaiting)} to sign — `sign #{tid}`. The staging URL stays "
+            f"hidden until every party has signed, and nobody can report ready until "
+            f"it locks.",
+            todo_id=tid,
+        )
+
+    # A lock exists on this todo, so its proposer exists too — but never interpolate a
+    # None into a sentence a human is meant to act on.
+    producer = _producer_role(conn, task_id, todo_id=tid)
+    owner = [producer] if producer else []
+    named = producer or "whoever proposed the locked contract"
+    consumers = [p for p in parties if p != producer]
+
+    if row["state"] not in (BACKEND_LIVE, TESTING):
+        return _next(
+            "contract_locked", owner, f"ready #{tid}",
+            f"The contract is locked and nothing is building yet — {named} proposed "
+            f"it, so {named} is the producer and owes the build. When their side is "
+            f"live to build against, their agent types `ready #{tid}`. Only they can: "
+            f"the broker refuses `ready` from anyone else.",
+            todo_id=tid,
+        )
+
+    if row["state"] == BACKEND_LIVE:
+        return _next(
+            "backend_live", consumers, f"ok #{tid}",
+            f"{_who_label(consumers)} builds against it and reports back — `ok #{tid}` "
+            f"if it works, `block #{tid}` if it doesn't (that's a strike; {MAX_STRIKES} "
+            f"and the humans take over). The producer ({named}) may not check its "
+            f"own work.",
+            alt=f"block #{tid}", todo_id=tid,
+        )
+
+    # testing — checks have run, so `done` is finally allowed.
+    return _next(
+        "testing", parties, f"done #{tid}",
+        f"Checks have run. When it's confirmed end to end, any party calls it: "
+        f"`done #{tid}`. `block #{tid}` instead if a check failed. The task itself "
+        f"concludes when the LAST todo is done.",
+        alt=f"block #{tid}", todo_id=tid,
+    )
+
+
 def _todo_march(conn, task_id: str, todo_id: int, from_state: str, to_state: str) -> str:
     """Advance ONE todo's march, logging it as a ``todo`` event.
 
