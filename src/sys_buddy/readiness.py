@@ -10,10 +10,14 @@ wires it up: ``readiness_check()`` surfaces ``questions(...)``, and
 
 Grading is deliberately forgiving: matching is case-insensitive substring matching.
 The goal is to confirm the agent demonstrably knows the essentials, not to trap it on
-exact wording.
+exact wording. But forgiving has a floor — a needle short enough to appear inside common
+words ("be" in "because") makes a check unfalsifiable, so short needles are matched as
+whole words. See ``_contains`` vs ``_contains_word``.
 """
 
 from __future__ import annotations
+
+import re
 
 
 def _status_question(role: str, mode: str) -> dict:
@@ -133,11 +137,33 @@ def preview_questions() -> list[str]:
 
 
 def _contains(text: str, needle: str) -> bool:
+    """Substring match, case-insensitive.
+
+    DELIBERATELY loose — it has to match ``to_role="backend"`` inside a sentence, and
+    tool names inside prose. The cost is that SHORT needles false-positive: "be" matches
+    "because"/"before", "ok" matches "broken", so grading on one gates nothing and every
+    agent passes. Use :func:`_contains_word` for any needle under ~5 characters, or one
+    that is a common English fragment.
+    """
     return needle.lower() in text.lower()
 
 
+def _contains_word(text: str, needle: str) -> bool:
+    """Whole-word match, case-insensitive — the safe choice for short needles.
+
+    Word boundaries are applied around the escaped needle, so "be" matches "be" and
+    "@BE" but never "because".
+    """
+    return re.search(rf"\b{re.escape(needle.lower())}\b", text.lower()) is not None
+
+
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
-    return any(_contains(text, n) for n in needles)
+    """True if ANY needle appears. Short needles are matched as whole words so a caller
+    can pass a mixed bag ("stuck", "verified", "done") without one weak entry silently
+    making the whole check unfalsifiable."""
+    return any(
+        _contains_word(text, n) if len(n) <= 4 else _contains(text, n) for n in needles
+    )
 
 
 def _grade_role(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, str]:

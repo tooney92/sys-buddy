@@ -180,3 +180,26 @@ def test_submit_readiness_persists_status_and_report(conn):
     passed = next(a for a in api._agents_for(conn, "signin") if a["role"] == "backend")
     assert passed["readiness_status"] == "passed"
     assert passed["ready"] is True
+
+
+# --------------------------------------------------------------------------- #
+# grading helpers — the "short needle" footgun
+# --------------------------------------------------------------------------- #
+def test_contains_is_substring_and_says_so():
+    # Loose ON PURPOSE so it matches tool names inside prose.
+    assert readiness._contains('I pass to_role="backend"', "to_role")
+    # ...and this is exactly why short needles must not use it:
+    assert readiness._contains("because I said so", "be")
+
+
+def test_contains_word_rejects_the_because_trap():
+    assert readiness._contains_word("send it to @BE", "be")
+    assert readiness._contains_word("BE means backend", "be")
+    assert not readiness._contains_word("because I said so", "be")
+    assert not readiness._contains_word("before we start", "be")
+
+
+def test_contains_any_word_matches_short_needles():
+    # A weak short needle must not make the whole check unfalsifiable.
+    assert not readiness._contains_any("because, therefore", ("be", "ok"))
+    assert readiness._contains_any("I am stuck", ("be", "stuck"))
