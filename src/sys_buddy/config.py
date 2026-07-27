@@ -20,6 +20,14 @@ from pathlib import Path
 DEFAULT_DB_PATH = Path(os.environ.get("SYS_BUDDY_DB", "~/.sys-buddy/sys_buddy.db")).expanduser()
 DEFAULT_PORT = int(os.environ.get("SYS_BUDDY_PORT", "8787"))
 
+# The port a THROWAWAY dev/test broker binds, kept off DEFAULT_PORT on purpose: the
+# owner is often mid-session on 8787, and a second broker that tries to bind it dies
+# with errno 48 while every request quietly goes to the live one — which then looks
+# like an auth/data bug rather than a port collision. Anything automated (Playwright
+# runs, seeded fixtures, throwaway brokers) uses this instead:
+#     uv run sys-buddy local --port $SYS_BUDDY_DEV_PORT
+DEV_PORT = int(os.environ.get("SYS_BUDDY_DEV_PORT", "9292"))
+
 
 @dataclass
 class Config:

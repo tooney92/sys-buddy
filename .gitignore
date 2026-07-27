@@ -37,3 +37,9 @@ __pycache__/
 
 # Playwright MCP scratch output (screenshots/snapshots from browser-driven checks)
 .playwright-mcp/
+
+# Personal/private — never committed
+tutorial/
+enterprise/
+ideas/
+demo/

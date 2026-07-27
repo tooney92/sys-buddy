@@ -12,9 +12,20 @@ Source of truth: `SPEC.md`. Build brief: `KICKOFF.md`. Deviations/decisions: `DE
 - Tests: `uv run pytest -q`.
 
 ## Local testing & deploy workflow (owner-directed)
+- **NEVER test on `:8787`.** That is the owner's real broker and they are often mid-session on
+  it. A second broker cannot bind it — it dies with `errno 48` while your requests silently go
+  to the LIVE one, which then looks like an auth or data bug. Never `pkill` a broker you did
+  not start.
+- **Test brokers bind `:9292`** (`SYS_BUDDY_DEV_PORT`, `config.DEV_PORT`) against a throwaway
+  db, never the default one:
+  ```
+  SYS_BUDDY_DB=~/.sys-buddy-dev/sys_buddy.db uv run sys-buddy local --port 9292
+  ```
+  Confirm the port is free first (`lsof -nP -iTCP:9292 -sTCP:LISTEN`) and check the boot log
+  actually says `9292` before driving it.
 - **We test LOCALLY.** A `git push` / publish is NEVER a prerequisite for testing. E2E runs
-  against the **local** broker: `uv run sys-buddy local` on `:8787`, driving the dashboard at
-  `http://127.0.0.1:8787/ui` with **Playwright**. Backend behaviour is covered by `pytest`.
+  against the **local** broker on `:9292`, driving the dashboard at
+  `http://127.0.0.1:9292/ui` with **Playwright**. Backend behaviour is covered by `pytest`.
 - **Push/publish happens ONLY on the owner's explicit directive, and ONLY AFTER** local pytest +
   Playwright are green — never to unblock a test.
 - The dashboard needs a viewer token. Mint one against the **local** db with
