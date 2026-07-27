@@ -243,17 +243,30 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       <details class="pw" id="playwright-note" hidden>
         <summary>Set up Playwright <span class="tag">recommended for UI testing</span></summary>
         <div class="pw-body">
-          <p class="hint">Lets your agent drive a real browser to test the frontend against the API. Optional — not required to pair.</p>
+          <p class="hint">Lets your agent drive a real browser, so it can <em>prove</em> the UI works against the API instead of asserting it. <strong>Optional</strong> — not required to pair, and you can add it later.</p>
           <p class="hint">Prerequisite: <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a> installed (it provides <code>npx</code>).</p>
           <ol>
             <li>Add the Playwright MCP:</li>
           </ol>
-          <pre class="code" id="pw-cmd">claude mcp add playwright npx '@playwright/mcp@latest'</pre>
+          <pre class="code" id="pw-cmd">claude mcp add playwright npx '@playwright/mcp@0.0.77'</pre>
           <div class="copy-row"><button type="button" class="btn copy" id="copy-pw">Copy command</button></div>
+          <p class="hint">Prefer a file you can commit and share with the rest of your team? Put this at your project root instead — same result, and everyone gets the identical setup:</p>
+          <pre class="code">.mcp.json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.77"]
+    }
+  }
+}</pre>
           <ol start="2">
-            <li>Restart your Claude session.</li>
+            <li><strong>Restart your Claude session.</strong> MCP servers only load at start-up — without a restart the tools simply won't be there, which is the usual reason this looks broken.</li>
             <li>Verify with <code>claude mcp list</code> — it should list <strong>playwright</strong>.</li>
           </ol>
+          <p class="hint"><strong>What to expect.</strong> The first run downloads the package, so it's slow once and needs a network connection. It then opens <em>its own</em> browser window on a throwaway profile — not your everyday browser, so none of your saved sessions, extensions, or history are visible to it. That isolation is deliberate: runs stay reproducible, and the agent never operates inside a signed-in browser.</p>
+          <p class="hint">The version is <strong>pinned on purpose</strong>. Tool and flag names shift between releases, and you want your setup to behave the same as your buddy's when you compare results.</p>
+          <p class="hint">If you also run a browser <em>extension</em>-based tool, that's a different thing driving your real browser. Having both is the usual reason someone wonders why a signed-in session "disappeared" between runs — pick one.</p>
         </div>
       </details>
     </div>

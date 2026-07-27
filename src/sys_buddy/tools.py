@@ -332,7 +332,20 @@ def _op_readiness_check(ident: Identity) -> dict:
         mode = row["mode"] if row and row["mode"] else "contract"
     finally:
         conn.close()
-    return {"questions": readiness.questions(ident.role, mode)}
+    # `notes` is guidance, NOT graded — nothing here is a question and nothing here can
+    # fail you. Playwright rides along at pre-flight because this is the moment an agent
+    # is thinking about how it will prove its work, and it is far cheaper to set up now
+    # than mid-test. Stated as optional on purpose: the broker only ever needs an honest
+    # report_status, never a particular tool.
+    notes = [
+        "Optional, not graded: if you'll be verifying a UI, the Playwright MCP lets you "
+        "drive a real browser and PROVE your work instead of asserting it. Your HUMAN "
+        "installs it (it changes their config, and an MCP server only loads at session "
+        "start, so a restart is needed either way) — just tell them if you want it. "
+        "Testing any other way is equally fine; the broker needs your honest "
+        "report_status and a verified once it truly works, never a specific tool."
+    ]
+    return {"questions": readiness.questions(ident.role, mode), "notes": notes}
 
 
 def _op_submit_readiness(ident: Identity, answers: dict) -> dict:
