@@ -435,6 +435,24 @@ def next_step(conn, task_id: str, todo_id: int) -> dict:
             todo_id=tid,
         )
 
+    if newest["status"] == "declined":
+        # The whole point of decline: "waiting on X to sign" would be a lie here — X has
+        # looked and objected. The move is a NEW version, not a signature.
+        row = conn.execute(
+            "SELECT a.role AS role, c.decline_reason AS reason FROM contracts c "
+            "LEFT JOIN agents a ON a.id = c.declined_by WHERE c.id = ?",
+            (newest["id"],),
+        ).fetchone()
+        who = row["role"] if row and row["role"] else None
+        why = f" — \u201c{row['reason']}\u201d" if row and row["reason"] else ""
+        return _next(
+            "contract_declined", parties, f"pc #{tid}",
+            f"{(who or 'A party')} declined contract v{newest['version']}{why}. That "
+            f"version is dead and cannot be signed. Someone proposes a new one that "
+            f"addresses it — `pc #{tid}`.",
+            todo_id=tid,
+        )
+
     if newest["status"] != "locked":
         signed = set(_signatures_for(conn, newest["id"]))
         awaiting = [p for p in parties if p not in signed]
@@ -725,6 +743,12 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
             f"contract version {version} is already locked and immutable; "
             f"propose a new version to change it"
         )
+    if contract["status"] == "declined":
+        raise ValueError(
+            f"contract version {version} was declined and cannot be signed. "
+            f"Propose a new version with propose_contract(spec) that addresses the "
+            f"objection — get_contract shows who declined it and why."
+        )
 
     todo = None
     if contract["todo_id"] is not None:
@@ -855,6 +879,101 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
         out["todo_id"] = todo["id"]
         out["todo_state"] = CONTRACT_LOCKED
     return out
+
+
+def decline_contract(
+    conn, identity: Identity, reason: str, todo_id: int | None = None
+) -> dict:
+    """Formally push back on a PROPOSED contract: mark that version declined, with a reason.
+
+    Why this exists. A contract had ``lock`` and nothing else, so an unsigned proposal
+    meant EITHER "I have read it and I object" OR "I have not looked yet". The broker
+    could not tell those apart, so neither could the dashboard, so the humans had to hold
+    it in their heads — the exact class of invisibility that strands a collaboration.
+    Todos already had accept AND decline; contracts were the odd one out.
+
+    A decline kills that VERSION: nobody may sign it afterwards, and the answer is a new
+    proposal, never a mutation of this one (same immutability rule as a locked contract).
+    That is not the same as destroying agreed work — a proposal is not yet agreed, and
+    withholding a signature already blocked it. This only makes the block visible, and
+    says why.
+
+    Anyone bound by the contract may decline, INCLUDING its proposer (who may spot their
+    own mistake before a peer wastes time reviewing it).
+    """
+    _assert_live(conn, identity.task_id)
+    service.assert_content_size(reason, "decline reason")
+    if not (reason or "").strip():
+        raise ValueError(
+            "a decline needs a reason — your peer has to know what to change in the "
+            "next version"
+        )
+
+    newest = _newest_contract(conn, identity.task_id, todo_id)
+    if newest is None:
+        scope = f"todo {todo_id}" if todo_id is not None else f"task '{identity.task_id}'"
+        raise ValueError(
+            f"nothing to decline on {scope} — no contract has been proposed yet. "
+            f"Declining pushes back on a PROPOSAL; there has to be one first."
+        )
+    if newest["status"] == "locked":
+        raise ValueError(
+            f"contract v{newest['version']} is already locked — a locked contract is "
+            f"immutable. To change it, both of you reopen planning with "
+            f"reopen_negotiations(reason), then a new version is proposed and signed."
+        )
+    if newest["status"] == "declined":
+        raise ValueError(
+            f"contract v{newest['version']} is already declined — propose a new version "
+            f"with propose_contract(spec) rather than declining it twice."
+        )
+
+    todo = None
+    if newest["todo_id"] is not None:
+        todo = todos.get_row(conn, identity.task_id, newest["todo_id"])
+        # A non-party has no say in a shape that does not bind it — the mirror image of
+        # the same rule on signing.
+        todos.assert_party(todo, identity.role, "decline a contract on")
+
+    now = time.time()
+    conn.execute(
+        "UPDATE contracts SET status = 'declined', declined_by = ?, decline_reason = ?, "
+        "declined_at = ? WHERE id = ?",
+        (identity.agent_id, reason, now, newest["id"]),
+    )
+    # Any signatures already on this version are void with it — keeping them would let a
+    # later reader think the version was part-agreed when it is dead.
+    conn.execute("DELETE FROM contract_signatures WHERE contract_id = ?", (newest["id"],))
+    conn.commit()
+
+    scope_note = f" on todo #{todo['id']} ({todo['title']})" if todo else ""
+    _event(
+        conn,
+        identity.task_id,
+        "lock",
+        {
+            "text": f"Contract v{newest['version']}{scope_note} declined by "
+                    f"{identity.role}: {reason}"
+        },
+    )
+    service.post_message(
+        conn,
+        identity,
+        "renegotiation",
+        f"Declined contract v{newest['version']}{scope_note}: {reason}. That version is "
+        f"dead — nobody can sign it now. Propose a new version with propose_contract(spec"
+        + (f", todo={todo['id']}" if todo else "")
+        + ") that addresses this, or message me if you want to talk the shape through first.",
+        todo_id=(todo["id"] if todo else None),
+    )
+    return {
+        "version": newest["version"],
+        "status": "declined",
+        "declined_by": identity.role,
+        "reason": reason,
+        "todo_id": (todo["id"] if todo else None),
+        "next": "propose a new version with propose_contract(spec)",
+    }
 
 
 def reopen_negotiations(

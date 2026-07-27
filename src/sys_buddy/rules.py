@@ -104,6 +104,12 @@ and locked. The steps:
      staging_url, the ONLY URL you may ever fetch (see rule 2). If you signed earlier,
      the broker PUSHES you a contract_locked notification when the final signature
      lands (wait_for_message wakes on it) — never poll get_contract for the lock.
+  3b. If you have READ a proposal and object to it, say so with decline_contract(reason)
+     — do not just stay silent. An unsigned contract is ambiguous: it looks exactly the
+     same whether you are objecting or have not opened it yet, and your peer cannot tell
+     which. Declining marks that version dead (nobody can sign it) and carries your
+     reason, so the answer is a NEW version that addresses it. Once a contract is
+     LOCKED, decline is the wrong tool — use reopen_negotiations instead.
   4. Then the producer calls report_status("ready") → consumers call
      report_status("checked") or report_status("blocked") → report_status("verified").
      Wrong shape after lock? reopen_negotiations and propose a new version for all to

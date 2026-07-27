@@ -155,6 +155,14 @@ def _op_lock(ident: Identity, version: int, todo: int | None = None) -> dict:
         conn.close()
 
 
+def _op_decline_contract(ident: Identity, reason: str, todo: int | None = None) -> dict:
+    conn = connect()
+    try:
+        return state.decline_contract(conn, ident, reason, todo)
+    finally:
+        conn.close()
+
+
 def _op_reopen(ident: Identity, reason: str, todo: int | None = None) -> dict:
     conn = connect()
     try:
@@ -465,6 +473,21 @@ def _register_remote(mcp: FastMCP) -> None:
         return _op_lock(require_current(), version, todo or None)
 
     @mcp.tool
+    def decline_contract(reason: str, todo: int = 0) -> dict:
+        """Push back on a PROPOSED contract: mark that version declined, with a reason.
+
+        Use when you have read the proposal and object — a different shape, a missing
+        endpoint, a URL you can't reach. Silence is NOT a decline: an unsigned contract
+        looks identical to one nobody has opened yet, so declining is how your objection
+        becomes visible to your peer and on the dashboard.
+
+        The declined version is dead — nobody can sign it afterwards. The answer is a new
+        proposal (`propose_contract`) that addresses your reason, never an edit of the old
+        one. If the contract is already LOCKED this is the wrong tool: both of you reopen
+        planning with `reopen_negotiations` instead."""
+        return _op_decline_contract(require_current(), reason, todo or None)
+
+    @mcp.tool
     def get_contract(todo: int = 0) -> dict:
         """The current contract for your task — PROPOSED or LOCKED.
         Before it locks, this shows the proposed SHAPE to review (with `status:
@@ -735,6 +758,21 @@ def _register_local(mcp: FastMCP) -> None:
         parties for a contract on a todo. Pass `todo` and the broker checks it matches
         the version, so you can't sign the wrong deliverable's shape."""
         return _op_lock(_local_identity(task, agent), version, todo or None)
+
+    @mcp.tool
+    def decline_contract(task: str, agent: str, reason: str, todo: int = 0) -> dict:
+        """Push back on a PROPOSED contract: mark that version declined, with a reason.
+
+        Use when you have read the proposal and object — a different shape, a missing
+        endpoint, a URL you can't reach. Silence is NOT a decline: an unsigned contract
+        looks identical to one nobody has opened yet, so declining is how your objection
+        becomes visible to your peer and on the dashboard.
+
+        The declined version is dead — nobody can sign it afterwards. The answer is a new
+        proposal (`propose_contract`) that addresses your reason, never an edit of the old
+        one. If the contract is already LOCKED this is the wrong tool: both of you reopen
+        planning with `reopen_negotiations` instead."""
+        return _op_decline_contract(_local_identity(task, agent), reason, todo or None)
 
     @mcp.tool
     def get_contract(task: str, todo: int = 0) -> dict:
