@@ -4,6 +4,15 @@ sys-buddy is an authenticated, contract-enforcing MCP broker that lets two devel
 AI coding agents collaborate across the internet. **The broker enforces; agents request.**
 Source of truth: `SPEC.md`. Build brief: `KICKOFF.md`. Deviations/decisions: `DECISIONS.md`.
 
+## Concepts
+- **[`docs/todo-flow.md`](docs/todo-flow.md)** — how a todo goes from idea to verified: the two
+  state fields (`status` = the agreement, `state` = the march) and why the dashboard shows both,
+  the start-to-end walkthrough with the human shorthand (`todo` → `yes #N` → `pc #N` → `sign #N`
+  → `ready #N` → `ok #N` → `done #N`), who may act at each gate, why `#N` is mandatory, and the
+  two traps — `sign` before anything is proposed does nothing, and **nothing auto-advances**
+  (every arrow is a person deciding). Read it before touching `todos.py` or the todo paths in
+  `state.py`.
+
 ## Stack
 - Python 3.11+, FastMCP (HTTP transport), SQLite (WAL). Env & deps via **`uv`**.
 - One process, three surfaces: `/mcp` (MCP tools) · `/pair` (pairing REST) · `/ui` + `/api/*` (read-only dashboard).
