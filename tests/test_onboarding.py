@@ -118,18 +118,40 @@ def test_role_prompt_is_task_agnostic(role, mode):
     assert "readiness_check" in low and "rules" in low
 
 
-def test_role_prompt_is_role_aware_backend_vs_consumer():
-    """Producer convention (pinned): the `backend` role is drilled on PROPOSING; every
-    other role on ASSESSING/pushing back and signing — so the two prompts differ."""
-    backend = onboarding.role_prompt("backend", "signin")
-    frontend = onboarding.role_prompt("frontend", "signin")
-    assert backend != frontend.replace("`frontend`", "`backend`")
-    # Backend is the producer; consumer assesses and can push back.
-    assert "producer" in backend.lower()
-    assert "propose_contract" in backend
-    low_f = frontend.lower()
-    assert "assess" in low_f or "push back" in low_f
-    assert "not forced to sign" in low_f
+def test_role_prompt_is_identical_for_every_role():
+    """Model B (pinned): the producer is whoever PROPOSES the contract — decided per
+    deliverable, hardcoded to no role name (state._producer_role). So the briefing must be
+    the same for everyone bar the role it addresses.
+
+    This previously branched on `role == "backend"`, which silently broke any task without
+    a role by that name: in a designer+frontend session NEITHER matched, so both agents were
+    briefed as assessors, neither was told it could propose, and they waited on each other
+    while the broker was perfectly willing to proceed."""
+    for role in ("backend", "frontend", "mobile", "designer"):
+        rendered = onboarding.role_prompt(role, "signin")
+        assert rendered == onboarding.role_prompt("backend", "signin").replace(
+            "`backend`", f"`{role}`"
+        ), f"{role} got a different briefing — the producer must not be hardcoded"
+
+
+@pytest.mark.parametrize("role", ["backend", "frontend", "mobile", "designer"])
+def test_role_prompt_teaches_both_halves_to_every_role(role):
+    """Every role learns to propose AND to assess, because either may end up doing either."""
+    low = onboarding.role_prompt(role, "signin").lower()
+    assert "propose_contract" in low
+    assert "assess" in low or "push back" in low
+    assert "not forced to sign" in low
+
+
+@pytest.mark.parametrize("role", ["backend", "frontend", "mobile", "designer"])
+def test_role_prompt_never_claims_a_fixed_producer_role(role):
+    """The prompt must not tell anyone they ARE the producer up front — nobody is, until
+    someone proposes. Naming a role here is the exact drift this test exists to catch."""
+    low = onboarding.role_prompt(role, "signin").lower()
+    assert "you are the backend" not in low
+    assert "the backend proposes" not in low
+    # ...and it must say what actually decides it.
+    assert "whoever proposes" in low
 
 
 def test_role_prompt_teaches_planning_and_reopen():
@@ -142,13 +164,14 @@ def test_role_prompt_teaches_planning_and_reopen():
         assert "no re-lock" in low or "without" in low
 
 
-def test_role_prompt_consumer_mentions_optional_playwright():
-    """The consumer gets the optional Playwright-MCP setup nudge; the backend doesn't."""
-    frontend = onboarding.role_prompt("frontend", "signin").lower()
-    backend = onboarding.role_prompt("backend", "signin").lower()
-    assert "playwright" in frontend
-    assert "optional" in frontend  # never a gate
-    assert "playwright" not in backend
+@pytest.mark.parametrize("role", ["backend", "frontend", "mobile", "designer"])
+def test_role_prompt_mentions_optional_playwright_for_every_role(role):
+    """The Playwright nudge used to be consumer-only, which assumed we knew at briefing
+    time who would consume. We don't — any role may end up building against a peer's
+    contract, so everyone gets it, and it stays explicitly optional (never a gate)."""
+    low = onboarding.role_prompt(role, "signin").lower()
+    assert "playwright" in low
+    assert "optional" in low
 
 
 @pytest.mark.parametrize("mode", ["contract", "debug"])

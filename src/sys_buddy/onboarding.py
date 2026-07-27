@@ -158,12 +158,21 @@ def role_prompt(
             "direction."
         )
 
-    # Contract flow — role-aware on the producer convention: the role literally named
-    # `backend` is the producer (it proposes the contract); every other role assesses
-    # and signs. Both halves share the phase model (pre-flight → planning → locked
-    # → build → test → verified) and the post-lock rules; only the planning verbs
-    # and the test-tooling note differ.
-    is_backend = role.strip().lower() == "backend"
+    # Contract flow — ONE briefing for every role, teaching both halves.
+    #
+    # This used to branch on `role == "backend"`: that role got the producer briefing,
+    # everyone else got the assessor one. That contradicted the broker, which decides
+    # the producer as "whoever proposed the currently locked contract", per todo, and
+    # hardcodes no role name (model B — see state._producer_role). The mismatch broke
+    # any task without a role literally called `backend`: in a designer+frontend
+    # session NEITHER matched, so BOTH agents were briefed as assessors, neither was
+    # told it could propose, and the two sat waiting for each other while the broker
+    # was perfectly willing to proceed.
+    #
+    # At briefing time there is genuinely no producer — no contract exists yet. That is
+    # not a gap to paper over, it IS the rule: the producer is chosen by the act of
+    # proposing. So both halves are taught to everyone, and who does what is settled by
+    # what actually happens on the task.
 
     # The human owns the deployment target: when they named one at host setup, say so
     # explicitly in BOTH briefings so neither agent invents a different URL.
@@ -174,80 +183,80 @@ def role_prompt(
         if target else ""
     )
 
-    if is_backend:
-        planning = (
-            "You are the BACKEND — the producer. You define the API. In planning you "
-            "propose the contract with `propose_contract(spec)`: it must carry at least one "
-            "endpoint (each a `method` + `path`) and a `staging_url` — the base URL your peer "
-            "connects to. Put that URL in the contract, NEVER in a chat message. (Remotely it "
-            "must be a real https domain; locally `http://localhost:PORT` is fine.) Propose only "
-            "when your human directs it. `propose_contract` registers the version AND notifies "
-            "your peer, and your peer can immediately review the shape with `get_contract` "
-            "(it shows the proposal, with the staging_url withheld until lock). If your peer "
-            "asks for changes, revise and `propose_contract` again — that's a new version. When "
-            "you're both happy, each side signs with `lock_contract`; once everyone signs it "
-            "locks and `get_contract` exposes the full contract incl. the staging_url. If you "
-            "sign first you don't poll for the lock — the broker pushes you a `contract_locked` "
-            "notification the moment the last signature lands, so a parked `wait_for_message` "
-            "wakes on it.\n\n"
-        )
-        test_note = (
-            "Progress: once your side is live for the peer to build on, `report_status(\"ready\")` "
-            "— and hand them the floor so they pick it up (\"over to you — I'm live on staging\"). "
-            "`verified` when it all works end-to-end; `stuck` if you need the humans.\n\n"
-        )
-    else:
-        planning = (
-            "You are the CONSUMER — you build against the backend's API. In planning the "
-            "BACKEND proposes the contract; your job is to ASSESS it. When a `contract_proposal` "
-            "message arrives, review the proposed shape with `get_contract` — before it locks it "
-            "returns status:\"proposed\" with the interface shape and who's signed (the "
-            "`staging_url` is withheld until lock). You are not forced to sign a proposal you "
-            "disagree with — push back with `send_message` (ask for changes or clarification), and "
-            "the backend re-proposes a new version. When it's right and your human says so, sign "
-            "that version by number with `lock_contract`. It locks once every role has signed — "
-            "and only THEN does `get_contract` also return the signed `staging_url`. If you sign "
-            "first you don't poll for the lock — the broker pushes you a `contract_locked` "
-            "notification the moment the last signature lands, so a parked `wait_for_message` "
-            "wakes on it.\n\n"
-        )
-        test_note = (
-            "Progress & your cue to act: the backend reporting `ready` is the signal its side is "
-            "LIVE and hands you the floor — THAT is when you do your dependent work. Confirm "
-            "you've seen that `ready` before you point tests at the `staging_url`: the broker "
-            "won't let you report a check before the producer is ready, but nothing stops your "
-            "suite from hitting a not-yet-deployed URL and drowning in errors — so wait for the "
-            "live signal first. Then `report_status(\"checked\")` when it works against their side "
-            "(reporting a check is what moves the task into `testing`), or `blocked` if it "
-            "doesn't — but only AFTER you've actually run the tests; a status is a claim about "
-            "work you did, never a reflex to the backend going live. `verified` when it all works "
-            "end-to-end; `stuck` if you need the humans.\n\n"
-            "Testing tip (optional): you'll likely integrate/verify against the `staging_url` "
-            "using the Playwright MCP — it drives a real browser, so you can prove the thing "
-            "works rather than assert it. This is only a suggestion; test however you like. The "
-            "broker just needs your honest `report_status` and a `verified` once it truly works. "
-            "If you don't have it set up, tell your human — THEY install it, not you (it changes "
-            "their machine's config, and an MCP server only loads at session start, so they have "
-            "to restart anyway). Two ways:\n"
-            "- A file at their project root, which is shareable and version-controllable:\n"
-            "  `.mcp.json` → "
-            "`{\"mcpServers\":{\"playwright\":{\"command\":\"npx\",\"args\":[\"-y\","
-            "\"@playwright/mcp@0.0.77\"]}}}`\n"
-            "- Or the CLI equivalent: `claude mcp add playwright npx '@playwright/mcp@0.0.77'`, "
-            "checked with `claude mcp list`.\n"
-            "What to expect, so nothing surprises them: it needs Node/npx, and `npx -y` downloads "
-            "the package on first run (slow once, needs network). **Pin the version** rather than "
-            "using `@latest` — flag and tool names shift between releases, and you and your peer "
-            "want identical behaviour when you compare results. It opens its OWN browser window on "
-            "a throwaway profile: not their everyday browser, so no saved sessions, extensions, or history "
-            "— that isolation is the point, it keeps runs reproducible and keeps an agent out of an "
-            "authenticated session. `--user-data-dir <path>` gives a persistent-but-separate "
-            "profile if a signed-in session needs to survive between runs; `--extension` / `--cdp-endpoint` "
-            "attach to an already-running browser, which gives that isolation away — don't reach "
-            "for them by default. **The session must be restarted after adding it** or the tools "
-            "simply won't be there. And if they also run a browser EXTENSION-based tool, that is a "
-            "different thing driving their real session — having both is the usual reason someone "
-            "wonders why a signed-in session 'disappeared' between runs.\n\n"
+    planning = (
+        "WHO PRODUCES. There is no fixed producer role on this task and no role name is "
+        "special. The PRODUCER is whoever proposes the contract, decided per deliverable by "
+        "the act of proposing. Propose it and you own building that side; let your peer "
+        "propose and you build against theirs. On a task with several todos the roles can "
+        "differ per todo — you may produce todo #1 while your peer produces todo #2, each "
+        "consuming the other's. Either of you may propose; both of you must assess.\n\n"
+        "IF YOU PROPOSE. `propose_contract(spec)` must carry at least one endpoint (each a "
+        "`method` + `path`) and a `staging_url` — the base URL your peer connects to. Put "
+        "that URL in the contract, NEVER in a chat message. (Remotely it must be a real "
+        "https domain; locally `http://localhost:PORT` is fine.) Propose only when your "
+        "human directs it. It registers the version AND notifies your peer, who can "
+        "immediately review the shape with `get_contract`. If they ask for changes, revise "
+        "and `propose_contract` again — that's a new version. Proposing makes you the "
+        "producer for that deliverable, so you are the one who later reports `ready` and "
+        "the one who may NOT check your own work.\n\n"
+        "IF YOUR PEER PROPOSES. Your job is to ASSESS it. When a `contract_proposal` message "
+        "arrives, review the proposed shape with `get_contract` — before it locks it returns "
+        "status:\"proposed\" with the interface shape and who's signed (the `staging_url` is "
+        "withheld until lock). You are not forced to sign a proposal you disagree with — push "
+        "back with `send_message` (ask for changes or clarification) and let them re-propose, "
+        "or propose your own version if you have a better shape in mind. If you have READ "
+        "it and object, `decline_contract(reason)` makes that formal — silence is not a "
+        "decline, because an unsigned contract looks the same whether you are objecting "
+        "or have not opened it. A declined version is dead; the answer is a new one.\n\n"
+        "SIGNING, EITHER WAY. When it's right and your human says so, sign that version by "
+        "number with `lock_contract`. It locks once EVERY party has signed — and only then "
+        "does `get_contract` also return the signed `staging_url`. If you sign first you "
+        "don't poll for the lock: the broker pushes you a `contract_locked` notification the "
+        "moment the last signature lands, so a parked `wait_for_message` wakes on it.\n\n"
+    )
+    test_note = (
+        "Progress — which half you're in depends on whether you proposed.\n"
+        "AS THE PRODUCER (you proposed the locked contract): once your side is live for your "
+        "peer to build on, `report_status(\"ready\")` — and hand them the floor so they pick "
+        "it up (\"over to you — I'm live on staging\"). Only you can report `ready`; the "
+        "broker refuses it from anyone else. You may NOT report checks on your own work.\n"
+        "AS A CONSUMER (your peer proposed it): "
+        "the producer reporting `ready` is the signal its side is "
+        "LIVE and hands you the floor — THAT is when you do your dependent work. Confirm "
+        "you've seen that `ready` before you point tests at the `staging_url`: the broker "
+        "won't let you report a check before the producer is ready, but nothing stops your "
+        "suite from hitting a not-yet-deployed URL and drowning in errors — so wait for the "
+        "live signal first. Then `report_status(\"checked\")` when it works against their side "
+        "(reporting a check is what moves the task into `testing`), or `blocked` if it "
+        "doesn't — but only AFTER you've actually run the tests; a status is a claim about "
+        "work you did, never a reflex to the producer going live. `verified` when it all works "
+        "end-to-end; `stuck` if you need the humans.\n\n"
+        "Testing tip (optional): you'll likely integrate/verify against the `staging_url` "
+        "using the Playwright MCP — it drives a real browser, so you can prove the thing "
+        "works rather than assert it. This is only a suggestion; test however you like. The "
+        "broker just needs your honest `report_status` and a `verified` once it truly works. "
+        "If you don't have it set up, tell your human — THEY install it, not you (it changes "
+        "their machine's config, and an MCP server only loads at session start, so they have "
+        "to restart anyway). Two ways:\n"
+        "- A file at their project root, which is shareable and version-controllable:\n"
+        "  `.mcp.json` → "
+        "`{\"mcpServers\":{\"playwright\":{\"command\":\"npx\",\"args\":[\"-y\","
+        "\"@playwright/mcp@0.0.77\"]}}}`\n"
+        "- Or the CLI equivalent: `claude mcp add playwright npx '@playwright/mcp@0.0.77'`, "
+        "checked with `claude mcp list`.\n"
+        "What to expect, so nothing surprises them: it needs Node/npx, and `npx -y` downloads "
+        "the package on first run (slow once, needs network). **Pin the version** rather than "
+        "using `@latest` — flag and tool names shift between releases, and you and your peer "
+        "want identical behaviour when you compare results. It opens its OWN browser window on "
+        "a throwaway profile: not their everyday browser, so no saved sessions, extensions, or history "
+        "— that isolation is the point, it keeps runs reproducible and keeps an agent out of an "
+        "authenticated session. `--user-data-dir <path>` gives a persistent-but-separate "
+        "profile if a signed-in session needs to survive between runs; `--extension` / `--cdp-endpoint` "
+        "attach to an already-running browser, which gives that isolation away — don't reach "
+        "for them by default. **The session must be restarted after adding it** or the tools "
+        "simply won't be there. And if they also run a browser EXTENSION-based tool, that is a "
+        "different thing driving their real session — having both is the usual reason someone "
+        "wonders why a signed-in session 'disappeared' between runs.\n\n"
         )
 
     return (
@@ -299,6 +308,7 @@ def role_prompt(
         "`MB` mobile · `DE` designer (any case), so `sm @BE <text>` means to_role=\"backend\". "
         "Tags name a role, never a person, and only work for roles declared on this task\n"
         "- `pc [#N]` propose_contract · `gc [#N]` get_contract · `sign [#N]` lock_contract · "
+        "`decline <why> [#N]` decline_contract (push back on a proposal you've read) · "
         "`reopen <why> [#N]` reopen_negotiations — add `#N` to aim any of these at todo N "
         "(e.g. `pc #3` proposes the contract ON todo 3, signed by its parties); plain = the "
         "TASK-level contract. No `locked?` — the broker pushes the lock to you; `wm` catches it\n"

@@ -19,7 +19,7 @@ html,body{margin:0;padding:0}
   --text:#211F1C;--text-2:#6B6763;--text-3:#9C978F;
   --accent:#E0693F;--accent-2:#C4552E;--accent-soft:#FBEADF;
   --shadow:0 1px 2px rgba(40,30,20,.04),0 6px 16px rgba(40,30,20,.05);
-  --role-backend:#5468C9;--role-frontend:#C0568C;--role-mobile:#3F9E8C;--role-system:#8A857F;
+  --role-backend:#5468C9;--role-frontend:#C0568C;--role-mobile:#3F9E8C;--role-designer:#B8823C;--role-system:#8A857F;
   --ok:#2C8A3D;--ok-bg:#E1F2E3;--ok-fg:#2C8A3D;
   --err:#BF4638;--err-bg:#FBE7E3;--err-fg:#BF4638;
   --amber-bg:#FBF0DA;--amber-fg:#A9720F;--amber-border:#E0A22B;
@@ -30,7 +30,7 @@ html,body{margin:0;padding:0}
   --text:#F3F1EE;--text-2:#A7A29C;--text-3:#726D68;
   --accent:#F0845C;--accent-2:#F59A77;--accent-soft:#38271F;
   --shadow:0 1px 2px rgba(0,0,0,.24),0 6px 18px rgba(0,0,0,.30);
-  --role-backend:#7E8FE0;--role-frontend:#DB7CAC;--role-mobile:#5FBDAA;--role-system:#9A948D;
+  --role-backend:#7E8FE0;--role-frontend:#DB7CAC;--role-mobile:#5FBDAA;--role-designer:#D6A05E;--role-system:#9A948D;
   --ok:#74CB82;--ok-bg:#182C1C;--ok-fg:#74CB82;
   --err:#F08876;--err-bg:#301C19;--err-fg:#F08876;
   --amber-bg:#2F2712;--amber-fg:#E6B95F;--amber-border:#D9A032;
@@ -43,7 +43,7 @@ html,body{margin:0;padding:0}
     --text:#F3F1EE;--text-2:#A7A29C;--text-3:#726D68;
     --accent:#F0845C;--accent-2:#F59A77;--accent-soft:#38271F;
     --shadow:0 1px 2px rgba(0,0,0,.24),0 6px 18px rgba(0,0,0,.30);
-    --role-backend:#7E8FE0;--role-frontend:#DB7CAC;--role-mobile:#5FBDAA;--role-system:#9A948D;
+    --role-backend:#7E8FE0;--role-frontend:#DB7CAC;--role-mobile:#5FBDAA;--role-designer:#D6A05E;--role-system:#9A948D;
     --ok:#74CB82;--ok-bg:#182C1C;--ok-fg:#74CB82;
     --err:#F08876;--err-bg:#301C19;--err-fg:#F08876;
     --amber-bg:#2F2712;--amber-fg:#E6B95F;--amber-border:#D9A032;
@@ -165,7 +165,7 @@ textarea.prompt:focus{outline:none;border-color:var(--accent)}
 textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .copy-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .hint{font-size:.84rem;color:var(--text-3);margin:2px 0 0;line-height:1.5}
-/* optional, collapsible "recommended: Playwright" block (non-backend roles) */
+/* optional, collapsible "recommended: Playwright" block (every role) */
 .pw{margin-top:10px;border:1px solid var(--border-strong);border-radius:11px;background:var(--surface)}
 .pw > summary{
   cursor:pointer;list-style:none;padding:11px 14px;
@@ -239,7 +239,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       </div>
       <p class="hint">Run this in the terminal where you start Claude Code, then restart your Claude session.</p>
 
-      <!-- Optional, collapsed by default; JS reveals it only for non-backend (UI) roles. -->
+      <!-- Optional, collapsed by default; shown to every role (any role may consume). -->
       <details class="pw" id="playwright-note" hidden>
         <summary>Set up Playwright <span class="tag">recommended for UI testing</span></summary>
         <div class="pw-body">
@@ -305,7 +305,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   }
 
   /* ---------- role tint (best-effort; falls back to accent) ---------- */
-  var ROLE_COLORS = {backend:'var(--role-backend)',frontend:'var(--role-frontend)',mobile:'var(--role-mobile)'};
+  var ROLE_COLORS = {backend:'var(--role-backend)',frontend:'var(--role-frontend)',mobile:'var(--role-mobile)',designer:'var(--role-designer)'};
   function roleColor(role){ return ROLE_COLORS[(role||'').toLowerCase()] || 'var(--accent)'; }
 
   /* ---------- copy-to-clipboard helper (ported from gui_app.html) ---------- */
@@ -441,15 +441,16 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     connectCmd.textContent = cmd;                 // textContent — no manual escaping needed
     copyCmdBtn.onclick = function(){ copyText(cmd, copyCmdBtn); };
 
-    // Optional Playwright walkthrough — only for non-backend (UI) roles.
-    if (String(role).toLowerCase() !== 'backend'){
-      playwrightNote.hidden = false;
-      var pwCmdEl = document.getElementById('pw-cmd');
-      var copyPwBtn = document.getElementById('copy-pw');
-      copyPwBtn.onclick = function(){ copyText(pwCmdEl.textContent, copyPwBtn); };
-    } else {
-      playwrightNote.hidden = true;
-    }
+    // Optional Playwright walkthrough — shown to EVERY role.
+    // This used to be hidden for the role named 'backend', on the assumption that role
+    // produces and never consumes. The broker makes no such promise: the producer is
+    // whoever proposes the contract, per deliverable (state._producer_role), so any role
+    // may end up building against a peer's contract and wanting a browser to verify with.
+    // It is collapsed by default and explicitly optional, so showing it costs nothing.
+    playwrightNote.hidden = false;
+    var pwCmdEl = document.getElementById('pw-cmd');
+    var copyPwBtn = document.getElementById('copy-pw');
+    copyPwBtn.onclick = function(){ copyText(pwCmdEl.textContent, copyPwBtn); };
 
     // Step 2 — briefing prompt (readonly textarea).
     promptTa.value = res.prompt || '';
