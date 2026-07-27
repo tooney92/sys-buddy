@@ -34,7 +34,7 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import activity, files, identity, readiness, service, todos
+from . import activity, files, identity, readiness, service, slack, todos
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -143,6 +143,11 @@ def viewer_block(viewer: ViewerIdentity) -> dict:
     block: dict = {"mode": "host" if viewer.is_host else "buddy", "label": viewer.label}
     if not viewer.is_host:
         block["task_id"] = viewer.task_id
+    # A BOOLEAN, never the webhook. Everyone watching the task benefits from knowing
+    # whether terminal events reach a channel — an unarmed Slack looks identical to an
+    # armed one until a "stuck" ping silently goes nowhere. The URL is a bearer
+    # credential and never crosses to the browser (see slack.is_configured).
+    block["slack_active"] = slack.is_configured()
     return block
 
 

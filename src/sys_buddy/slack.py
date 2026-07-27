@@ -30,6 +30,37 @@ def _mrkdwn_safe(text: str) -> str:
     return safe if len(safe) <= MAX_SLACK_CHARS else safe[:MAX_SLACK_CHARS] + "…"
 
 
+def validate_webhook(url: str) -> str | None:
+    """Return an error string for a bad webhook URL, or None when it's usable.
+
+    Shared by every entry point (Host screen, CLI env var, notify) so they cannot
+    disagree about what's acceptable. https is required for the same reason as in
+    ``notify``: task content must never go out in cleartext or to a non-web scheme.
+    """
+    url = (url or "").strip()
+    if not url:
+        return "Paste a Slack webhook URL."
+    parsed = urlparse(url)
+    if (parsed.scheme or "").lower() != "https":
+        return "The webhook must be an https:// URL."
+    if not parsed.netloc:
+        return "That doesn't look like a URL."
+    # Deliberately NOT pinned to hooks.slack.com: self-hosted relays and test doubles are
+    # legitimate, and baking a vendor hostname into a validator ages badly. https + a real
+    # host is the security boundary; the rest is the operator's call.
+    return None
+
+
+def is_configured() -> bool:
+    """Whether a usable webhook is set on the CURRENT process config.
+
+    The dashboard surfaces this as a boolean and nothing more — the URL itself is a
+    bearer credential and must never reach the browser.
+    """
+    webhook = get_config().slack_webhook
+    return bool(webhook) and validate_webhook(webhook) is None
+
+
 def notify(text: str) -> str:
     """Post ``text`` to the configured Slack webhook. Never raises.
 

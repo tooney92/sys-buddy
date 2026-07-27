@@ -27,7 +27,7 @@ html,body{margin:0;padding:0}
   --st-testing-bg:#FBF0DA;--st-testing-fg:#A9720F;--st-testing-dot:#E0A22B;
   --st-verified-bg:#E1F2E3;--st-verified-fg:#2C8A3D;--st-verified-dot:#33A852;
   --st-stuck-bg:#FBE7E3;--st-stuck-fg:#BF4638;--st-stuck-dot:#DE5B4A;
-  --role-backend:#5468C9;--role-frontend:#C0568C;--role-mobile:#3F9E8C;--role-system:#8A857F;
+  --role-backend:#5468C9;--role-frontend:#C0568C;--role-mobile:#3F9E8C;--role-designer:#B8823C;--role-system:#8A857F;
 }
 [data-theme="dark"]{
   --bg:#161514;--surface:#201E1D;--surface-2:#282624;--surface-3:#312E2B;
@@ -42,7 +42,7 @@ html,body{margin:0;padding:0}
   --st-testing-bg:#2F2712;--st-testing-fg:#E6B95F;--st-testing-dot:#D9A032;
   --st-verified-bg:#182C1C;--st-verified-fg:#74CB82;--st-verified-dot:#3FB457;
   --st-stuck-bg:#301C19;--st-stuck-fg:#F08876;--st-stuck-dot:#DA6152;
-  --role-backend:#7E8FE0;--role-frontend:#DB7CAC;--role-mobile:#5FBDAA;--role-system:#9A948D;
+  --role-backend:#7E8FE0;--role-frontend:#DB7CAC;--role-mobile:#5FBDAA;--role-designer:#D6A05E;--role-system:#9A948D;
 }
 body{min-height:100vh;background:var(--bg);color:var(--text);
   font-family:'Geist',-apple-system,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
@@ -69,7 +69,12 @@ var ORDER={open:0,contract_proposed:1,contract_locked:2,backend_live:3,testing:4
 // `broker` is not an agent seat — it's the broker's own voice, used for the
 // notifications it authors (e.g. contract_locked). Neutral system colour so it never
 // reads as one of the peers talking.
-var RL={backend:{i:'B',c:'var(--role-backend)',label:'backend'},frontend:{i:'F',c:'var(--role-frontend)',label:'frontend'},mobile:{i:'M',c:'var(--role-mobile)',label:'mobile'},broker:{i:'SB',c:'var(--role-system)',label:'sys-buddy'}};
+var RL={backend:{i:'B',c:'var(--role-backend)',label:'backend'},frontend:{i:'F',c:'var(--role-frontend)',label:'frontend'},mobile:{i:'M',c:'var(--role-mobile)',label:'mobile'},designer:{i:'D',c:'var(--role-designer)',label:'designer'},broker:{i:'SB',c:'var(--role-system)',label:'sys-buddy'}};
+/* Short tags a human types instead of spelling a role out ("sm @BE ..."). Mirrors
+   ROLE_TAGS in service.py — the broker is what actually resolves them; this copy exists
+   so the shortcodes cheatsheet renders the list rather than hard-coding it and drifting,
+   which is exactly how `upto` went missing from the cheatsheet in the first place. */
+var ROLE_TAGS={be:'backend',fe:'frontend',mb:'mobile',de:'designer'};
 // The 'preflight' node has no matching task state — it's a sub-phase of 'open',
 // driven by per-agent readiness (see genSteps). ORDER above stays keyed on the REAL
 // task states; genSteps maps real→display indices around the inserted node.
@@ -481,6 +486,19 @@ function headerHTML(){
   /* mobile: header would overflow — drop the scope badge (list/subtitle already convey it) */
   if(m) scopeBadge='';
 
+  /* Slack chip. Renders ONLY when armed — an absent chip means "no Slack", which is the
+     honest default and keeps the header quiet for the many tasks that never wire one up.
+     The API hands back a boolean (viewer.slack_active); the webhook itself is a bearer
+     credential and never reaches the browser. Terminal events (verified/resolved/stuck/
+     waiting) are what actually get posted, so the title says so rather than implying
+     every message is mirrored. */
+  var slackChip = '';
+  if(state.viewer && state.viewer.slack_active && !m){
+    slackChip='<div title="Terminal events (verified · resolved · stuck · waiting) are posted to Slack" '+
+      'style="display:flex;align-items:center;gap:6px;padding:5px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:999px;font-size:12px;font-weight:500;color:var(--text-2)">'+
+      '<span style="width:7px;height:7px;border-radius:50%;background:var(--st-verified-dot)"></span>Slack</div>';
+  }
+
   /* "+ New task" — host only, and only inside the desktop app (the pywebview bridge
      exists). Never shown to buddy viewers or in a plain browser, so the dashboard
      stays read-only for everyone who can't already start tasks. It deep-links back to
@@ -507,6 +525,7 @@ function headerHTML(){
     '</div>'+
     '<div style="flex:1"></div>'+
     newTaskBtn+
+    slackChip+
     scopeBadge+
     '<div style="display:flex;align-items:center;gap:7px;flex:none" title="'+esc(refreshText())+'">'+
       '<span id="sb-refresh-dot" style="width:7px;height:7px;border-radius:50%;background:'+refreshDot+';animation:pulsedot 2.4s ease-in-out infinite"></span>'+
@@ -1042,8 +1061,9 @@ function tipsHTML(){
         '<span style="display:inline-flex;gap:3px;flex:none">'+
           '<span style="'+dot+';background:var(--role-backend)"></span>'+
           '<span style="'+dot+';background:var(--role-frontend)"></span>'+
-          '<span style="'+dot+';background:var(--role-mobile)"></span></span>'+
-        '<span>Roles are color-coded (backend · frontend · mobile).</span></div>'+
+          '<span style="'+dot+';background:var(--role-mobile)"></span>'+
+          '<span style="'+dot+';background:var(--role-designer)"></span></span>'+
+        '<span>Roles are color-coded (backend · frontend · mobile · designer).</span></div>'+
       '<div>Messages broadcast to everyone on the task by default.</div>'+
       '<div>A <span style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:999px;padding:1px 7px">→ role</span> chip means a private message directed to that one role.</div>'+
     '</div></details>';
@@ -1063,7 +1083,18 @@ function shortcodesHTML(d){
     cmd('wm', 'wait for the next message (blocks)')+
     cmd('ch', "check for new messages now (read + mark seen), don't block")+
     cmd('sm', 'send a message to everyone on the task')+
-    cmd('sm @role', 'send it privately to just that role');
+    cmd('sm @role', 'send it privately to just that role')+
+    cmd('upto', "share an ambient \"what we're up to\" note")+
+    cmd('notify', 'ping the humans on Slack — terminal events only')+
+    /* Role tags: the same @role slot, addressed by tag instead of the full name. Listed
+       under Messaging (not their own group) because they are an argument spelling, not a
+       command — `sm @BE` IS `sm @role`. Rendered from ROLE_TAGS so this row and the
+       broker's resolver can't drift apart. */
+    cmd('@' + Object.keys(ROLE_TAGS)[0].toUpperCase() + ' …',
+        'tag a role instead of spelling it: ' +
+        Object.keys(ROLE_TAGS).map(function(t){
+          return '<b>' + t.toUpperCase() + '</b> ' + ROLE_TAGS[t];
+        }).join(' · '));
   if(contract){
     rows +=
       grp('Contract')+

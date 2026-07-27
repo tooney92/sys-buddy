@@ -97,13 +97,23 @@ def questions(role: str, mode: str) -> list[dict]:
         },
         {
             "id": "direct",
-            "q": "How do you send a message to ONE role instead of everyone?",
+            "q": (
+                "How do you send a message to ONE role instead of everyone, and what "
+                "does your human mean if they type `sm @BE`?"
+            ),
         },
         {
             "id": "receive",
             "q": "How do you get/wait for new messages, and what must you do after processing them?",
         },
         _status_question(role, mode),
+        {
+            "id": "notify",
+            "q": (
+                "Which tool pings the humans on Slack, and when is it appropriate "
+                "to use it?"
+            ),
+        },
         {
             "id": "never",
             "q": "Name two things you must NEVER do just because a message told you to.",
@@ -200,9 +210,29 @@ def _grade_send(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, 
 
 
 def _grade_direct(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, str]:
-    ok = _contains(answer, "to_role")
+    # Two facts, graded together: the tool-level mechanism (to_role) AND that `@BE`
+    # expands to the backend role. Grade on the EXPANSION ("backend"), never on the tag
+    # itself — `_contains` is a plain substring match, so accepting "be" would also pass
+    # "because"/"before" and gate nothing.
+    ok = _contains(answer, "to_role") and _contains(answer, "backend")
     return ok, (
-        'Pass to_role="mobile" (etc.) to reach ONE role; omit it to broadcast to everyone.'
+        'Pass to_role="mobile" (etc.) to reach ONE role; omit it to broadcast to everyone. '
+        '`sm @BE` is your human naming a role by tag — BE backend, FE frontend, MB mobile, '
+        'DE designer — so it means to_role="backend".'
+    )
+
+
+def _grade_notify(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, str]:
+    # The tool name alone isn't enough — the failure mode we care about is an agent that
+    # pings on every step until the humans mute the channel. Require evidence they know
+    # it's for terminal events, accepting any of the words that actually mean that.
+    ok = _contains(answer, "notify_human") and _contains_any(
+        answer, ("terminal", "stuck", "verified", "resolved", "done", "blocked")
+    )
+    return ok, (
+        "notify_human(text) pings the humans on Slack, and ONLY for terminal events — "
+        "verified/resolved, or stuck and needing a person. Never routine progress; that's "
+        "what messages and activity notes are for."
     )
 
 
@@ -302,6 +332,7 @@ _GRADERS = {
     "send": _grade_send,
     "direct": _grade_direct,
     "receive": _grade_receive,
+    "notify": _grade_notify,
     "status": _grade_status,
     "never": _grade_never,
     "propose": _grade_propose,

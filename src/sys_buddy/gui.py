@@ -60,7 +60,19 @@ def _run_broker() -> None:
     from .server import run_server
 
     # build_server sets the global config + inits the db, then serves (blocking).
-    run_server(Config(mode="remote", host=BROKER_HOST, port=BROKER_PORT, public_url=None))
+    # SLACK_WEBHOOK_URL is picked up here so the desktop app honours it the same way the
+    # CLI does — without this the app built a Config with no webhook and every ping went
+    # nowhere, silently. The Host screen can also set it later via set_slack_webhook;
+    # either way it lives on the process config only and is never written to the db.
+    run_server(
+        Config(
+            mode="remote",
+            host=BROKER_HOST,
+            port=BROKER_PORT,
+            public_url=None,
+            slack_webhook=os.environ.get("SLACK_WEBHOOK_URL") or None,
+        )
+    )
 
 
 def _ensure_broker(timeout: float = 30.0) -> bool:
@@ -206,6 +218,60 @@ class GuiApi:
             return res
         except Exception as exc:
             return {"error": str(exc)}
+
+    def slack_status(self) -> dict:
+        """Whether Slack is armed on THIS process. Returns a boolean and a source hint —
+        never the webhook itself, which is a bearer credential (anyone holding it can post
+        to the channel indefinitely). ``source`` lets the Host screen say "picked up from
+        your environment" instead of showing an empty box over a working webhook."""
+        from . import slack
+        from .config import get_config
+
+        return {
+            "ok": True,
+            "active": slack.is_configured(),
+            "source": "env" if os.environ.get("SLACK_WEBHOOK_URL") else (
+                "session" if get_config().slack_webhook else "none"
+            ),
+        }
+
+    def set_slack_webhook(self, url: str) -> dict:
+        """Arm (or clear) Slack for this session. NOT persisted — by design.
+
+        Every credential in the db is a sha256 hash; a webhook must be replayed verbatim
+        to work, so storing it would make it the first plaintext secret at rest. It lives
+        on the process config and dies with the process. Pass "" to disarm.
+
+        Safe to call after the broker is up: the config object is process-global, so the
+        host can turn Slack on mid-session without restarting anything.
+        """
+        from . import slack
+        from .config import get_config
+
+        url = (url or "").strip()
+        if not url:
+            get_config().slack_webhook = None
+            return {"ok": True, "active": False}
+        err = slack.validate_webhook(url)
+        if err:
+            return {"ok": False, "error": err}
+        get_config().slack_webhook = url
+        return {"ok": True, "active": True}
+
+    def test_slack(self) -> dict:
+        """Send a real ping so the host gets PROOF before they rely on it.
+
+        A webhook that 404s (revoked, wrong workspace, typo'd) is indistinguishable from
+        a working one until something important fails to arrive — and `notify` is
+        deliberately best-effort, so nothing else would ever surface the error.
+        """
+        from . import slack
+        from .config import get_config
+
+        if not get_config().slack_webhook:
+            return {"ok": False, "error": "No webhook set yet."}
+        result = slack.notify("sys-buddy is connected to this channel. 👋")
+        return {"ok": result.startswith("Human notified"), "detail": result}
 
     def open_dashboard(self, url: str) -> dict:
         """Open the live read-only dashboard in its own native window (a separate

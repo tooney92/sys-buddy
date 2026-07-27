@@ -29,11 +29,18 @@ def _cfg_from_args(args: argparse.Namespace, mode: str = "local") -> Config:
     # `serve --public-url` only configures the serving process, so the *other*
     # commands learn it from the --public-url flag (where they have one) or the
     # SYS_BUDDY_PUBLIC_URL env var. Export the env var once and they all agree.
+    # The Slack webhook is read here — for EVERY mode — rather than only in `serve`,
+    # where it used to live. Both `local` and the desktop app build their config through
+    # this path, so pinging a human silently did nothing on the two on-ramps people
+    # actually use. It is never persisted: the DB holds only sha256 token hashes and this
+    # is a replayable bearer credential, so it stays process-local (env var or the Host
+    # screen) and dies with the process.
     cfg = set_config(
         Config(
             mode=mode,
             db_path=Path(getattr(args, "db", None) or DEFAULT_DB_PATH),
             public_url=getattr(args, "public_url", None) or os.environ.get("SYS_BUDDY_PUBLIC_URL"),
+            slack_webhook=os.environ.get("SLACK_WEBHOOK_URL") or None,
         )
     )
     # Ensure the schema exists once per invocation (idempotent, cheap) so host-side

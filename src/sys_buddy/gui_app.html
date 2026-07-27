@@ -636,6 +636,24 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
                  placeholder="http://localhost:3000">
           <p class="hint" id="staging-hint"></p>
         </div>
+
+        <!-- Slack. Session-scoped ON PURPOSE: every credential in the db is a sha256
+             hash, and a webhook has to be replayed verbatim to work, so persisting it
+             would put the first plaintext secret at rest. It lives on the process config
+             and dies with the app. SLACK_WEBHOOK_URL in the environment is the durable
+             path for anyone who wants one — owned by them, outside our storage. -->
+        <div class="field" id="slack-wrap">
+          <label for="in-slack">Slack notifications <span class="hint" style="display:inline">optional</span></label>
+          <input class="input" type="password" id="in-slack" autocomplete="off" spellcheck="false"
+                 placeholder="https://hooks.slack.com/services/…">
+          <div style="display:flex;align-items:center;gap:10px;margin-top:7px;flex-wrap:wrap">
+            <button type="button" class="btn" id="btn-slack-test">Send test message</button>
+            <span class="hint" id="slack-status"></span>
+          </div>
+          <p class="hint">Terminal events only — verified, resolved, stuck, or waiting on a
+             human. Not stored: it lasts for this session, so you'll paste it again next
+             launch (or export <code>SLACK_WEBHOOK_URL</code> to make it stick).</p>
+        </div>
       </div>
 
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:2px">
@@ -982,6 +1000,41 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var connUrlWrap  = document.getElementById('conn-url-wrap');
   var publicUrlEl  = document.getElementById('in-public-url');
   var stagingUrlEl = document.getElementById('in-staging-url');
+  var slackEl = document.getElementById('in-slack');
+  var slackTestBtn = document.getElementById('btn-slack-test');
+  var slackStatusEl = document.getElementById('slack-status');
+
+  /* Slack test-send. A revoked or typo'd webhook is indistinguishable from a working one
+     until something important fails to arrive — and notify is deliberately best-effort,
+     so nothing else would ever surface the error. This is the host's proof. */
+  if (slackTestBtn) {
+    slackTestBtn.addEventListener('click', function(){
+      var url = (slackEl && slackEl.value || '').trim();
+      if (!url) { slackStatusEl.textContent = 'Paste a webhook URL first.'; return; }
+      slackTestBtn.disabled = true;
+      slackStatusEl.textContent = 'Sending…';
+      Promise.resolve(api.set_slack_webhook(url)).then(function(set){
+        if (!set || !set.ok) { throw new Error((set && set.error) || 'Could not set the webhook.'); }
+        return api.test_slack();
+      }).then(function(res){
+        slackStatusEl.textContent = (res && res.ok)
+          ? '✓ Sent — check your channel.'
+          : ((res && res.detail) || 'Could not send.');
+      }).catch(function(e){
+        slackStatusEl.textContent = (e && e.message) || 'Could not send.';
+      }).then(function(){ slackTestBtn.disabled = false; });
+    });
+  }
+
+  /* If SLACK_WEBHOOK_URL is exported, Slack is already armed — say so, so an empty box
+     doesn't read as "off" over a working webhook. */
+  if (slackStatusEl && api.slack_status) {
+    Promise.resolve(api.slack_status()).then(function(s){
+      if (s && s.active && s.source === 'env') {
+        slackStatusEl.textContent = '✓ Active from SLACK_WEBHOOK_URL — leave blank to keep it.';
+      }
+    }).catch(function(){});
+  }
   var stagingHint  = document.getElementById('staging-hint');
   var hostBtn    = document.getElementById('btn-host');
   var hostGate   = document.getElementById('host-gate');
@@ -1120,6 +1173,11 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     var publicUrl = connMode === 'local' ? '' : (publicUrlEl && publicUrlEl.value || '').trim();
     // the human-owned deployment target (optional — the agents can still agree one)
     var stagingUrl = (stagingUrlEl && stagingUrlEl.value || '').trim();
+    // Slack is armed BEFORE the task exists, so the very first terminal event on it
+    // already reaches the channel. set_slack_webhook mutates the process config and is
+    // safe to call whether or not the broker is up yet.
+    var slackUrl = (slackEl && slackEl.value || '').trim();
+    if (slackUrl) { try { api.set_slack_webhook(slackUrl); } catch (e) {} }
 
     // starting state — swap to the full-page loader so the running screen lands
     // on its own page (no scrolling past the form to find the invites).

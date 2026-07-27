@@ -23,6 +23,48 @@ from .identity import Identity
 
 
 # --------------------------------------------------------------------------- #
+# role tags
+# --------------------------------------------------------------------------- #
+# Short tags a human types to their own agent ("sm @BE ...") so they don't have to
+# spell a role out. The agent is briefed to expand them (onboarding.py / rules.py),
+# but the BROKER resolves them too — a tag that reaches the wire is delivered rather
+# than rejected, which is the same "broker enforces, agents request" split used
+# everywhere else. Tags are a display convenience only: `roles_json` on the task keeps
+# storing canonical role names, so nothing downstream (delivery, dashboard, contracts)
+# ever sees a tag.
+ROLE_TAGS = {
+    "be": "backend",
+    "fe": "frontend",
+    "mb": "mobile",
+    "de": "designer",
+}
+
+
+def resolve_role(value: str, roles: list[str]) -> str | None:
+    """Resolve ``value`` to a role actually declared on the task, or None.
+
+    Accepts, in order: an exact match, a case-insensitive match ("Backend"), or a
+    short tag ("BE" → backend). Returns None when it resolves to nothing, so the
+    caller raises its own error — this function never decides policy.
+
+    A task is free to declare a role literally named "be"; the exact match wins
+    first, so a real role can never be shadowed by a tag.
+    """
+    if value in roles:
+        return value
+    folded = value.strip().lower()
+    for role in roles:
+        if role.lower() == folded:
+            return role
+    expanded = ROLE_TAGS.get(folded)
+    if expanded:
+        for role in roles:
+            if role.lower() == expanded:
+                return role
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # local-mode identity (self-declared, auto-provisioned on loopback)
 # --------------------------------------------------------------------------- #
 def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
@@ -210,10 +252,16 @@ def post_message(
     # Empty string means broadcast, same as None.
     if not to_role:
         to_role = None
-    elif to_role not in json.loads(task["roles_json"]):
-        raise ValueError(
-            f"cannot address '{to_role}' — not a role on task '{identity.task_id}'"
-        )
+    else:
+        # Resolve tags/casing to the canonical role BEFORE storing, so `to_role` on the
+        # message row is always a real role name — the dashboard and delivery fan-out
+        # match on it exactly and must never see "BE".
+        resolved = resolve_role(to_role, json.loads(task["roles_json"]))
+        if resolved is None:
+            raise ValueError(
+                f"cannot address '{to_role}' — not a role on task '{identity.task_id}'"
+            )
+        to_role = resolved
     assert_content_size(body, "message body")
     state_at_send = task["state"]
     now = time.time()
