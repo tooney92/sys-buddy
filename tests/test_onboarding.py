@@ -15,6 +15,7 @@ import json
 import pytest
 
 from sys_buddy import onboarding
+from sys_buddy.rules import RULES_OF_ENGAGEMENT
 
 
 # --- invite link round-trip -------------------------------------------------
@@ -192,6 +193,52 @@ def test_role_prompt_teaches_the_agent_owned_wait_loop_not_a_subagent(mode):
     assert 'report_status("stuck"' in text
     # Explicit turn-taking: the floor-passing signals so neither side stalls or over-waits.
     assert "over to you" in low and "i'll follow up" in low and "done for now" in low
+
+
+@pytest.mark.parametrize("role", ["backend", "frontend", "mobile", "designer"])
+def test_role_prompt_teaches_the_ship_shorthand(role):
+    """`ship [#N]` = propose-then-sign in ONE move, because that is how a human thinks
+    about it ("agree this and sign my side") while the broker needs two calls.
+
+    It is PROMPT-side only — it maps to propose_contract then lock_contract; there is no
+    `ship` tool (pinned in test_server.py). And it must never read as signing FOR the
+    peer: it signs one side, and the lock still waits for everyone.
+    """
+    text = onboarding.role_prompt(role, "signin")
+    low = text.lower()
+    assert "`ship [#n]`" in low
+    assert "propose_contract" in text and "lock_contract" in text
+    assert "signs your side only" in low
+    assert "every party has" in low or "everyone has" in low
+    # ...and it is the answer to a `sign` with nothing proposed, instead of stalling.
+    assert "nothing has been proposed" in low
+    assert "assumption" in low
+
+
+def test_ship_is_taught_to_every_role_identically():
+    """Same invariant as the rest of the briefing: no role-specific contract vocabulary
+    (the producer is whoever proposes — see test_role_prompt_is_identical_for_every_role)."""
+    ships = {
+        role: [ln for ln in onboarding.role_prompt(role, "signin").splitlines() if "`ship" in ln]
+        for role in ("backend", "frontend", "mobile", "designer")
+    }
+    assert all(v and v == ships["backend"] for v in ships.values())
+
+
+def test_charter_says_a_sign_with_nothing_proposed_means_propose_it_yourself():
+    """The stall this fixes: told to "lock the contract" with nothing proposed, the agent
+    explained the problem and asked — three times. The charter (re-readable mid-session via
+    the `rules` tool) now says the missing step is the PROPOSAL, that a party may supply it
+    under a stated assumption, and that a reaffirmation is a decision, not a re-ask.
+    """
+    r = RULES_OF_ENGAGEMENT.lower()
+    assert "the missing step is the proposal" in r
+    assert "explicit assumption" in r
+    assert "ask once" in r and "reaffirmation is a decision" in r
+    # Must not contradict decline_contract: the peer still gets to object, and the
+    # proposal is safe *because* nothing locks until everyone signs.
+    assert "decline_contract" in r
+    assert "until every party has signed" in r
 
 
 def test_role_prompt_debug_has_no_contract():

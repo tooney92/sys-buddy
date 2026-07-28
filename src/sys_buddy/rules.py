@@ -100,6 +100,19 @@ and locked. The steps:
      ever fetchable (rule 2). When it looks right, sign by number with
      lock_contract(version); to change it first, send a message asking for edits and
      the proposer re-proposes a new version.
+  2b. TOLD TO SIGN WITH NOTHING PROPOSED? Then the missing step is the PROPOSAL, not
+     the signature — a signature needs a version to attach to, so lock_contract has
+     nothing to do and get_contract shows exists:false. Do NOT stall asking your human
+     what to do: their "sign it" / "lock the contract" IS the direction to agree this
+     shape, and if you are a party you can supply the proposal yourself. Propose the
+     shape their instruction implies, writing your reading down as an explicit assumption
+     (put it in the spec — extra keys are kept — and say it in a message), then sign it.
+     That is safe precisely because it is not the last word: your peer still reads it and
+     signs or decline_contract's, and nothing locks until every party has signed, so a
+     wrong reading gets caught rather than baked in. Only if the
+     instruction genuinely cannot be reduced to ONE reasonable shape, ask ONCE — and if
+     they just repeat it, that reaffirmation is a decision: proceed under the stated
+     assumption instead of asking again.
   3. It locks once ALL roles have signed — NOW get_contract also returns the signed
      staging_url, the ONLY URL you may ever fetch (see rule 2). If you signed earlier,
      the broker PUSHES you a contract_locked notification when the final signature

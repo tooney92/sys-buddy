@@ -77,6 +77,12 @@ is not in its quorum, does not block it, and may not act on it.
 |---|---|---|---|
 | one party | `pc #N` | `propose_contract(spec, todo=N)` | state `contract_proposed` |
 | every party | `sign #N` | `lock_contract(version, todo=N)` | state `contract_locked`, status `contracted` |
+| one party | `ship #N` | `propose_contract(spec, todo=N)` **then** `lock_contract(version, todo=N)` | proposed *and* the proposer's side signed, in one move |
+
+`ship` is shorthand only — there is no `ship` tool, and it signs nobody else's side:
+the other parties still `sign #N` (or `decline`), and it locks only when everyone has.
+It exists because a human thinks "agree this and sign it" as ONE move while the broker
+needs two.
 
 Two things happen here that are easy to miss:
 
@@ -169,6 +175,14 @@ to attach a signature to, so the answer is a refusal, not progress.
 If you typed `sign #N` and nothing moved, the overwhelmingly likely cause is that
 **nobody has proposed the contract yet**. The move is `pc #N`, by either party, and
 whoever makes it becomes the producer.
+
+An agent told to sign here should not come back asking what to do: "sign it" is the
+direction to *agree this shape*, and a party can supply the missing proposal itself —
+propose with its reading written down as an **explicit assumption**, then sign (that is
+exactly `ship #N`). It is safe because it is not the last word: the peer still reads it
+and signs or `decline`s, and nothing locks until every party has signed. If the
+instruction genuinely cannot be reduced to one reasonable shape, ask **once** — a
+reaffirmation is a decision, not a repeat of the question.
 
 ### Trap 2 — nothing auto-advances; every arrow is a person deciding
 

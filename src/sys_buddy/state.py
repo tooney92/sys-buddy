@@ -735,8 +735,21 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
         (identity.task_id, version),
     ).fetchone()
     if contract is None:
+        # The commonest way to land here is a human saying "sign it" on a scope where
+        # nobody has proposed anything — and an agent that only learns "no such version"
+        # goes back to its human to ask, which is the stall this text exists to end. A
+        # signature needs a proposal to attach to, so name the move that is actually
+        # missing, and name who can make it (anyone bound by the scope, including you).
+        scope = "" if todo_id is None else f", todo={int(todo_id)}"
         raise ValueError(
             f"no contract version {version} on task '{identity.task_id}'"
+            + ("" if todo_id is None else f" for todo {int(todo_id)}")
+            + f". Check get_contract{'()' if todo_id is None else f'(todo={int(todo_id)})'} "
+            f"— if nothing has been proposed yet there is nothing to sign, and the missing "
+            f"step is the PROPOSAL, not the signature. If you are a party you can supply "
+            f"it: propose_contract(spec{scope}) with your reading of your human's "
+            f"instruction stated as an explicit assumption, then sign THAT version. Your "
+            f"peer still reviews and signs (or declines) before anything locks."
         )
     if contract["status"] == "locked":
         raise ValueError(
@@ -1116,7 +1129,11 @@ def get_contract(conn, task_id: str, todo_id: int | None = None) -> dict:
             "note": (
                 f"No contract has been proposed on todo {todo['id']} ('{todo['title']}') "
                 f"yet. Agree on WHAT first (every party accepts the todo), then one party "
-                f"proposes the HOW with propose_contract(spec, todo={todo['id']})."
+                f"proposes the HOW with propose_contract(spec, todo={todo['id']}). If your "
+                f"human has already told you to sign or lock this one, that IS the "
+                f"direction to propose it — send the shape their instruction implies with "
+                f"your reading stated as an explicit assumption, then sign it; your peer "
+                f"still reviews and signs (or declines) before it locks."
             ),
         }
 

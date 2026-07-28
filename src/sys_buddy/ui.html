@@ -1231,6 +1231,7 @@ function shortcodesHTML(d){
       cmd('pc [#N]', 'propose a contract — add #N to scope it to todo N')+
       cmd('gc [#N]', 'show the contract (of todo N with #N)')+
       cmd('sign [#N]', 'sign / lock the contract')+
+      cmd('ship [#N]', 'propose the contract AND sign your own side in one move — the peer still signs, and it locks only when everyone has')+
       cmd('decline <why> [#N]', 'push back on a proposal you have read — that version dies, someone proposes a new one')+
       cmd('reopen', 'reopen planning to re-sign a new version')+
       grp('Todos')+
@@ -1389,7 +1390,7 @@ function workflowsPanelBody(){
 
   var traps='<div style="display:flex;flex-direction:column;gap:8px">'+
     '<div style="padding:9px 11px;background:var(--st-testing-bg);border:1px solid var(--st-testing-dot);border-radius:10px;font-size:11.5px;color:var(--text);line-height:1.55">'+
-      '<strong>1 · '+shChip('sign')+' before anything is proposed does nothing.</strong> A signature needs a proposal to attach to. If you typed '+shChip('sign #N')+' and nothing moved, nobody has run '+shChip('pc #N')+' yet.</div>'+
+      '<strong>1 · '+shChip('sign')+' before anything is proposed does nothing.</strong> A signature needs a proposal to attach to. If you typed '+shChip('sign #N')+' and nothing moved, nobody has run '+shChip('pc #N')+' yet. An agent told to sign with nothing proposed should propose it under a stated assumption and sign, not come back asking — its peer still reviews and signs before anything locks. '+shChip('ship #N')+' does both in one move.</div>'+
     '<div style="padding:9px 11px;background:var(--st-testing-bg);border:1px solid var(--st-testing-dot);border-radius:10px;font-size:11.5px;color:var(--text);line-height:1.55">'+
       '<strong>2 · Nothing auto-advances.</strong> No timer, no daemon. Every arrow above is a person deciding and the broker allowing it. A todo parked at <em>building</em> forever isn’t a hung process — the producer just hasn’t typed '+shChip('ready #N')+'. The <strong>Next</strong> line on the todo card names who owes the move.</div>'+
   '</div>';
