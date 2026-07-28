@@ -5,8 +5,8 @@ This is the spec the join page (`src/sys_buddy/join.html`) and the desktop app
 (`src/sys_buddy/gui_app.html`) render from.
 
 **Status:** Claude, Cursor and Gemini CLI are LOCKED — all three verified end-to-end on
-2026-07-28 against a real broker. "Other" is the deliberate escape hatch and needs no
-verification. Nothing here is built yet.
+2026-07-28 against a real broker. "Other" is deliberately generic and needs none. All four
+sections are build-ready. Nothing here is built yet.
 
 ---
 
@@ -272,20 +272,56 @@ and read the file if Gemini ever changes.
 and produces a header of `Bearer <TOKEN>\n<TOKEN>`, which fails in a way that looks like a
 Gemini bug and is not. Bit us during this very verification.
 
-## Other — DRAFT
+## Other — LOCKED ✅ (by design: it needs no verification)
 
-The honest escape hatch for everything we cannot verify. Two copy buttons (URL, header),
-the generic `mcpServers` block, and a note that field names differ:
+The honest escape hatch. We do NOT ship a per-client snippet for anything we cannot run —
+it would look as authoritative as the tested ones and be confidently wrong. Instead: the
+two raw facts, the generic shape, the specific way it fails, and a test that works no
+matter what client they are on.
 
-- top-level key: `mcpServers` (Cursor, Windsurf, Gemini) · `servers` (VS Code) ·
-  `context_servers` (Zed)
-- URL field: `url` (Cursor, VS Code, Zed) · `serverUrl` (Windsurf) · `httpUrl` (Gemini)
-- VS Code **requires** `"type": "http"`; others infer it
+```
+sys-buddy is a standard MCP server over HTTP. Any MCP client can
+connect with two things:
 
-These are per-client literals, not a shared schema with cosmetic differences. A single
-template would generate configs that fail confusingly.
+URL      <url>                              [Copy]
+Header   Authorization: Bearer <token>      [Copy]
 
----
+Most clients take a config file shaped like this:
+
+{ "mcpServers": { "sys-buddy": {
+    "url": "<url>",
+    "headers": { "Authorization": "Bearer <token>" } } } }
+
+⚠ Field names differ between clients — check your client's docs:
+  · top-level key   mcpServers · servers · context_servers
+  · URL field       url · serverUrl · httpUrl
+  · VS Code requires "type": "http"; most infer it
+
+── How to know it worked ────────────────────────────────
+Ask your agent: "what sys-buddy tools do you have?"
+You should see rules, readiness_check, send_message,
+report_status…
+
+If it lists them you are connected — nothing else to do.
+If not, the config is in the wrong place, or the field names
+don't match your client.
+
+Got it working? Tell us which client and we'll add it to the list.
+```
+
+**Why this is the right trade.** The verification question is client-agnostic and
+definitive: whatever file they found and whatever keys their client uses, if the agent
+lists our tools it is connected. That one question removes the need for us to know their
+client at all.
+
+**The field names are the trap and they look cosmetic** — a `mcpServers` block silently
+does nothing in Zed. Telling someone to check their client's exact key beats handing them
+a snippet that fails quietly.
+
+**The feedback line is load-bearing.** We cannot verify Zed, Windsurf, Codex or Perplexity
+— we do not have them. Users do. "Tell us which client" is the path by which those move
+out of Other and into their own locked section, which is exactly how Claude, Cursor and
+Gemini got there.
 
 ## Not shipping, and why
 
