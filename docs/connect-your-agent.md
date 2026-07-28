@@ -4,9 +4,9 @@ How a buddy connects **their** agent to a sys-buddy broker, for every agent we s
 This is the spec the join page (`src/sys_buddy/join.html`) and the desktop app
 (`src/sys_buddy/gui_app.html`) render from.
 
-**Status:** Claude and Cursor are LOCKED (both verified end-to-end 2026-07-28 against a
-real broker). Gemini CLI and "Other" are drafted but NOT yet verified. Nothing here is
-built yet.
+**Status:** Claude, Cursor and Gemini CLI are LOCKED — all three verified end-to-end on
+2026-07-28 against a real broker. "Other" is the deliberate escape hatch and needs no
+verification. Nothing here is built yet.
 
 ---
 
@@ -222,18 +222,55 @@ system's job is to make it visible rather than silent.
 the absolute path. Keep it in every merge instruction; it is the only reason a
 wrong-folder write is visible rather than silent.
 
-## Gemini CLI — DRAFT, not verified
+## Gemini CLI — LOCKED ✅
+
+Verified 2026-07-28 against a real broker on `:9292`. `gemini mcp list` reports
+**Connected**, and the full handshake landed server-side.
 
 ```
 gemini mcp add -t http sys-buddy <url> -H "Authorization: Bearer <token>"
 ```
 
-Confirmed from `gemini mcp add --help` on the owner's machine: `-t/--transport http` and
-`-H/--header` exist, and the help text's own example is an `Authorization: Bearer`.
-Not yet run end-to-end. `gemini` is installed, so verify before shipping.
+Copy button. Then:
 
-⚠ In Gemini's config file, `httpUrl` selects streamable HTTP and plain `url` means **SSE**
-— a snippet copied from another client silently picks the wrong transport.
+> Run it **in the folder you'll open Gemini in** — it writes to that project.
+> Check it with `gemini mcp list`; you want a green ✓ and "Connected".
+
+**Scope is per project by default**, which is what we want for the same reason as Claude's
+`--scope local`: the token is a seat on ONE task. Confirmed by the CLI's own output —
+*"MCP server 'sys-buddy' added to project settings"* — writing
+`<project>/.gemini/settings.json`. `-s user` exists if someone deliberately wants it
+global.
+
+### Two things that look wrong and are not
+
+**`gemini mcp list` prints `(sse)`.** It says `(sse)` even though we passed `-t http` and
+the file says `"type": "http"`. Ignore the label — the wire shows the standard streamable
+HTTP handshake: `POST` initialize → `POST 202` notification → `GET` event stream → `POST`
+tools/list. The GET is the server→client stream, not legacy SSE. Do NOT "fix" this by
+switching to `httpUrl`.
+
+**The CLI writes `url`, not `httpUrl`.** Third-party docs claim `httpUrl` selects
+streamable HTTP while plain `url` means SSE. Whatever that describes, it is not what
+`gemini mcp add -t http` produces, and what it produces works:
+
+```json
+{ "mcpServers": { "sys-buddy": {
+    "url": "<url>",
+    "type": "http",
+    "headers": { "Authorization": "Bearer <token>" }
+} } }
+```
+
+Take the CLI's output as the source of truth over any doc, including this one — re-run it
+and read the file if Gemini ever changes.
+
+### Watch out when scripting this
+
+`sys-buddy join` prints the token TWICE — once as `agent_token:` and again inside the
+`claude mcp add` line it suggests. A naive `grep -oE 'sbk_[...]+'` therefore captures both
+and produces a header of `Bearer <TOKEN>\n<TOKEN>`, which fails in a way that looks like a
+Gemini bug and is not. Bit us during this very verification.
 
 ## Other — DRAFT
 
