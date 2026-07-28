@@ -263,9 +263,24 @@ def test_claude_setup_command_removes_before_adding():
     cmd = onboarding.claude_setup_command("https://abc.ngrok.app/mcp", "sbk_tok")
     lines = cmd.splitlines()
     assert len(lines) == 2
-    assert lines[0].startswith("claude mcp remove sys-buddy")
-    assert lines[1].startswith("claude mcp add")
+    assert lines[0].startswith("claude mcp remove --scope user sys-buddy")
+    assert lines[1].startswith("claude mcp add --scope user")
     assert "sbk_tok" in lines[1]
+
+
+def test_connect_command_registers_at_user_scope_not_per_directory():
+    """`claude mcp add` defaults to `local` scope, which is stored PER PROJECT DIRECTORY.
+
+    Observed in the wild: an operator ran the connect command in their home directory,
+    opened their agent on a project folder, and had no sys-buddy tools — with
+    `claude mcp list` reporting nothing from that directory, so it looked like the add had
+    failed. A broker connection is not a property of one folder, and both halves must
+    agree on the scope or a re-pair leaves a stale user-scope entry for `add` to collide
+    with."""
+    add = onboarding.claude_add_command("https://abc.ngrok.app/mcp", "sbk_tok")
+    remove = onboarding.claude_remove_command()
+    assert "--scope" in add and add[add.index("--scope") + 1] == "user"
+    assert "--scope" in remove and remove[remove.index("--scope") + 1] == "user"
 
 
 def test_configure_claude_runs_remove_before_add(monkeypatch):

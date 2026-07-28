@@ -248,7 +248,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
           <ol>
             <li>Add the Playwright MCP:</li>
           </ol>
-          <pre class="code" id="pw-cmd">claude mcp add playwright npx '@playwright/mcp@0.0.77'</pre>
+          <pre class="code" id="pw-cmd">claude mcp add --scope user playwright npx '@playwright/mcp@0.0.77'</pre>
           <div class="copy-row"><button type="button" class="btn copy" id="copy-pw">Copy command</button></div>
           <p class="hint">Prefer a file you can commit and share with the rest of your team? Put this at your project root instead — same result, and everyone gets the identical setup:</p>
           <pre class="code">.mcp.json
@@ -437,7 +437,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     var token  = res.agent_token || '';
     var cmd =
       'claude mcp remove sys-buddy\n' +
-      'claude mcp add --transport http sys-buddy ' + origin + '/mcp --header "Authorization: Bearer ' + token + '"';
+      'claude mcp add --scope user --transport http sys-buddy ' + origin + '/mcp --header "Authorization: Bearer ' + token + '"';
     connectCmd.textContent = cmd;                 // textContent — no manual escaping needed
     copyCmdBtn.onclick = function(){ copyText(cmd, copyCmdBtn); };
 

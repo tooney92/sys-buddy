@@ -242,7 +242,7 @@ def role_prompt(
         "  `.mcp.json` → "
         "`{\"mcpServers\":{\"playwright\":{\"command\":\"npx\",\"args\":[\"-y\","
         "\"@playwright/mcp@0.0.77\"]}}}`\n"
-        "- Or the CLI equivalent: `claude mcp add playwright npx '@playwright/mcp@0.0.77'`, "
+        "- Or the CLI equivalent: `claude mcp add --scope user playwright npx '@playwright/mcp@0.0.77'`, "
         "checked with `claude mcp list`.\n"
         "What to expect, so nothing surprises them: it needs Node/npx, and `npx -y` downloads "
         "the package on first run (slow once, needs network). **Pin the version** rather than "
@@ -340,11 +340,19 @@ def role_prompt(
 def claude_add_command(mcp_url: str, token: str, name: str = "sys-buddy") -> list[str]:
     """The exact argv (no shell) that registers the MCP with the Claude Code CLI.
 
+    ``--scope user`` is load-bearing, not a nicety. ``claude mcp add`` defaults to
+    ``local`` scope, which is stored PER PROJECT DIRECTORY — so an operator who ran this
+    in their home directory and then opened their agent on a project folder found no
+    sys-buddy tools at all, with `claude mcp list` confirming "nothing here" from the
+    wrong directory. Observed in the wild, and it wasted a pairing session: the fix looks
+    like "restart", the restart doesn't help, and nothing says why. User scope registers
+    it once for every project, which is what a broker connection actually is.
+
     Returned as a list so callers can both display it and hand it straight to
     ``subprocess.run`` without shell-quoting hazards around the bearer token.
     """
     return [
-        "claude", "mcp", "add", "--transport", "http",
+        "claude", "mcp", "add", "--scope", "user", "--transport", "http",
         name, mcp_url, "--header", f"Authorization: Bearer {token}",
     ]
 
@@ -356,7 +364,7 @@ def claude_remove_command(name: str = "sys-buddy") -> list[str]:
     tunnel URL and/or new token) must remove the stale one first. On a first-time
     setup this is a harmless no-op that prints "not found".
     """
-    return ["claude", "mcp", "remove", name]
+    return ["claude", "mcp", "remove", "--scope", "user", name]
 
 
 def claude_setup_command(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
