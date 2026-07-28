@@ -13,6 +13,10 @@
 <style>
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
+/* The UA's `[hidden]{display:none}` is a plain element rule, so ANY class that sets a
+   display (our .pick/.pane flex containers) silently outranks it and the "hidden" node
+   keeps rendering. Toggling `.hidden` has to mean hidden. */
+[hidden]{display:none!important}
 :root{
   --bg:#FAF9F7;--surface:#ffffff;--surface-2:#F5F3F0;--surface-3:#EDEAE5;
   --border:#EBE8E3;--border-strong:#DAD5CE;
@@ -165,8 +169,9 @@ textarea.prompt:focus{outline:none;border-color:var(--accent)}
 textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .copy-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .hint{font-size:.84rem;color:var(--text-3);margin:2px 0 0;line-height:1.5}
-/* connect-method tabs — two peer options, not a command plus a footnote */
-.connect-tabs{display:flex;gap:6px;margin:2px 0 10px}
+/* agent picker — ask which AGENT, not which mechanism. Chips wrap on narrow screens
+   rather than scrolling sideways, so the page never overflows horizontally. */
+.connect-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0}
 .connect-tab{
   appearance:none;cursor:pointer;font-family:inherit;font-size:.82rem;font-weight:600;
   padding:6px 13px;border-radius:9px;color:var(--text-2);
@@ -175,6 +180,37 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 .connect-tab:hover{border-color:var(--accent);color:var(--text)}
 .connect-tab.is-on{background:var(--accent);border-color:var(--accent);color:#fff}
 .connect-tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.pick{display:flex;flex-direction:column;gap:7px;margin:2px 0 6px}
+.pick-q{font-size:.84rem;font-weight:600;color:var(--text-2)}
+.pick.sub{margin-top:4px}
+
+/* one client's instructions */
+.pane{display:flex;flex-direction:column;gap:9px;margin-top:4px}
+.substep{font-size:.88rem;font-weight:600;color:var(--text);line-height:1.5;margin:6px 0 -2px}
+.substep .n{color:var(--text-3)}
+.substep .lite{font-weight:400;color:var(--text-2)}
+.pane > .hint:first-child{margin-top:0}
+
+/* callouts: ⓘ context, ⚠ things that bite */
+.note{display:flex;gap:9px;padding:10px 13px;border-radius:11px;font-size:.85rem;line-height:1.5;border:1px solid}
+.note .ic{flex:none;font-weight:700}
+.note.info{color:var(--text-2);background:var(--surface-2);border-color:var(--border-strong)}
+.note.info strong{color:var(--text)}
+.note.warn{color:var(--amber-fg);background:var(--amber-bg);border-color:var(--amber-border)}
+.note.warn strong{color:inherit}
+.note code{background:transparent}
+
+/* "how to know it worked" — every client gets one; every failure we found was silent */
+.verify{
+  border:1px solid var(--border-strong);border-radius:11px;background:var(--surface);
+  padding:11px 13px;font-size:.85rem;line-height:1.55;color:var(--text-2);
+}
+.verify .vh{display:block;font-weight:700;color:var(--text);margin-bottom:4px}
+.verify strong{color:var(--text)}
+
+/* the two raw facts, each independently copyable (Other) */
+.kv{display:flex;flex-direction:column;gap:6px}
+.kv .k{font-size:.74rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-3)}
 
 /* optional, collapsible "recommended: Playwright" block (every role) */
 .pw{margin-top:10px;border:1px solid var(--border-strong);border-radius:11px;background:var(--surface)}
@@ -245,38 +281,188 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     <div class="blk">
       <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your agent to sys-buddy</span>
 
-      <!-- Two ways in, presented as PEERS rather than a command with a footnote.
-           The CLI path assumes the `claude` binary; someone running Claude Code inside
-           the desktop app has no terminal and may never have heard of the CLI. That is
-           not hypothetical — it cost a real pairing session. The file path needs neither
-           a terminal nor an install, and is also what Cursor reads. -->
-      <div class="connect-tabs" role="tablist" aria-label="How to connect">
-        <button type="button" class="connect-tab is-on" id="tab-cli" role="tab" aria-selected="true">Run a command</button>
-        <button type="button" class="connect-tab" id="tab-file" role="tab" aria-selected="false">Save a file</button>
+      <!-- Ask which AGENT, not which mechanism. "Do you use a CLI?" asks the buddy to
+           classify OUR implementation detail; they know they use Cursor. Claude is
+           default-selected — zero clicks for today's audience. Only Claude gets a
+           sub-step: the others have exactly one way in, so a second click there would be
+           friction with no information. -->
+      <div class="pick">
+        <span class="pick-q" id="pick-q-agent">Which agent are you using?</span>
+        <div class="connect-tabs" role="tablist" aria-labelledby="pick-q-agent" id="agent-pick">
+          <button type="button" class="connect-tab is-on" role="tab" aria-selected="true"  data-agent="claude">Claude</button>
+          <button type="button" class="connect-tab"       role="tab" aria-selected="false" data-agent="cursor">Cursor</button>
+          <button type="button" class="connect-tab"       role="tab" aria-selected="false" data-agent="gemini">Gemini CLI</button>
+          <button type="button" class="connect-tab"       role="tab" aria-selected="false" data-agent="other">Other</button>
+        </div>
       </div>
 
-      <div id="pane-cli">
-        <pre class="code" id="connect-cmd"></pre>
-        <div class="copy-row">
-          <button type="button" class="btn copy" id="copy-cmd">Copy command</button>
+      <div class="pick sub" id="claude-sub">
+        <span class="pick-q" id="pick-q-where">Where do you use Claude?</span>
+        <div class="connect-tabs" role="tablist" aria-labelledby="pick-q-where" id="where-pick">
+          <button type="button" class="connect-tab is-on" role="tab" aria-selected="true"  data-where="cli">In the terminal</button>
+          <button type="button" class="connect-tab"       role="tab" aria-selected="false" data-where="app">In the desktop app</button>
         </div>
-        <p class="hint">Needs the <code>claude</code> CLI. Run it in the terminal where you
-           start Claude Code, then restart your session.</p>
       </div>
 
-      <div id="pane-file" hidden>
-        <p class="hint">Using Claude Code inside the desktop app, or Cursor? Save this as
-           <code>.mcp.json</code> at the root of the project you have open — no terminal,
-           nothing to install. Your agent can create the file for you: paste the block and
-           ask it to save that as <code>.mcp.json</code>.</p>
-        <pre class="code" id="connect-json"></pre>
+      <!-- ---------- Claude · terminal ----------
+           `--scope local` is deliberate: the token is a seat on ONE task, so the
+           connection belongs to the folder that task is worked from — and several tasks
+           in several folders then work at once. Global (`user`) scope was tried and
+           reverted; it capped you at one active task per machine and left one task's
+           bearer token in every project you opened. The REMOVE half passes no scope, so
+           it clears the entry wherever it lives. -->
+      <div class="pane" id="pane-claude-cli">
+        <pre class="code" id="cmd-claude-cli"></pre>
         <div class="copy-row">
-          <button type="button" class="btn copy" id="copy-json">Copy .mcp.json</button>
+          <button type="button" class="btn copy" data-copy="cmd-claude-cli">Copy command</button>
         </div>
-        <p class="hint"><strong>Then restart your agent</strong> — MCP servers are only read
-           at start-up, so the tools will not appear until you do.</p>
-        <p class="hint">⚠ It contains your token, so it is yours alone — don't commit it to a
-           shared repo.</p>
+        <p class="hint">Run it <strong>in the folder you'll open your agent in</strong>, then
+           restart your session.</p>
+        <div class="verify">
+          <span class="vh">How to know it worked</span>
+          <code>claude mcp list</code> — run it from that same folder; it should list
+          <strong>sys-buddy</strong>. Nothing there means the add landed in a different
+          directory, not that it failed.
+        </div>
+      </div>
+
+      <!-- ---------- Claude · desktop app ----------
+           No terminal — Claude writes the file itself. `claude mcp add` does NOT work
+           here: the binary isn't on the app's PATH. Every line of the paste block below
+           was earned. "Save this as .mcp.json" CLOBBERED existing servers, so it must
+           say merge. "Fully quit the app" was wrong — a new conversation is enough.
+           "Reconnect with /mcp" is CLI-only advice; the desktop app answers "MCP controls
+           aren't available right now". -->
+      <div class="pane" id="pane-claude-app" hidden>
+        <p class="substep"><span class="n">0 —</span> open your project in Claude first.
+           <span class="lite">With no project open there is no project root to write to, and
+           the entry lands in a home-directory config.</span></p>
+
+        <p class="substep"><span class="n">1 —</span> paste this into the chat</p>
+        <pre class="code" id="cmd-claude-app"></pre>
+        <div class="copy-row">
+          <button type="button" class="btn copy" data-copy="cmd-claude-app">Copy instructions</button>
+        </div>
+
+        <p class="substep"><span class="n">2 —</span> start a NEW conversation.
+           <span class="lite">Not a restart; a new conversation is enough.</span></p>
+
+        <p class="substep"><span class="n">3 —</span> verify</p>
+        <div class="verify">
+          Ask <strong>“what sys-buddy tools do you have?”</strong> — expect
+          <code>rules</code>, <code>readiness_check</code>, <code>send_message</code>, …
+        </div>
+
+        <div class="note warn"><span class="ic" aria-hidden="true">⚠</span><span>Nothing? The
+          file must be at the root of the project you have open in Claude — not your home
+          folder.</span></div>
+        <div class="note info"><span class="ic" aria-hidden="true">ⓘ</span><span>You won't find
+          sys-buddy in the Directory. That's a catalogue of published connectors; this is your
+          own broker.</span></div>
+        <div class="note warn"><span class="ic" aria-hidden="true">⚠</span><span>This file holds
+          your access token. Don't commit it.</span></div>
+      </div>
+
+      <!-- ---------- Cursor ----------
+           Same shape as Claude's desktop branch — merge, reload, verify — so both share
+           one mental model. Two differences: the path is `.cursor/mcp.json` inside a
+           `.cursor/` directory, and there is no "type": "http" (Cursor infers transport
+           from `url`). The Home tab is a real trap: with no project open, "this project's
+           .cursor/mcp.json" resolves to ~/.cursor/mcp.json — Cursor's GLOBAL config —
+           and the tools then show up namespaced as `user-sys-buddy`. -->
+      <div class="pane" id="pane-cursor" hidden>
+        <p class="substep"><span class="n">0 —</span> open your project in Cursor first.
+           <span class="lite">On the Home tab, with no project open, the file lands in
+           Cursor's global config rather than your project.</span></p>
+
+        <p class="substep"><span class="n">1 —</span> paste this into Cursor's chat</p>
+        <pre class="code" id="cmd-cursor"></pre>
+        <div class="copy-row">
+          <button type="button" class="btn copy" data-copy="cmd-cursor">Copy instructions</button>
+        </div>
+
+        <p class="substep"><span class="n">2 —</span> reload.
+           <span class="lite">Cursor's own advice: “Reload the Cursor window or restart MCP
+           servers in Settings → MCP.”</span></p>
+
+        <p class="substep"><span class="n">3 —</span> verify</p>
+        <div class="verify">
+          Ask <strong>“what sys-buddy tools do you have?”</strong>, or check
+          <strong>Settings → Tools &amp; MCPs</strong>, where a working server shows a green
+          dot and a tool count.
+        </div>
+
+        <div class="note warn"><span class="ic" aria-hidden="true">⚠</span><span>Expect the file
+          at <code>&lt;your-project&gt;/.cursor/mcp.json</code>. If your agent says it wrote
+          <code>~/.cursor/mcp.json</code>, it had no project open and wrote Cursor's
+          <strong>global</strong> config instead — that works, but it registers this task for
+          every project you open.</span></div>
+      </div>
+
+      <!-- ---------- Gemini CLI ----------
+           Scope is per project by default — same reason as Claude's `--scope local`. The
+           CLI writes `url` (not `httpUrl`) plus "type": "http" into
+           <project>/.gemini/settings.json, and that works; take its output over any doc,
+           including ours. `gemini mcp list` labels it (sse) — the wire is the standard
+           streamable HTTP handshake; do NOT "fix" it by switching to httpUrl. -->
+      <div class="pane" id="pane-gemini" hidden>
+        <pre class="code" id="cmd-gemini"></pre>
+        <div class="copy-row">
+          <button type="button" class="btn copy" data-copy="cmd-gemini">Copy command</button>
+        </div>
+        <p class="hint">Run it <strong>in the folder you'll open Gemini in</strong> — it writes
+           to that project.</p>
+        <div class="verify">
+          <span class="vh">How to know it worked</span>
+          Check it with <code>gemini mcp list</code>; you want a green ✓ and
+          <strong>“Connected”</strong>.
+        </div>
+        <div class="note info"><span class="ic" aria-hidden="true">ⓘ</span><span><code>gemini mcp
+          list</code> prints <code>(sse)</code> next to the entry even though this is HTTP.
+          Ignore the label — it's cosmetic, and the connection is fine.</span></div>
+      </div>
+
+      <!-- ---------- Other ----------
+           The honest escape hatch. We do NOT ship a per-client snippet for anything we
+           cannot run — it would look as authoritative as the tested ones and be
+           confidently wrong. Instead: the two raw facts, the generic shape, the specific
+           way it fails (field names), and a verification question that works no matter
+           which client they are on. -->
+      <div class="pane" id="pane-other" hidden>
+        <p class="hint">sys-buddy is a standard MCP server over HTTP. Any MCP client can connect
+           with two things.</p>
+
+        <div class="kv">
+          <span class="k">URL</span>
+          <pre class="code" id="other-url"></pre>
+          <div class="copy-row"><button type="button" class="btn copy" data-copy="other-url">Copy URL</button></div>
+        </div>
+        <div class="kv">
+          <span class="k">Header</span>
+          <pre class="code" id="other-header"></pre>
+          <div class="copy-row"><button type="button" class="btn copy" data-copy="other-header">Copy header</button></div>
+        </div>
+
+        <p class="hint">Most clients take a config file shaped like this:</p>
+        <pre class="code" id="other-json"></pre>
+        <div class="copy-row"><button type="button" class="btn copy" data-copy="other-json">Copy config</button></div>
+
+        <div class="note warn"><span class="ic" aria-hidden="true">⚠</span><span>Field names differ
+          between clients — check your client's docs:<br>
+          · top-level key &nbsp;<code>mcpServers</code> · <code>servers</code> · <code>context_servers</code><br>
+          · URL field &nbsp;<code>url</code> · <code>serverUrl</code> · <code>httpUrl</code><br>
+          · VS Code requires <code>"type": "http"</code>; most infer it</span></div>
+
+        <div class="verify">
+          <span class="vh">How to know it worked</span>
+          Ask your agent: <strong>“what sys-buddy tools do you have?”</strong> You should see
+          <code>rules</code>, <code>readiness_check</code>, <code>send_message</code>,
+          <code>report_status</code>…<br>
+          If it lists them you are connected — nothing else to do. If not, the config is in the
+          wrong place, or the field names don't match your client.
+        </div>
+
+        <p class="hint">Got it working? Tell us which client and we'll add it to the list.</p>
       </div>
 
       <!-- Optional, collapsed by default; shown to every role (any role may consume). -->
@@ -313,7 +499,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
     <!-- Step 2 — brief the agent -->
     <div class="blk">
-      <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your Claude session</span>
+      <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your agent's chat</span>
       <textarea class="prompt" id="prompt-text" readonly rows="10" aria-label="Agent briefing prompt"></textarea>
       <div class="copy-row">
         <button type="button" class="btn copy" id="copy-prompt">Copy prompt</button>
@@ -383,8 +569,6 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var pairBtnLabel   = document.getElementById('pair-btn-label');
   var pairErr        = document.getElementById('pair-error');
   var pairedLine     = document.getElementById('paired-line');
-  var connectCmd     = document.getElementById('connect-cmd');
-  var copyCmdBtn     = document.getElementById('copy-cmd');
   var playwrightNote = document.getElementById('playwright-note');
   var promptTa       = document.getElementById('prompt-text');
   var copyPromptBtn  = document.getElementById('copy-prompt');
@@ -472,44 +656,125 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       'Paired as <span class="role" style="color:' + col + '">' + esc(role) + '</span>' +
       ' on task “<span class="tid">' + esc(res.task_id) + '</span>”';
 
-    // Step 1 — connect command, built from the BROWSER origin + agent token.
+    /* ---------- Step 1 — the agent picker ----------
+       Everything below is per-client packaging of exactly two facts: the URL and the
+       Authorization header. Both are rebuilt from the BROWSER origin + the agent token,
+       never from a server-echoed URL (the broker may stamp a loopback origin).
+
+       Each block is written into its own <pre> via textContent, and every copy button
+       copies that same <pre>'s textContent — so what is copied is, by construction,
+       exactly what is shown. */
     var origin = location.origin;
     var token  = res.agent_token || '';
-    var cmd =
-      'claude mcp remove sys-buddy\n' +
-      'claude mcp add --scope local --transport http sys-buddy ' + origin + '/mcp --header "Authorization: Bearer ' + token + '"';
-    connectCmd.textContent = cmd;                 // textContent — no manual escaping needed
-    copyCmdBtn.onclick = function(){ copyText(cmd, copyCmdBtn); };
+    var url    = origin + '/mcp';
+    var header = 'Authorization: Bearer ' + token;
 
-    // The no-terminal path: the same connection as a file. Built here rather than
-    // server-side because the page already holds origin + token.
-    var connectJson = document.getElementById('connect-json');
-    var copyJsonBtn = document.getElementById('copy-json');
-    var jsonText = JSON.stringify({
+    function put(id, text){ document.getElementById(id).textContent = text; }
+
+    // Claude · terminal
+    put('cmd-claude-cli',
+      'claude mcp remove sys-buddy\n' +
+      'claude mcp add --scope local --transport http sys-buddy ' + url + ' \\\n' +
+      '  --header "' + header + '"');
+
+    // Claude · desktop app — a merge instruction, not a file to save. Both guard lines
+    // ("STOP and tell me", "show me the resulting file") are load-bearing: the first
+    // turns a silent global write into a visible halt, the second is the only reason a
+    // wrong-folder write is ever noticed — it makes the agent print the absolute path.
+    put('cmd-claude-app',
+      'Add an MCP server called "sys-buddy" to THIS project\'s .mcp.json.\n' +
+      '\n' +
+      'If no project or folder is open, STOP and tell me instead of writing it —\n' +
+      'don\'t put it in a home-directory config.\n' +
+      '\n' +
+      'If .mcp.json already exists, KEEP every server already in it and add this one\n' +
+      'alongside them — do not replace the file or remove anything.\n' +
+      'If it doesn\'t exist, create it with just this entry.\n' +
+      '\n' +
+      'The entry to add under "mcpServers":\n' +
+      '\n' +
+      '"sys-buddy": {\n' +
+      '  "type": "http",\n' +
+      '  "url": "' + url + '",\n' +
+      '  "headers": { "Authorization": "Bearer ' + token + '" }\n' +
+      '}\n' +
+      '\n' +
+      'Then show me the resulting file so I can confirm nothing was lost.');
+
+    // Cursor — same shape; different path, and no "type" (Cursor infers it from `url`).
+    put('cmd-cursor',
+      'Add an MCP server called "sys-buddy" to THIS project\'s .cursor/mcp.json.\n' +
+      '\n' +
+      'If no project or folder is open — if this would land in ~/.cursor/mcp.json —\n' +
+      'STOP and tell me instead of writing it. Don\'t write to the global config.\n' +
+      '\n' +
+      'If that file already exists, KEEP every server already in it and add this one\n' +
+      'alongside them — do not replace the file or remove anything.\n' +
+      'If it doesn\'t exist, create it.\n' +
+      '\n' +
+      'Add under "mcpServers":\n' +
+      '\n' +
+      '"sys-buddy": {\n' +
+      '  "url": "' + url + '",\n' +
+      '  "headers": { "Authorization": "Bearer ' + token + '" }\n' +
+      '}\n' +
+      '\n' +
+      'Then show me the resulting file so I can confirm nothing was lost.');
+
+    // Gemini CLI
+    put('cmd-gemini', 'gemini mcp add -t http sys-buddy ' + url + ' -H "' + header + '"');
+
+    // Other — the two raw facts separately copyable, plus the generic shape.
+    put('other-url', url);
+    put('other-header', header);
+    put('other-json', JSON.stringify({
       mcpServers: { 'sys-buddy': {
-        type: 'http',
-        url: origin + '/mcp',
+        url: url,
         headers: { Authorization: 'Bearer ' + token }
       } }
-    }, null, 2);
-    connectJson.textContent = jsonText;
-    copyJsonBtn.onclick = function(){ copyText(jsonText, copyJsonBtn); };
+    }, null, 2));
 
-    var tabCli = document.getElementById('tab-cli');
-    var tabFile = document.getElementById('tab-file');
-    var paneCli = document.getElementById('pane-cli');
-    var paneFile = document.getElementById('pane-file');
-    function pick(which){
-      var cli = which === 'cli';
-      tabCli.classList.toggle('is-on', cli);
-      tabFile.classList.toggle('is-on', !cli);
-      tabCli.setAttribute('aria-selected', String(cli));
-      tabFile.setAttribute('aria-selected', String(!cli));
-      paneCli.hidden = !cli;
-      paneFile.hidden = cli;
+    // Every copy button names the <pre> it copies, so the two can never drift apart.
+    Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function(btn){
+      btn.onclick = function(){
+        var src = document.getElementById(btn.getAttribute('data-copy'));
+        if (src) copyText(src.textContent, btn);
+      };
+    });
+
+    /* ---------- picker wiring ----------
+       Claude is default-selected and is the only client with a sub-step; the others have
+       exactly one way in, so a second click there would be friction with no information. */
+    var agentBtns = document.querySelectorAll('#agent-pick [data-agent]');
+    var whereBtns = document.querySelectorAll('#where-pick [data-where]');
+    var claudeSub = document.getElementById('claude-sub');
+    var agent = 'claude', where = 'cli';
+
+    function paint(){
+      Array.prototype.forEach.call(agentBtns, function(b){
+        var on = b.getAttribute('data-agent') === agent;
+        b.classList.toggle('is-on', on);
+        b.setAttribute('aria-selected', String(on));
+      });
+      Array.prototype.forEach.call(whereBtns, function(b){
+        var on = b.getAttribute('data-where') === where;
+        b.classList.toggle('is-on', on);
+        b.setAttribute('aria-selected', String(on));
+      });
+      claudeSub.hidden = agent !== 'claude';
+      document.getElementById('pane-claude-cli').hidden = !(agent === 'claude' && where === 'cli');
+      document.getElementById('pane-claude-app').hidden = !(agent === 'claude' && where === 'app');
+      document.getElementById('pane-cursor').hidden = agent !== 'cursor';
+      document.getElementById('pane-gemini').hidden = agent !== 'gemini';
+      document.getElementById('pane-other').hidden  = agent !== 'other';
     }
-    tabCli.onclick = function(){ pick('cli'); };
-    tabFile.onclick = function(){ pick('file'); };
+    Array.prototype.forEach.call(agentBtns, function(b){
+      b.onclick = function(){ agent = b.getAttribute('data-agent'); paint(); };
+    });
+    Array.prototype.forEach.call(whereBtns, function(b){
+      b.onclick = function(){ where = b.getAttribute('data-where'); paint(); };
+    });
+    paint();
 
     // Optional Playwright walkthrough — shown to EVERY role.
     // This used to be hidden for the role named 'backend', on the assumption that role
