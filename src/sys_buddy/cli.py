@@ -108,7 +108,7 @@ def cmd_host_viewer(args: argparse.Namespace) -> int:
 
 
 def cmd_join(args: argparse.Namespace) -> int:
-    from . import pairing
+    from . import onboarding, pairing
 
     # join is a network client; no local db/config needed.
     result = pairing.join(args.url, args.code, args.name, pubkey=args.pubkey)
@@ -120,13 +120,17 @@ def cmd_join(args: argparse.Namespace) -> int:
     print(f"  mcp_url:       {result['mcp_url']}")
     print(f"  agent_token:   {result['agent_token']}")
     print(f"  dashboard_url: {result['dashboard_url']}")
+    # Rendered from the client registry, never spelled out here: a hand-written copy of
+    # the `claude mcp add` line is exactly the kind of literal that drifts out of sync
+    # with onboarding.py and then fails silently.
     print("\nRegister the MCP with (the remove line is a no-op the first time,")
     print("and lets you re-pair later with a new URL/token without a collision):")
-    print(f"  claude mcp remove sys-buddy")
-    print(
-        f"  claude mcp add --scope local --transport http sys-buddy {result['mcp_url']} "
-        f'--header "Authorization: Bearer {result["agent_token"]}"'
-    )
+    for line in onboarding.claude_setup_command(
+        result["mcp_url"], result["agent_token"]
+    ).splitlines():
+        print(f"  {line}")
+    # Every other client we support (Claude desktop, Cursor, Gemini CLI, Other) is in
+    # `result["clients"]` — same renderer, same two facts, different packaging.
     if result.get("rules"):
         print("\n" + "-" * 68)
         print(result["rules"].rstrip())

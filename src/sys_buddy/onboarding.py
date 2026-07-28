@@ -378,24 +378,14 @@ def mcp_json_snippet(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
     can WRITE files, so "put this at your project root" is a paste that works with no
     terminal at all.
 
-    Same shape Cursor uses, which is why this is the highest-value renderer to have: one
-    snippet serves two clients. ``type`` is stated explicitly rather than inferred —
-    VS Code requires it, and being explicit costs nothing where it is optional.
-
-    Two-space indented and stable-ordered so it diffs cleanly if committed.
+    Kept as the historical name for Claude's desktop file; it delegates to
+    :func:`claude_desktop_config` so there is exactly one place the Claude literals live.
+    NOTE: this is NOT the Cursor file — Cursor's differs (see :func:`cursor_config`), and
+    an earlier version of this docstring claiming "one snippet serves two clients" was
+    wrong in a way that looks cosmetic: Cursor's path is ``.cursor/mcp.json`` and its
+    entry carries no ``type``.
     """
-    return json.dumps(
-        {
-            "mcpServers": {
-                name: {
-                    "type": "http",
-                    "url": mcp_url,
-                    "headers": {"Authorization": f"Bearer {token}"},
-                }
-            }
-        },
-        indent=2,
-    )
+    return claude_desktop_config(mcp_url, token, name)
 
 
 def claude_remove_command(name: str = "sys-buddy") -> list[str]:
@@ -408,6 +398,31 @@ def claude_remove_command(name: str = "sys-buddy") -> list[str]:
     return ["claude", "mcp", "remove", name]
 
 
+def display_command(argv: list[str]) -> str:
+    """Render an argv as the one-line command a human copies and pastes.
+
+    NOT ``shlex.join``: that quotes with SINGLE quotes, and ``cmd.exe`` does not treat
+    ``'`` as a delimiter at all — the header would arrive as the literal word
+    ``'Authorization:``. These commands are documented (and verified) with DOUBLE
+    quotes, which bash, zsh, PowerShell and cmd all understand, so that is what we
+    emit: ``--header "Authorization: Bearer <token>"``.
+
+    Only words that actually need it get quoted, and anything carrying a character
+    double-quoting wouldn't neutralise (``"``, ``$``, a backtick, a backslash) falls
+    back to ``shlex.quote`` rather than being emitted wrong — tokens are base64url and
+    URLs are percent-encoded, so in practice nothing does.
+    """
+    out = []
+    for word in argv:
+        if word and not any(ch.isspace() for ch in word):
+            out.append(word)
+        elif any(ch in word for ch in '"$`\\'):
+            out.append(shlex.quote(word))
+        else:
+            out.append(f'"{word}"')
+    return " ".join(out)
+
+
 def claude_setup_command(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
     """Copy-paste, re-pair-safe setup: ``remove`` then ``add``, one command per line.
 
@@ -415,8 +430,8 @@ def claude_setup_command(mcp_url: str, token: str, name: str = "sys-buddy") -> s
     — bash, zsh, PowerShell, or cmd. The ``remove`` line is a no-op the first time.
     """
     return (
-        shlex.join(claude_remove_command(name)) + "\n" +
-        shlex.join(claude_add_command(mcp_url, token, name))
+        display_command(claude_remove_command(name)) + "\n" +
+        display_command(claude_add_command(mcp_url, token, name))
     )
 
 
@@ -457,6 +472,485 @@ def configure_claude(mcp_url: str, token: str, name: str = "sys-buddy") -> dict:
     return {"ok": True, "detail": (proc.stdout or "").strip() or "registered", "command": command}
 
 
+# ===========================================================================
+# The client registry — "connect YOUR agent", one entry per client we ship
+# ===========================================================================
+#
+# Source of truth: docs/connect-your-agent.md. Every string below was verified
+# end-to-end against a real broker on 2026-07-28; do not "improve" the copy.
+#
+# Every client needs the same TWO facts and nothing else:
+#     URL     <origin>/mcp
+#     Header  Authorization: Bearer <agent_token>
+# (``middleware.py`` reads that header and nothing else — no OAuth, no query
+# param, no cookie.) Everything here is per-client *packaging* of those two.
+#
+# WHY EACH ENTRY SPELLS ITS JSON OUT INSTEAD OF SHARING A TEMPLATE.
+# The per-client field names are LITERALS, not substitutions into one shape:
+#   top-level key   mcpServers · servers · context_servers
+#   URL field       url · serverUrl · httpUrl
+#   transport       Claude wants "type": "http"; Cursor infers it and takes none
+# A shared template would generate configs that fail SILENTLY — the entire
+# failure mode this doc exists to prevent. So each renderer writes its own dict
+# literally, and the tests pin the literals rather than the template.
+#
+# WHY THE PICKER ASKS WHICH *AGENT*, NOT WHICH MECHANISM.
+# "Do you use a CLI?" asks the user to classify our implementation detail. They
+# know they use Cursor. So ``kind`` is for the UI's renderer, never for a question
+# put to the human: they pick a ``label``, we pick the mechanism.
+
+CLIENT_CLI = "cli"        # a runnable argv we can both display and subprocess.run
+CLIENT_FILE = "file"      # a config-file path + the paste-instruction that writes it
+CLIENT_MANUAL = "manual"  # raw URL + header + a generic block (the "Other" escape hatch)
+
+# Claude is default-selected: zero clicks for today's audience. Only Claude gets a
+# sub-step (terminal vs desktop) — the others have exactly one way in, so a second
+# click would be friction with no information.
+DEFAULT_CLIENT_ID = "claude-cli"
+
+# The verification question is CLIENT-AGNOSTIC and definitive: whatever file they
+# found and whatever keys their client uses, if the agent lists our tools it is
+# connected. That one question removes the need for us to know their client at all.
+# Principle #5: every failure we found was silent, so every entry carries one.
+VERIFY_QUESTION = "what sys-buddy tools do you have?"
+_VERIFY = (
+    f'Ask your agent: "{VERIFY_QUESTION}" — expect rules, readiness_check, '
+    "send_message, report_status…"
+)
+
+# Principle #6 — EVERY merge instruction carries these two guard lines. The first
+# turns a silent global write into a visible halt; the second is the only reason a
+# wrong-folder write is ever noticed (it is what caught the Cursor Home trap, because
+# the agent printed the absolute path). Both were earned by a real failure. The
+# tests assert both appear in every `file`-kind paste.
+GUARD_STOP = "STOP and tell me"
+GUARD_SHOW = "Then show me the resulting file so I can confirm nothing was lost."
+
+_TOKEN_WARNING = "This file holds your access token. Don't commit it."
+
+
+# --- per-client renderers ---------------------------------------------------
+# One function per client, each owning its own literals.
+
+def claude_desktop_entry(mcp_url: str, token: str) -> dict:
+    """Claude Code's `.mcp.json` server entry — key ``mcpServers``, WITH ``type``.
+
+    ``type`` is stated explicitly rather than inferred: VS Code requires it, and being
+    explicit costs nothing where it is optional.
+    """
+    return {
+        "type": "http",
+        "url": mcp_url,
+        "headers": {"Authorization": f"Bearer {token}"},
+    }
+
+
+def claude_desktop_config(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
+    """The whole `.mcp.json` file, two-space indented so it diffs cleanly if committed."""
+    return json.dumps({"mcpServers": {name: claude_desktop_entry(mcp_url, token)}}, indent=2)
+
+
+def cursor_entry(mcp_url: str, token: str) -> dict:
+    """Cursor's `.cursor/mcp.json` server entry — key ``mcpServers``, and NO ``type``.
+
+    Cursor infers the transport from ``url``. Deliberately NOT sharing Claude's
+    renderer: the two differ, and the difference looks cosmetic until it isn't.
+    """
+    return {
+        "url": mcp_url,
+        "headers": {"Authorization": f"Bearer {token}"},
+    }
+
+
+def cursor_config(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
+    """The whole `.cursor/mcp.json` file (note the `.cursor/` directory, not the root)."""
+    return json.dumps({"mcpServers": {name: cursor_entry(mcp_url, token)}}, indent=2)
+
+
+def gemini_add_command(mcp_url: str, token: str, name: str = "sys-buddy") -> list[str]:
+    """The argv that registers the MCP with the Gemini CLI.
+
+    Scope is PER PROJECT by default, which is what we want for the same reason as
+    Claude's ``--scope local``: the token is a seat on ONE task. Confirmed by the CLI's
+    own output — "MCP server 'sys-buddy' added to project settings" — writing
+    ``<project>/.gemini/settings.json``. ``-s user`` exists if someone deliberately
+    wants it global, and we deliberately don't offer it.
+
+    Unlike Claude there is no remove-first line: ``gemini mcp add`` overwrites.
+
+    Returned as a list so callers can both display it and hand it straight to
+    ``subprocess.run`` without shell-quoting hazards around the bearer token.
+    """
+    return [
+        "gemini", "mcp", "add", "-t", "http",
+        name, mcp_url, "-H", f"Authorization: Bearer {token}",
+    ]
+
+
+def gemini_settings_config(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
+    """What ``gemini mcp add -t http`` actually writes — recorded, not prescribed.
+
+    It writes ``url``, NOT ``httpUrl``. Third-party docs claim ``httpUrl`` selects
+    streamable HTTP while plain ``url`` means SSE. Whatever that describes, it is not
+    what the CLI produces, and what it produces WORKS. Take the CLI's output as the
+    source of truth over any doc, including ours — re-run it and read the file if
+    Gemini ever changes. We ship the command, not this file; this exists so the shape
+    is written down once, next to the finding.
+    """
+    return json.dumps(
+        {"mcpServers": {name: {
+            "url": mcp_url,
+            "type": "http",
+            "headers": {"Authorization": f"Bearer {token}"},
+        }}},
+        indent=2,
+    )
+
+
+def generic_config_snippet(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
+    """The shape MOST clients take — for the "Other" escape hatch only.
+
+    Laid out compactly (not ``json.dumps``-pretty) because it is read as a hint about
+    SHAPE, not pasted as a file: the reader's job is to map it onto whatever keys their
+    own client uses. Values go through ``json.dumps`` so a URL or token can never break
+    out of the string.
+    """
+    return (
+        '{ "mcpServers": { %s: {\n'
+        '    "url": %s,\n'
+        '    "headers": { "Authorization": %s } } } }'
+        % (json.dumps(name), json.dumps(mcp_url), json.dumps(f"Bearer {token}"))
+    )
+
+
+# --- the paste instructions -------------------------------------------------
+# Verbatim from docs/connect-your-agent.md. These are what an agent READS, so the
+# wording is load-bearing in a way ordinary UI copy is not: "KEEP every server
+# already in it" is the difference between merging and clobbering, and each guard
+# line was added after a real failure. Only the server name is interpolated.
+
+def claude_desktop_paste(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
+    """The message a Claude-desktop user pastes into the chat; Claude writes the file.
+
+    No terminal involved — which is the point. ``claude mcp add`` fails in the desktop
+    app because the ``claude`` binary isn't on its PATH, and the buddy in the session
+    that prompted all this had never heard of the CLI and installed it just to join.
+    """
+    return (
+        f'Add an MCP server called "{name}" to THIS project\'s .mcp.json.\n'
+        "\n"
+        f"If no project or folder is open, {GUARD_STOP} instead of writing it —\n"
+        "don't put it in a home-directory config.\n"
+        "\n"
+        "If .mcp.json already exists, KEEP every server already in it and add this one\n"
+        "alongside them — do not replace the file or remove anything.\n"
+        "If it doesn't exist, create it with just this entry.\n"
+        "\n"
+        'The entry to add under "mcpServers":\n'
+        "\n"
+        f'"{name}": {{\n'
+        '  "type": "http",\n'
+        f'  "url": "{mcp_url}",\n'
+        f'  "headers": {{ "Authorization": "Bearer {token}" }}\n'
+        "}\n"
+        "\n"
+        f"{GUARD_SHOW}"
+    )
+
+
+def cursor_paste(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
+    """The message a Cursor user pastes into Cursor's chat.
+
+    Same shape as Claude's desktop branch so both clients share one mental model. Two
+    differences: the path is ``.cursor/mcp.json`` (inside a ``.cursor/`` directory, not
+    ``.mcp.json`` at the root), and no ``"type": "http"`` — Cursor infers the transport.
+
+    The guard clause says STOP AND TELL ME, not "refuse": a Home-tab install is not an
+    error (it connected fine and served 26 tools), it just registers this one task's
+    token for every project you open — exactly why ``--scope user`` was reverted. Some
+    people genuinely only run one task, so the call is theirs; our job is to make it
+    visible rather than silent.
+    """
+    return (
+        f'Add an MCP server called "{name}" to THIS project\'s .cursor/mcp.json.\n'
+        "\n"
+        "If no project or folder is open — if this would land in ~/.cursor/mcp.json —\n"
+        f"{GUARD_STOP} instead of writing it. Don't write to the global config.\n"
+        "\n"
+        "If that file already exists, KEEP every server already in it and add this one\n"
+        "alongside them — do not replace the file or remove anything.\n"
+        "If it doesn't exist, create it.\n"
+        "\n"
+        'Add under "mcpServers":\n'
+        "\n"
+        f'"{name}": {{\n'
+        f'  "url": "{mcp_url}",\n'
+        f'  "headers": {{ "Authorization": "Bearer {token}" }}\n'
+        "}\n"
+        "\n"
+        f"{GUARD_SHOW}"
+    )
+
+
+# --- the registry itself ----------------------------------------------------
+
+def _claude_cli_client(mcp_url: str, token: str, name: str) -> dict:
+    return {
+        "id": "claude-cli",
+        "label": "Claude · in the terminal",
+        "group": "claude",
+        "group_label": "Claude",
+        "variant_label": "In the terminal",
+        "kind": CLIENT_CLI,
+        # Two plain lines (not a shell &&/; chain) so it pastes cleanly on any OS.
+        # The remove line is a no-op the first time and is what makes a re-pair
+        # (new tunnel URL and/or new token) work instead of colliding.
+        "argv": [claude_remove_command(name), claude_add_command(mcp_url, token, name)],
+        "command": claude_setup_command(mcp_url, token, name),
+        "steps": [
+            {
+                "title": "Run this in your terminal",
+                "body": "Run it in the folder you'll open your agent in, then restart "
+                        "your session.",
+                "copy": ["command"],
+            },
+            {"title": "Verify", "body": _VERIFY, "copy": []},
+        ],
+        "verify": _VERIFY,
+        "notes": [
+            {
+                "tone": "warn",
+                # The failure this causes is REAL and it cost a pairing session.
+                "text": "Run it in the wrong directory and you get no tools, with "
+                        "`claude mcp list` reporting nothing from there — which reads as "
+                        "the add having failed.",
+            },
+        ],
+    }
+
+
+def _claude_desktop_client(mcp_url: str, token: str, name: str) -> dict:
+    return {
+        "id": "claude-desktop",
+        "label": "Claude · in the desktop app",
+        "group": "claude",
+        "group_label": "Claude",
+        "variant_label": "In the desktop app",
+        "kind": CLIENT_FILE,
+        "path": ".mcp.json",
+        "paste": claude_desktop_paste(mcp_url, token, name),
+        "config": claude_desktop_config(mcp_url, token, name),
+        "steps": [
+            {"title": "Paste this into the chat",
+             "body": "No terminal — Claude writes the file itself.",
+             "copy": ["paste"]},
+            # Verified: a full quit is NOT needed, and "/mcp to reconnect" is CLI-only
+            # advice — the desktop app answers "MCP controls aren't available right now".
+            {"title": "Start a NEW conversation",
+             "body": "Not a restart; a new conversation is enough.",
+             "copy": []},
+            {"title": "Verify", "body": _VERIFY, "copy": []},
+        ],
+        "verify": _VERIFY,
+        "notes": [
+            {"tone": "warn",
+             "text": "Nothing? The file must be at the root of the project you have open "
+                     "in Claude — not your home folder."},
+            {"tone": "info",
+             "text": "You won't find sys-buddy in the Directory. That's a catalogue of "
+                     "published connectors; this is your own broker."},
+            {"tone": "warn", "text": _TOKEN_WARNING},
+        ],
+    }
+
+
+def _cursor_client(mcp_url: str, token: str, name: str) -> dict:
+    return {
+        "id": "cursor",
+        "label": "Cursor",
+        "group": "cursor",
+        "group_label": "Cursor",
+        "variant_label": None,
+        "kind": CLIENT_FILE,
+        "path": ".cursor/mcp.json",
+        "paste": cursor_paste(mcp_url, token, name),
+        "config": cursor_config(mcp_url, token, name),
+        "steps": [
+            # Step 0 is not ceremony: on the Home tab, with no project open, "this
+            # project's .cursor/mcp.json" resolves to ~/.cursor/mcp.json — Cursor's
+            # GLOBAL config — and the tools then show up namespaced as `user-sys-buddy`.
+            {"title": "Open your project in Cursor first",
+             "body": "On the Home tab, with no project open, the file lands in Cursor's "
+                     "global config rather than your project.",
+             "copy": []},
+            {"title": "Paste this into Cursor's chat", "body": "", "copy": ["paste"]},
+            {"title": "Reload",
+             "body": "Reload the Cursor window or restart MCP servers in Settings → MCP.",
+             "copy": []},
+            {"title": "Verify",
+             "body": _VERIFY + " Or check Settings → Tools & MCPs, where a working server "
+                     "shows a green dot and a tool count.",
+             "copy": []},
+        ],
+        "verify": _VERIFY,
+        "notes": [
+            {"tone": "warn",
+             "text": "Expect the file at <your-project>/.cursor/mcp.json. If your agent "
+                     "says it wrote ~/.cursor/mcp.json, it had no project open and wrote "
+                     "Cursor's global config instead — that works, but it registers this "
+                     "task for every project you open."},
+            {"tone": "warn", "text": _TOKEN_WARNING},
+        ],
+    }
+
+
+def _gemini_cli_client(mcp_url: str, token: str, name: str) -> dict:
+    return {
+        "id": "gemini-cli",
+        "label": "Gemini CLI",
+        "group": "gemini-cli",
+        "group_label": "Gemini CLI",
+        "variant_label": None,
+        "kind": CLIENT_CLI,
+        "argv": [gemini_add_command(mcp_url, token, name)],
+        "command": display_command(gemini_add_command(mcp_url, token, name)),
+        "steps": [
+            {"title": "Run this in your terminal",
+             "body": "Run it in the folder you'll open Gemini in — it writes to that "
+                     "project.",
+             "copy": ["command"]},
+            {"title": "Verify",
+             "body": 'Check it with `gemini mcp list`; you want a green ✓ and "Connected".',
+             "copy": []},
+        ],
+        "verify": 'Check it with `gemini mcp list`; you want a green ✓ and "Connected".',
+        "notes": [
+            # Two things that look wrong and are NOT. Recorded findings, not bugs.
+            {"tone": "info",
+             "text": "`gemini mcp list` prints (sse) even though we passed -t http. Ignore "
+                     "the label — the wire shows the standard streamable HTTP handshake. Do "
+                     "NOT 'fix' this by switching to httpUrl."},
+            {"tone": "info",
+             "text": "The CLI writes `url`, not `httpUrl`, and what it produces works. Take "
+                     "the CLI's output as the source of truth over any doc."},
+        ],
+    }
+
+
+def _other_client(mcp_url: str, token: str, name: str) -> dict:
+    """The honest escape hatch.
+
+    We do NOT ship a per-client snippet for anything we cannot run — it would look as
+    authoritative as the tested ones and be confidently wrong. Instead: the two raw
+    facts, the generic shape, the specific way it fails, and a test that works no matter
+    what client they are on.
+    """
+    return {
+        "id": "other",
+        "label": "Other",
+        "group": "other",
+        "group_label": "Other",
+        "variant_label": None,
+        "kind": CLIENT_MANUAL,
+        "intro": "sys-buddy is a standard MCP server over HTTP. Any MCP client can "
+                 "connect with two things:",
+        "url": mcp_url,
+        "header_name": "Authorization",
+        "header_value": f"Bearer {token}",
+        "header": f"Authorization: Bearer {token}",
+        "config": generic_config_snippet(mcp_url, token, name),
+        "steps": [
+            {"title": "Give your client these two facts",
+             "body": "URL and header — that is the whole connection.",
+             "copy": ["url", "header"]},
+            {"title": "Most clients take a config file shaped like this",
+             "body": "Map it onto whatever keys your client uses.",
+             "copy": ["config"]},
+            {"title": "How to know it worked",
+             "body": _VERIFY + " If it lists them you are connected — nothing else to do. "
+                     "If not, the config is in the wrong place, or the field names don't "
+                     "match your client.",
+             "copy": []},
+        ],
+        "verify": _VERIFY,
+        "notes": [
+            # The field names ARE the trap and they look cosmetic — an `mcpServers`
+            # block silently does nothing in Zed. Telling someone to check their
+            # client's exact key beats handing them a snippet that fails quietly.
+            {"tone": "warn",
+             "text": "Field names differ between clients — check your client's docs: "
+                     "top-level key mcpServers · servers · context_servers; "
+                     "URL field url · serverUrl · httpUrl; "
+                     'VS Code requires "type": "http", most infer it.'},
+            # Load-bearing: we cannot verify Zed, Windsurf, Codex or Perplexity — we do
+            # not have them. Users do. This line is the path by which a client moves out
+            # of Other and into its own locked section, which is how Claude, Cursor and
+            # Gemini got there.
+            {"tone": "info",
+             "text": "Got it working? Tell us which client and we'll add it to the list."},
+        ],
+    }
+
+
+# Ordered as the picker shows them (docs/connect-your-agent.md, step ①).
+_CLIENT_BUILDERS = (
+    _claude_cli_client,
+    _claude_desktop_client,
+    _cursor_client,
+    _gemini_cli_client,
+    _other_client,
+)
+
+CLIENT_IDS = ("claude-cli", "claude-desktop", "cursor", "gemini-cli", "other")
+
+
+def connect_clients(mcp_url: str, token: str, name: str = "sys-buddy") -> list[dict]:
+    """Render EVERY supported client for one ``(mcp_url, token)`` seat.
+
+    THE seam. This is the single place the connect instructions exist; the join page,
+    the desktop app and the CLI all render from this list rather than each carrying
+    their own copy of the literals (a second copy WILL drift — it is the failure this
+    codebase keeps hitting, and it already had three: ``onboarding.py``, ``join.html``
+    and ``cli.py`` each spelled out the ``claude mcp add`` line by hand).
+
+    Every entry carries ``id``/``label``/``kind`` plus whatever that kind needs, so a UI
+    can render it WITHOUT knowing which client it is:
+
+    ``kind == "cli"``     ``argv`` (list of argvs, runnable) + ``command`` (display/copy)
+    ``kind == "file"``    ``path`` + ``paste`` (the instruction) + ``config`` (the file)
+    ``kind == "manual"``  ``url`` + ``header``/``header_name``/``header_value`` + ``config``
+
+    and, for all three, ``steps`` (each ``{title, body, copy:[field names]}``),
+    ``verify`` and ``notes`` (each ``{tone, text}``). ``group``/``variant_label`` drive
+    the picker: same ``group`` = one button with a sub-step (only Claude has one).
+
+    ``mcp_url`` is echoed on every entry so a browser that reached the broker at a
+    DIFFERENT origin than the broker thinks it has (any tunnel: ngrok, ``tailscale
+    serve``) can rebase every rendered string with a single substitution —
+    ``s.split(entry.mcp_url).join(location.origin + '/mcp')`` — the same trick
+    ``pairing._rebase`` plays on the URL fields, and the reason the page needs no
+    per-client knowledge of its own.
+    """
+    out = []
+    for build in _CLIENT_BUILDERS:
+        entry = build(mcp_url, token, name)
+        entry["mcp_url"] = mcp_url
+        entry["server_name"] = name
+        entry["default"] = entry["id"] == DEFAULT_CLIENT_ID
+        out.append(entry)
+    return out
+
+
+def connect_client(
+    client_id: str, mcp_url: str, token: str, name: str = "sys-buddy"
+) -> dict:
+    """One rendered client by id. Raises ``ValueError`` on an unknown id."""
+    for entry in connect_clients(mcp_url, token, name):
+        if entry["id"] == client_id:
+            return entry
+    raise ValueError(f"unknown client '{client_id}'")
+
+
 def pair(link: str, agent_name: str) -> dict:
     """Buddy-side: redeem a ``sb1_`` invite link and return the pairing tokens.
 
@@ -493,6 +987,11 @@ def join_flow(link: str, agent_name: str, mcp_name: str = "sys-buddy") -> dict:
             "config_detail": cfg["detail"],
             "config_command": cfg["command"],
             "rules": res.get("rules"),
+            # Every client's connect instructions, so a UI that can't (or won't) run
+            # the Claude CLI for the operator still has the other four paths in hand.
+            # (rendered here, not taken from `res`, because mcp_name may not be the
+            # default the broker/join client rendered with.)
+            "clients": connect_clients(res["mcp_url"], res["agent_token"], mcp_name),
         }
     except Exception as e:  # noqa: BLE001 — onboarding must never crash the UI
         return {"ok": False, "error": str(e)}
@@ -549,6 +1048,9 @@ def _mint_host_seat(
         "agent_token": res["agent_token"],
         "prompt": role_prompt(host_role, task_id, mode, staging_url),
         "config_command": claude_setup_command(mcp_url, res["agent_token"]),
+        # The host may not be on Claude either — hand the desktop app every client,
+        # rendered once here rather than re-spelled in gui_app.html.
+        "clients": connect_clients(mcp_url, res["agent_token"]),
     }
 
 

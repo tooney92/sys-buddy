@@ -475,7 +475,9 @@ def test_host_setup_seats_host_role(conn):
     assert invite_roles == {"frontend"}
 
     seat = r["host_seat"]
-    assert set(seat) == {"role", "mcp_url", "agent_token", "prompt", "config_command"}
+    assert set(seat) == {
+        "role", "mcp_url", "agent_token", "prompt", "config_command", "clients",
+    }
     assert seat["role"] == "backend"
     assert seat["mcp_url"] == "http://127.0.0.1:8787/mcp"
     assert seat["agent_token"]
@@ -483,6 +485,9 @@ def test_host_setup_seats_host_role(conn):
     # config_command is the ready-to-run claude mcp add line carrying the token.
     assert "claude mcp add" in seat["config_command"]
     assert seat["agent_token"] in seat["config_command"]
+    # The host may not be on Claude: every supported client comes with the seat, so
+    # the desktop app never has to spell one of these out itself.
+    assert [c["id"] for c in seat["clients"]] == list(onboarding.CLIENT_IDS)
 
 
 def test_host_setup_without_host_role_seats_nobody(conn):

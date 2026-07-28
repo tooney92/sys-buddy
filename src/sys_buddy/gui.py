@@ -134,6 +134,20 @@ class GuiApi:
         except Exception as exc:
             return {"error": str(exc)}
 
+    def connect_clients(self, mcp_url: str, token: str) -> list | dict:
+        """Every supported client's connect instructions for this seat.
+
+        The page renders from this rather than spelling the commands/JSON out in JS —
+        a second copy of those literals silently drifts, and the field names differ per
+        client in ways that fail quietly (see :func:`onboarding.connect_clients`).
+        ``start_host``/``join_flow`` already embed the same list, so this is only for a
+        page that wants to re-render for a seat it already holds.
+        """
+        try:
+            return onboarding.connect_clients(mcp_url, token)
+        except Exception as exc:
+            return {"error": str(exc)}
+
     def role_prompt(self, role: str, task_id: str) -> str:
         """Return the kickoff prompt an agent pastes for ``role`` on ``task_id``."""
         try:
