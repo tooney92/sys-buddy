@@ -124,7 +124,12 @@ def test_viewer_block_shape(conn):
     # slack_active is a BOOLEAN reflection of the process config — false here because no
     # webhook is configured in tests. The webhook itself must never appear in this block.
     host = api.viewer_block(resolve_viewer_token(conn, "sbv_host"))
-    assert host == {"mode": "host", "label": "host", "slack_active": False}
+    assert host == {
+        "mode": "host",
+        "label": "host",
+        "notify_channels": [],
+        "slack_active": False,
+    }
     assert "task_id" not in host
 
     buddy = api.viewer_block(resolve_viewer_token(conn, "sbv_dave"))
@@ -132,6 +137,7 @@ def test_viewer_block_shape(conn):
         "mode": "buddy",
         "label": "dave",
         "task_id": "signin",
+        "notify_channels": [],
         "slack_active": False,
     }
 

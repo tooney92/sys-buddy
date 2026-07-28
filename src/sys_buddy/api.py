@@ -34,7 +34,7 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import activity, files, identity, readiness, service, slack, state, todos
+from . import activity, files, identity, notify, readiness, service, state, todos
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -42,7 +42,10 @@ from .identity import ViewerIdentity
 # HTTP verb set is small; the event ``kind`` set is fixed by the state machine.
 # ``todo`` is ONE kind carrying the specific action inside its detail (todos._event),
 # so the dashboard's filter vocabulary stays fixed as the todo actions grow.
-_EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "token", "todo", "waiting"}
+# `slack` is retained for rows written before notifications became multi-channel —
+# dropping it would make old events unfilterable. New rows use `notify`.
+_EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "notify",
+                "token", "todo", "waiting"}
 
 # Fallback for the UI's ``⟨api123⟩`` chip on rows written before the
 # ``messages.todo_id`` column existed: scrape "todo #N" from the body. New rows
@@ -143,11 +146,14 @@ def viewer_block(viewer: ViewerIdentity) -> dict:
     block: dict = {"mode": "host" if viewer.is_host else "buddy", "label": viewer.label}
     if not viewer.is_host:
         block["task_id"] = viewer.task_id
-    # A BOOLEAN, never the webhook. Everyone watching the task benefits from knowing
-    # whether terminal events reach a channel — an unarmed Slack looks identical to an
-    # armed one until a "stuck" ping silently goes nowhere. The URL is a bearer
-    # credential and never crosses to the browser (see slack.is_configured).
-    block["slack_active"] = slack.is_configured()
+    # Channel NAMES, never a credential. Everyone watching the task benefits from
+    # knowing whether terminal events actually reach a human — an unarmed channel looks
+    # identical to an armed one until a "stuck" ping silently goes nowhere. The webhook
+    # URL and bot token are bearer credentials and never cross to the browser.
+    # `slack_active` stays as a derived boolean so an older dashboard build keeps working.
+    channels = notify.active()
+    block["notify_channels"] = channels
+    block["slack_active"] = "slack" in channels
     return block
 
 

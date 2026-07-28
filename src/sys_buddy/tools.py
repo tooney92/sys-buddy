@@ -27,7 +27,7 @@ import time
 
 from fastmcp import FastMCP
 
-from . import activity, audit, files, readiness, service, slack, state, todos
+from . import activity, audit, files, notify, readiness, service, state, todos
 from .config import Config, get_config
 from .db import connect
 from .identity import Identity, new_agent_token, require_current, sha256_hex
@@ -310,7 +310,7 @@ def _op_list_activity(task_id: str) -> list[dict]:
 
 def _op_notify(ident: Identity, message: str) -> str:
     # Attributed to the caller so both humans see who escalated. Never raises.
-    return slack.notify(f"[{ident.name}] {message}")
+    return notify.summarize(notify.send(f"[{ident.name}] {message}"))
 
 
 def _op_rotate(ident: Identity) -> dict:

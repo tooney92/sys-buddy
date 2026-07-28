@@ -45,7 +45,7 @@ def _drive_to_live(conn, roles=("backend", "frontend")):
 
 
 def _slack_events(conn):
-    return conn.execute("SELECT COUNT(*) AS n FROM events WHERE task_id='signin' AND kind='slack'").fetchone()["n"]
+    return conn.execute("SELECT COUNT(*) AS n FROM events WHERE task_id='signin' AND kind='notify'").fetchone()["n"]
 
 
 def test_lock_and_verified_each_write_a_slack_event(conn):

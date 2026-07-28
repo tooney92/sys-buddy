@@ -32,7 +32,7 @@ import json
 import sqlite3
 import time
 
-from . import config, contracts, service, slack, todos
+from . import config, contracts, notify, service, todos
 from .identity import Identity
 
 # --- states -----------------------------------------------------------------
@@ -168,14 +168,20 @@ def _transition(conn, task_id: str, to_state: str) -> str:
     return to_state
 
 
-def _slack(conn, task_id: str, text: str) -> None:
-    """Fire a best-effort Slack ping and record a ``slack`` event either way.
+def _notify(conn, task_id: str, text: str) -> None:
+    """Fire a best-effort human notification and record the event either way.
 
-    The event is written regardless of whether a webhook is configured or the send
-    succeeds, so the dashboard's event log shows that a human notification was
-    triggered at this point. ``slack.notify`` never raises (SPEC §14)."""
-    slack.notify(text)
-    _event(conn, task_id, "slack", {"text": text})
+    Fans out to every configured channel via ``notify.send`` — the call sites here name
+    no channel, which is the whole point of that seam: adding one must not mean editing
+    eleven transitions.
+
+    The event is written regardless of whether any channel is configured or the send
+    succeeded, so the dashboard's log shows that a notification was TRIGGERED at this
+    point. ``detail.channels`` records which ones actually got it, so "nobody was paged"
+    is visible rather than inferred. ``notify.send`` never raises (SPEC §14).
+    """
+    results = notify.send(text)
+    _event(conn, task_id, "notify", {"text": text, "channels": sorted(results)})
 
 
 def _reject_if_terminal(state: str) -> None:
@@ -854,7 +860,7 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
         state = todos.apply_rollup(conn, identity.task_id)
         lock_detail = {"version": version, "signed": sorted(signed_set), "todo_id": todo["id"]}
     _event(conn, identity.task_id, "lock", lock_detail)
-    _slack(
+    _notify(
         conn,
         identity.task_id,
         f"[{identity.task_id}] Contract v{version}{scope_note} locked — signed by "
@@ -1458,7 +1464,7 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
             f"don't re-report on this todo until a human unblocks it.",
             todo_id=row["id"],
         )
-        _slack(
+        _notify(
             conn, identity.task_id,
             f"[{identity.task_id}] STUCK on todo #{row['id']} ({row['title']}): "
             f"{MAX_STRIKES} fix cycles reached — humans needed. Last failure: {detail}",
@@ -1489,13 +1495,13 @@ def _report_todo_verified(conn, identity: Identity, row, detail: str) -> dict:
     out = _todo_result(conn, identity, row, STATUS_VERIFIED)
     roll = out["rollup"] or {}
     if roll.get("complete"):
-        _slack(
+        _notify(
             conn, identity.task_id,
             f"[{identity.name}] VERIFIED: every todo on '{identity.task_id}' is done "
             f"({roll.get('total')}/{roll.get('total')}). Last one: {row['title']} — {detail}",
         )
     else:
-        _slack(
+        _notify(
             conn, identity.task_id,
             f"[{identity.name}] todo #{row['id']} ({row['title']}) VERIFIED "
             f"({roll.get('verified')}/{roll.get('total')} on '{identity.task_id}'): {detail}",
@@ -1521,7 +1527,7 @@ def _report_todo_stuck(conn, identity: Identity, row, detail: str) -> dict:
                  {"reason": detail, "by": identity.role})
     service.post_message(conn, identity, "stuck", f"{_todo_label(row)} {detail}",
                          todo_id=row["id"])
-    _slack(
+    _notify(
         conn, identity.task_id,
         f"[{identity.task_id}] STUCK on todo #{row['id']} ({row['title']}): {detail}",
     )
@@ -1631,7 +1637,7 @@ def _report_test(conn, identity: Identity, status: str, detail: str) -> dict:
             conn, identity, "stuck",
             f"{MAX_STRIKES} fix cycles reached — humans needed. Last failure: {detail}",
         )
-        _slack(
+        _notify(
             conn, identity.task_id,
             f"[{identity.task_id}] STUCK: {MAX_STRIKES} fix cycles reached — humans needed. "
             f"Last failure: {detail}",
@@ -1656,7 +1662,7 @@ def _report_verified(conn, identity: Identity, detail: str) -> dict:
         )
     state = _transition(conn, identity.task_id, VERIFIED)
     service.post_message(conn, identity, "verified", detail)
-    _slack(conn, identity.task_id, f"[{identity.name}] VERIFIED: {detail}")
+    _notify(conn, identity.task_id, f"[{identity.name}] VERIFIED: {detail}")
     conn.commit()
     return {"status": STATUS_VERIFIED, "state": state}
 
@@ -1669,7 +1675,7 @@ def _report_resolved(conn, identity: Identity, detail: str) -> dict:
     state = _transition(conn, identity.task_id, RESOLVED)
     service.post_message(conn, identity, "resolved", detail)
     _event(conn, identity.task_id, "resolved", {"text": detail})
-    _slack(conn, identity.task_id, f"[{identity.name}] RESOLVED: {detail}")
+    _notify(conn, identity.task_id, f"[{identity.name}] RESOLVED: {detail}")
     conn.commit()
     return {"status": STATUS_RESOLVED, "state": state}
 
@@ -1686,7 +1692,7 @@ def _report_stuck(conn, identity: Identity, detail: str) -> dict:
     _assert_live(conn, identity.task_id)
     state = _transition(conn, identity.task_id, STUCK)
     service.post_message(conn, identity, "stuck", detail)
-    _slack(conn, identity.task_id, f"[{identity.task_id}] STUCK: {detail}")
+    _notify(conn, identity.task_id, f"[{identity.task_id}] STUCK: {detail}")
     conn.commit()
     return {"status": STATUS_STUCK, "state": state}
 
@@ -1704,7 +1710,7 @@ def _report_waiting(conn, identity: Identity, detail: str) -> dict:
     state = _state(conn, identity.task_id)
     service.post_message(conn, identity, "waiting", detail)
     _event(conn, identity.task_id, "waiting", {"text": detail})
-    _slack(conn, identity.task_id, f"[{identity.name}] WAITING — needs a human: {detail}")
+    _notify(conn, identity.task_id, f"[{identity.name}] WAITING — needs a human: {detail}")
     conn.commit()
     return {"status": STATUS_WAITING, "state": state}
 

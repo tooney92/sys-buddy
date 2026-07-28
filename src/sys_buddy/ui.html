@@ -515,17 +515,23 @@ function headerHTML(){
   /* mobile: header would overflow — drop the scope badge (list/subtitle already convey it) */
   if(m) scopeBadge='';
 
-  /* Slack chip. Renders ONLY when armed — an absent chip means "no Slack", which is the
-     honest default and keeps the header quiet for the many tasks that never wire one up.
-     The API hands back a boolean (viewer.slack_active); the webhook itself is a bearer
-     credential and never reaches the browser. Terminal events (verified/resolved/stuck/
-     waiting) are what actually get posted, so the title says so rather than implying
-     every message is mirrored. */
+  /* Notification chip. Renders ONLY when a channel is armed — an absent chip means
+     "nobody gets paged", which is the honest default and keeps the header quiet for the
+     many tasks that never wire one up.
+
+     Reads viewer.notify_channels (NAMES only — a webhook URL or bot token is a bearer
+     credential and never reaches the browser), so adding a channel server-side needs no
+     change here. Falls back to the older slack_active boolean so a dashboard served by
+     an older broker still lights up. Terminal events are what actually get posted, so
+     the title says so rather than implying every message is mirrored. */
   var slackChip = '';
-  if(state.viewer && state.viewer.slack_active && !m){
-    slackChip='<div title="Terminal events (verified · resolved · stuck · waiting) are posted to Slack" '+
+  var notifyChannels = (state.viewer && state.viewer.notify_channels)
+    || ((state.viewer && state.viewer.slack_active) ? ['slack'] : []);
+  if(notifyChannels.length && !m){
+    var label = notifyChannels.map(function(c){ return c.charAt(0).toUpperCase()+c.slice(1); }).join(' · ');
+    slackChip='<div title="Terminal events (verified · resolved · stuck · waiting) are posted to '+esc(label)+'" '+
       'style="display:flex;align-items:center;gap:6px;padding:5px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:999px;font-size:12px;font-weight:500;color:var(--text-2)">'+
-      '<span style="width:7px;height:7px;border-radius:50%;background:var(--st-verified-dot)"></span>Slack</div>';
+      '<span style="width:7px;height:7px;border-radius:50%;background:var(--st-verified-dot)"></span>'+esc(label)+'</div>';
   }
 
   /* "+ New task" — host only, and only inside the desktop app (the pywebview bridge
@@ -1129,7 +1135,9 @@ function todoPanelHTML(d){
 
 /* ---------- event log ---------- */
 function eventLogHTML(d){
-  var FILTERS=['all','transition','lock','deploy','test','slack','token'];
+  /* `slack` stays for events written before notifications went multi-channel; new rows
+   are `notify`. Dropping it would make old rows unfilterable. */
+  var FILTERS=['all','transition','lock','deploy','test','notify','slack','token'];
   /* `todo` joins the vocabulary only for a task that HAS todos (incl. one whose todos
      were all dropped — its log still carries them), so a pre-todo task's filter row is
      exactly the row that shipped. */
