@@ -211,6 +211,33 @@ def test_get_contract_on_a_todo_with_no_contract_says_so(conn):
     assert "propose_contract" in out["note"]
 
 
+def test_the_empty_contract_note_says_a_sign_instruction_means_propose(conn):
+    """"Sign it" on a todo with nothing proposed is the direction to PROPOSE it.
+
+    The note already said a proposal has to come first; an agent read it and still went
+    back to its human three times. It now names the move it can make itself — propose
+    under a stated assumption, then sign — since the peer's signature still gates the lock.
+    """
+    ag = _agents(conn)
+    a = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    note = state.get_contract(conn, "signin", a)["note"].lower()
+    assert "assumption" in note
+    assert "sign" in note and "propose" in note
+    assert "reviews and signs" in note or "declines" in note
+
+
+def test_signing_a_todo_with_nothing_proposed_names_the_scoped_proposal(conn):
+    """Same teaching one level down: the error names propose_contract WITH the todo id,
+    so the agent does not re-propose at task level and split the chain."""
+    ag = _agents(conn)
+    a = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    with pytest.raises(ValueError) as e:
+        state.lock_contract(conn, ag["backend"], 1, a)
+    msg = str(e.value)
+    assert f"propose_contract(spec, todo={a})" in msg
+    assert "nothing to sign" in msg.lower() and "assumption" in msg.lower()
+
+
 # --- accept / decline / repropose ------------------------------------------
 def test_proposing_is_consent_and_the_others_are_awaited(conn):
     ag = _agents(conn)

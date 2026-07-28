@@ -27,7 +27,7 @@ import time
 
 from fastmcp import FastMCP
 
-from . import activity, audit, files, readiness, service, slack, state, todos
+from . import activity, audit, files, notify, readiness, service, state, todos
 from .config import Config, get_config
 from .db import connect
 from .identity import Identity, new_agent_token, require_current, sha256_hex
@@ -151,6 +151,14 @@ def _op_lock(ident: Identity, version: int, todo: int | None = None) -> dict:
     conn = connect()
     try:
         return state.lock_contract(conn, ident, version, todo)
+    finally:
+        conn.close()
+
+
+def _op_decline_contract(ident: Identity, reason: str, todo: int | None = None) -> dict:
+    conn = connect()
+    try:
+        return state.decline_contract(conn, ident, reason, todo)
     finally:
         conn.close()
 
@@ -302,7 +310,7 @@ def _op_list_activity(task_id: str) -> list[dict]:
 
 def _op_notify(ident: Identity, message: str) -> str:
     # Attributed to the caller so both humans see who escalated. Never raises.
-    return slack.notify(f"[{ident.name}] {message}")
+    return notify.summarize(notify.send(f"[{ident.name}] {message}"))
 
 
 def _op_rotate(ident: Identity) -> dict:
@@ -332,7 +340,20 @@ def _op_readiness_check(ident: Identity) -> dict:
         mode = row["mode"] if row and row["mode"] else "contract"
     finally:
         conn.close()
-    return {"questions": readiness.questions(ident.role, mode)}
+    # `notes` is guidance, NOT graded — nothing here is a question and nothing here can
+    # fail you. Playwright rides along at pre-flight because this is the moment an agent
+    # is thinking about how it will prove its work, and it is far cheaper to set up now
+    # than mid-test. Stated as optional on purpose: the broker only ever needs an honest
+    # report_status, never a particular tool.
+    notes = [
+        "Optional, not graded: if you'll be verifying a UI, the Playwright MCP lets you "
+        "drive a real browser and PROVE your work instead of asserting it. Your HUMAN "
+        "installs it (it changes their config, and an MCP server only loads at session "
+        "start, so a restart is needed either way) — just tell them if you want it. "
+        "Testing any other way is equally fine; the broker needs your honest "
+        "report_status and a verified once it truly works, never a specific tool."
+    ]
+    return {"questions": readiness.questions(ident.role, mode), "notes": notes}
 
 
 def _op_submit_readiness(ident: Identity, answers: dict) -> dict:
@@ -450,6 +471,21 @@ def _register_remote(mcp: FastMCP) -> None:
         identifies one contract on its own — pass `todo` as well and the broker CHECKS
         the two agree, so you can't accidentally sign a different deliverable's shape."""
         return _op_lock(require_current(), version, todo or None)
+
+    @mcp.tool
+    def decline_contract(reason: str, todo: int = 0) -> dict:
+        """Push back on a PROPOSED contract: mark that version declined, with a reason.
+
+        Use when you have read the proposal and object — a different shape, a missing
+        endpoint, a URL you can't reach. Silence is NOT a decline: an unsigned contract
+        looks identical to one nobody has opened yet, so declining is how your objection
+        becomes visible to your peer and on the dashboard.
+
+        The declined version is dead — nobody can sign it afterwards. The answer is a new
+        proposal (`propose_contract`) that addresses your reason, never an edit of the old
+        one. If the contract is already LOCKED this is the wrong tool: both of you reopen
+        planning with `reopen_negotiations` instead."""
+        return _op_decline_contract(require_current(), reason, todo or None)
 
     @mcp.tool
     def get_contract(todo: int = 0) -> dict:
@@ -722,6 +758,21 @@ def _register_local(mcp: FastMCP) -> None:
         parties for a contract on a todo. Pass `todo` and the broker checks it matches
         the version, so you can't sign the wrong deliverable's shape."""
         return _op_lock(_local_identity(task, agent), version, todo or None)
+
+    @mcp.tool
+    def decline_contract(task: str, agent: str, reason: str, todo: int = 0) -> dict:
+        """Push back on a PROPOSED contract: mark that version declined, with a reason.
+
+        Use when you have read the proposal and object — a different shape, a missing
+        endpoint, a URL you can't reach. Silence is NOT a decline: an unsigned contract
+        looks identical to one nobody has opened yet, so declining is how your objection
+        becomes visible to your peer and on the dashboard.
+
+        The declined version is dead — nobody can sign it afterwards. The answer is a new
+        proposal (`propose_contract`) that addresses your reason, never an edit of the old
+        one. If the contract is already LOCKED this is the wrong tool: both of you reopen
+        planning with `reopen_negotiations` instead."""
+        return _op_decline_contract(_local_identity(task, agent), reason, todo or None)
 
     @mcp.tool
     def get_contract(task: str, todo: int = 0) -> dict:

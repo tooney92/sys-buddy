@@ -32,7 +32,7 @@ import json
 import sqlite3
 import time
 
-from . import config, contracts, service, slack, todos
+from . import config, contracts, notify, service, todos
 from .identity import Identity
 
 # --- states -----------------------------------------------------------------
@@ -168,14 +168,20 @@ def _transition(conn, task_id: str, to_state: str) -> str:
     return to_state
 
 
-def _slack(conn, task_id: str, text: str) -> None:
-    """Fire a best-effort Slack ping and record a ``slack`` event either way.
+def _notify(conn, task_id: str, text: str) -> None:
+    """Fire a best-effort human notification and record the event either way.
 
-    The event is written regardless of whether a webhook is configured or the send
-    succeeds, so the dashboard's event log shows that a human notification was
-    triggered at this point. ``slack.notify`` never raises (SPEC §14)."""
-    slack.notify(text)
-    _event(conn, task_id, "slack", {"text": text})
+    Fans out to every configured channel via ``notify.send`` — the call sites here name
+    no channel, which is the whole point of that seam: adding one must not mean editing
+    eleven transitions.
+
+    The event is written regardless of whether any channel is configured or the send
+    succeeded, so the dashboard's log shows that a notification was TRIGGERED at this
+    point. ``detail.channels`` records which ones actually got it, so "nobody was paged"
+    is visible rather than inferred. ``notify.send`` never raises (SPEC §14).
+    """
+    results = notify.send(text)
+    _event(conn, task_id, "notify", {"text": text, "channels": sorted(results)})
 
 
 def _reject_if_terminal(state: str) -> None:
@@ -301,6 +307,205 @@ def _producer_role(conn, task_id: str, todo_id: int | None = None) -> str | None
         (task_id, todo_id) if todo_id is not None else (task_id,),
     ).fetchone()
     return row["role"] if row else None
+
+
+# --------------------------------------------------------------------------- #
+# "what happens next" — the ONE move that unblocks a todo
+# --------------------------------------------------------------------------- #
+# The failure this exists to fix: a human stares at a locked todo that will not move
+# and has no way to know the next move is his own agent typing `ready #1`. Nothing on
+# the dashboard said what it was waiting for.
+#
+# It lives HERE, next to the gates, and is computed from the SAME predicates
+# ``report_status`` enforces — ``_newest_contract``, ``_current_locked``,
+# ``_producer_role``, ``todos.status_of``, the todo's own march — rather than being a
+# second, hand-maintained copy of the rules in JS. A "next step" that drifts from what
+# the broker actually allows is worse than none: it sends a human to type a command
+# that will be refused.
+#
+# The shorthand strings are the ones the agent prompt teaches and the dashboard
+# cheatsheet mirrors (`yes #N`, `pc #N`, `sign #N`, `ready #N`, `ok #N`, `done #N`).
+# Naming the literal thing to TYPE is the whole point — "backend must report ready" is
+# still a puzzle if you don't know what to say to your agent.
+
+# The verb each shorthand maps to, for the tooltip/aria text. Kept beside the codes so
+# the two cannot drift.
+_NEXT_TOOLS = {
+    "yes": "accept_todo({id})",
+    "no": "decline_todo({id}, reason)",
+    "pc": "propose_contract(spec, todo={id})",
+    "sign": "lock_contract(version, todo={id})",
+    "ready": "report_status('ready', detail, todo={id})",
+    "ok": "report_status('checked', detail, todo={id})",
+    "block": "report_status('blocked', detail, todo={id})",
+    "done": "report_status('verified', detail, todo={id})",
+}
+
+
+def _who_label(roles: list[str]) -> str:
+    """``backend`` · ``backend or mobile`` · ``backend, mobile or frontend``."""
+    if not roles:
+        return "nobody"
+    if len(roles) == 1:
+        return roles[0]
+    return ", ".join(roles[:-1]) + " or " + roles[-1]
+
+
+def _next(stage, who, cmd, text, *, alt=None, todo_id=None, human=False, done=False):
+    return {
+        "stage": stage,
+        "who": list(who or []),
+        "who_label": _who_label(list(who or [])) if who else None,
+        "cmd": cmd,
+        "alt": alt,
+        "tool": (
+            _NEXT_TOOLS[cmd.split()[0]].format(id=todo_id)
+            if cmd and cmd.split()[0] in _NEXT_TOOLS
+            else None
+        ),
+        "text": text,
+        "human": human,
+        "done": done,
+    }
+
+
+def next_step(conn, task_id: str, todo_id: int) -> dict:
+    """The one move that unblocks todo ``todo_id``: WHO owes it and WHAT they type.
+
+    The branch order deliberately mirrors the guard order the writes enforce, so the
+    answer can never promise a move the broker would refuse:
+
+    * dropped / verified — terminal, nothing is owed (``_report_on_todo``);
+    * three strikes — the broker pulled the cord, HUMANS own it (``_report_on_todo``);
+    * not every party has accepted — ``_resolve_contract_todo`` refuses a contract on a
+      todo that is still ``pending``, so the move is the missing ``yes``;
+    * no contract at all — one of the parties proposes. There is NO producer yet (the
+      producer is derived from whoever proposed the lock), so we say "one of you"
+      rather than inventing a name;
+    * a proposal in flight — the outstanding signatures. ``_report_todo_deployed``
+      refuses ``ready`` while the newest version is unsigned, even when an older one is
+      locked, which is exactly why this branch sits above the producer branches;
+    * locked but not live — the producer, and only the producer, reports ``ready``;
+    * live — the CONSUMERS (every party but the producer) check it;
+    * testing — any party may call it verified, once a check has actually run.
+    """
+    row = todos.get_row(conn, task_id, todo_id)
+    tid = row["id"]
+    parties = todos.parties_of(row)
+    status = todos.status_of(conn, row)
+
+    if status == todos.DROPPED:
+        return _next(
+            "dropped", [], None,
+            "Dropped — it no longer counts toward this task. Nothing is owed.",
+            todo_id=tid, done=True,
+        )
+    if row["state"] == VERIFIED:
+        return _next(
+            "verified", [], None,
+            "Done — this deliverable is verified end to end. Nothing left to do; "
+            "follow-up work is a NEW todo.",
+            todo_id=tid, done=True,
+        )
+
+    # The three-strike cord (SPEC §8) is enforced off the DB count, and once it is
+    # pulled no agent report is accepted at all — so no shorthand would work here.
+    if row["strikes"] >= MAX_STRIKES:
+        return _next(
+            "cord_pulled", [], None,
+            f"{MAX_STRIKES} fix cycles reached — the broker pulled the cord and the "
+            f"humans own this one. Drop it from your terminal, or agree a fresh todo.",
+            todo_id=tid, human=True,
+        )
+
+    # --- agree on WHAT ------------------------------------------------------
+    if status == todos.PENDING:
+        d = todos.decisions(conn, tid, row["version"])
+        awaiting = [p for p in parties if d.get(p, {}).get("decision") != todos.ACCEPT]
+        return _next(
+            "pending", awaiting, f"yes #{tid}",
+            f"{_who_label(awaiting)} still has to agree to the SCOPE — their agent types "
+            f"`yes #{tid}` (or `no #{tid} <why>` to send it back for a reshape). "
+            f"Nothing here moves until then.",
+            alt=f"no #{tid} <why>", todo_id=tid,
+        )
+
+    # --- agree on HOW -------------------------------------------------------
+    newest = _newest_contract(conn, task_id, todo_id=tid)
+    if newest is None:
+        return _next(
+            "accepted", parties, f"pc #{tid}",
+            f"Everyone agreed on WHAT. Next is HOW: one of you proposes the contract — "
+            f"`pc #{tid}`. Whoever proposes it becomes the PRODUCER for this "
+            f"deliverable, so there is no producer yet.",
+            todo_id=tid,
+        )
+
+    if newest["status"] == "declined":
+        # The whole point of decline: "waiting on X to sign" would be a lie here — X has
+        # looked and objected. The move is a NEW version, not a signature.
+        row = conn.execute(
+            "SELECT a.role AS role, c.decline_reason AS reason FROM contracts c "
+            "LEFT JOIN agents a ON a.id = c.declined_by WHERE c.id = ?",
+            (newest["id"],),
+        ).fetchone()
+        who = row["role"] if row and row["role"] else None
+        why = f" — \u201c{row['reason']}\u201d" if row and row["reason"] else ""
+        return _next(
+            "contract_declined", parties, f"pc #{tid}",
+            f"{(who or 'A party')} declined contract v{newest['version']}{why}. That "
+            f"version is dead and cannot be signed. Someone proposes a new one that "
+            f"addresses it — `pc #{tid}`.",
+            todo_id=tid,
+        )
+
+    if newest["status"] != "locked":
+        signed = set(_signatures_for(conn, newest["id"]))
+        awaiting = [p for p in parties if p not in signed]
+        return _next(
+            "contract_proposed", awaiting, f"sign #{tid}",
+            f"Contract v{newest['version']} is proposed and waiting on "
+            f"{_who_label(awaiting)} to sign — `sign #{tid}`. The staging URL stays "
+            f"hidden until every party has signed, and nobody can report ready until "
+            f"it locks.",
+            todo_id=tid,
+        )
+
+    # A lock exists on this todo, so its proposer exists too — but never interpolate a
+    # None into a sentence a human is meant to act on.
+    producer = _producer_role(conn, task_id, todo_id=tid)
+    owner = [producer] if producer else []
+    named = producer or "whoever proposed the locked contract"
+    consumers = [p for p in parties if p != producer]
+
+    if row["state"] not in (BACKEND_LIVE, TESTING):
+        return _next(
+            "contract_locked", owner, f"ready #{tid}",
+            f"The contract is locked and nothing is building yet — {named} proposed "
+            f"it, so {named} is the producer and owes the build. When their side is "
+            f"live to build against, their agent types `ready #{tid}`. Only they can: "
+            f"the broker refuses `ready` from anyone else.",
+            todo_id=tid,
+        )
+
+    if row["state"] == BACKEND_LIVE:
+        return _next(
+            "backend_live", consumers, f"ok #{tid}",
+            f"{_who_label(consumers)} builds against it and reports back — `ok #{tid}` "
+            f"if it works, `block #{tid}` if it doesn't (that's a strike; {MAX_STRIKES} "
+            f"and the humans take over). The producer ({named}) may not check its "
+            f"own work.",
+            alt=f"block #{tid}", todo_id=tid,
+        )
+
+    # testing — checks have run, so `done` is finally allowed.
+    return _next(
+        "testing", parties, f"done #{tid}",
+        f"Checks have run. When it's confirmed end to end, any party calls it: "
+        f"`done #{tid}`. `block #{tid}` instead if a check failed. The task itself "
+        f"concludes when the LAST todo is done.",
+        alt=f"block #{tid}", todo_id=tid,
+    )
 
 
 def _todo_march(conn, task_id: str, todo_id: int, from_state: str, to_state: str) -> str:
@@ -536,13 +741,32 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
         (identity.task_id, version),
     ).fetchone()
     if contract is None:
+        # The commonest way to land here is a human saying "sign it" on a scope where
+        # nobody has proposed anything — and an agent that only learns "no such version"
+        # goes back to its human to ask, which is the stall this text exists to end. A
+        # signature needs a proposal to attach to, so name the move that is actually
+        # missing, and name who can make it (anyone bound by the scope, including you).
+        scope = "" if todo_id is None else f", todo={int(todo_id)}"
         raise ValueError(
             f"no contract version {version} on task '{identity.task_id}'"
+            + ("" if todo_id is None else f" for todo {int(todo_id)}")
+            + f". Check get_contract{'()' if todo_id is None else f'(todo={int(todo_id)})'} "
+            f"— if nothing has been proposed yet there is nothing to sign, and the missing "
+            f"step is the PROPOSAL, not the signature. If you are a party you can supply "
+            f"it: propose_contract(spec{scope}) with your reading of your human's "
+            f"instruction stated as an explicit assumption, then sign THAT version. Your "
+            f"peer still reviews and signs (or declines) before anything locks."
         )
     if contract["status"] == "locked":
         raise ValueError(
             f"contract version {version} is already locked and immutable; "
             f"propose a new version to change it"
+        )
+    if contract["status"] == "declined":
+        raise ValueError(
+            f"contract version {version} was declined and cannot be signed. "
+            f"Propose a new version with propose_contract(spec) that addresses the "
+            f"objection — get_contract shows who declined it and why."
         )
 
     todo = None
@@ -636,7 +860,7 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
         state = todos.apply_rollup(conn, identity.task_id)
         lock_detail = {"version": version, "signed": sorted(signed_set), "todo_id": todo["id"]}
     _event(conn, identity.task_id, "lock", lock_detail)
-    _slack(
+    _notify(
         conn,
         identity.task_id,
         f"[{identity.task_id}] Contract v{version}{scope_note} locked — signed by "
@@ -674,6 +898,101 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
         out["todo_id"] = todo["id"]
         out["todo_state"] = CONTRACT_LOCKED
     return out
+
+
+def decline_contract(
+    conn, identity: Identity, reason: str, todo_id: int | None = None
+) -> dict:
+    """Formally push back on a PROPOSED contract: mark that version declined, with a reason.
+
+    Why this exists. A contract had ``lock`` and nothing else, so an unsigned proposal
+    meant EITHER "I have read it and I object" OR "I have not looked yet". The broker
+    could not tell those apart, so neither could the dashboard, so the humans had to hold
+    it in their heads — the exact class of invisibility that strands a collaboration.
+    Todos already had accept AND decline; contracts were the odd one out.
+
+    A decline kills that VERSION: nobody may sign it afterwards, and the answer is a new
+    proposal, never a mutation of this one (same immutability rule as a locked contract).
+    That is not the same as destroying agreed work — a proposal is not yet agreed, and
+    withholding a signature already blocked it. This only makes the block visible, and
+    says why.
+
+    Anyone bound by the contract may decline, INCLUDING its proposer (who may spot their
+    own mistake before a peer wastes time reviewing it).
+    """
+    _assert_live(conn, identity.task_id)
+    service.assert_content_size(reason, "decline reason")
+    if not (reason or "").strip():
+        raise ValueError(
+            "a decline needs a reason — your peer has to know what to change in the "
+            "next version"
+        )
+
+    newest = _newest_contract(conn, identity.task_id, todo_id)
+    if newest is None:
+        scope = f"todo {todo_id}" if todo_id is not None else f"task '{identity.task_id}'"
+        raise ValueError(
+            f"nothing to decline on {scope} — no contract has been proposed yet. "
+            f"Declining pushes back on a PROPOSAL; there has to be one first."
+        )
+    if newest["status"] == "locked":
+        raise ValueError(
+            f"contract v{newest['version']} is already locked — a locked contract is "
+            f"immutable. To change it, both of you reopen planning with "
+            f"reopen_negotiations(reason), then a new version is proposed and signed."
+        )
+    if newest["status"] == "declined":
+        raise ValueError(
+            f"contract v{newest['version']} is already declined — propose a new version "
+            f"with propose_contract(spec) rather than declining it twice."
+        )
+
+    todo = None
+    if newest["todo_id"] is not None:
+        todo = todos.get_row(conn, identity.task_id, newest["todo_id"])
+        # A non-party has no say in a shape that does not bind it — the mirror image of
+        # the same rule on signing.
+        todos.assert_party(todo, identity.role, "decline a contract on")
+
+    now = time.time()
+    conn.execute(
+        "UPDATE contracts SET status = 'declined', declined_by = ?, decline_reason = ?, "
+        "declined_at = ? WHERE id = ?",
+        (identity.agent_id, reason, now, newest["id"]),
+    )
+    # Any signatures already on this version are void with it — keeping them would let a
+    # later reader think the version was part-agreed when it is dead.
+    conn.execute("DELETE FROM contract_signatures WHERE contract_id = ?", (newest["id"],))
+    conn.commit()
+
+    scope_note = f" on todo #{todo['id']} ({todo['title']})" if todo else ""
+    _event(
+        conn,
+        identity.task_id,
+        "lock",
+        {
+            "text": f"Contract v{newest['version']}{scope_note} declined by "
+                    f"{identity.role}: {reason}"
+        },
+    )
+    service.post_message(
+        conn,
+        identity,
+        "renegotiation",
+        f"Declined contract v{newest['version']}{scope_note}: {reason}. That version is "
+        f"dead — nobody can sign it now. Propose a new version with propose_contract(spec"
+        + (f", todo={todo['id']}" if todo else "")
+        + ") that addresses this, or message me if you want to talk the shape through first.",
+        todo_id=(todo["id"] if todo else None),
+    )
+    return {
+        "version": newest["version"],
+        "status": "declined",
+        "declined_by": identity.role,
+        "reason": reason,
+        "todo_id": (todo["id"] if todo else None),
+        "next": "propose a new version with propose_contract(spec)",
+    }
 
 
 def reopen_negotiations(
@@ -816,7 +1135,11 @@ def get_contract(conn, task_id: str, todo_id: int | None = None) -> dict:
             "note": (
                 f"No contract has been proposed on todo {todo['id']} ('{todo['title']}') "
                 f"yet. Agree on WHAT first (every party accepts the todo), then one party "
-                f"proposes the HOW with propose_contract(spec, todo={todo['id']})."
+                f"proposes the HOW with propose_contract(spec, todo={todo['id']}). If your "
+                f"human has already told you to sign or lock this one, that IS the "
+                f"direction to propose it — send the shape their instruction implies with "
+                f"your reading stated as an explicit assumption, then sign it; your peer "
+                f"still reviews and signs (or declines) before it locks."
             ),
         }
 
@@ -1141,7 +1464,7 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
             f"don't re-report on this todo until a human unblocks it.",
             todo_id=row["id"],
         )
-        _slack(
+        _notify(
             conn, identity.task_id,
             f"[{identity.task_id}] STUCK on todo #{row['id']} ({row['title']}): "
             f"{MAX_STRIKES} fix cycles reached — humans needed. Last failure: {detail}",
@@ -1172,13 +1495,13 @@ def _report_todo_verified(conn, identity: Identity, row, detail: str) -> dict:
     out = _todo_result(conn, identity, row, STATUS_VERIFIED)
     roll = out["rollup"] or {}
     if roll.get("complete"):
-        _slack(
+        _notify(
             conn, identity.task_id,
             f"[{identity.name}] VERIFIED: every todo on '{identity.task_id}' is done "
             f"({roll.get('total')}/{roll.get('total')}). Last one: {row['title']} — {detail}",
         )
     else:
-        _slack(
+        _notify(
             conn, identity.task_id,
             f"[{identity.name}] todo #{row['id']} ({row['title']}) VERIFIED "
             f"({roll.get('verified')}/{roll.get('total')} on '{identity.task_id}'): {detail}",
@@ -1204,7 +1527,7 @@ def _report_todo_stuck(conn, identity: Identity, row, detail: str) -> dict:
                  {"reason": detail, "by": identity.role})
     service.post_message(conn, identity, "stuck", f"{_todo_label(row)} {detail}",
                          todo_id=row["id"])
-    _slack(
+    _notify(
         conn, identity.task_id,
         f"[{identity.task_id}] STUCK on todo #{row['id']} ({row['title']}): {detail}",
     )
@@ -1314,7 +1637,7 @@ def _report_test(conn, identity: Identity, status: str, detail: str) -> dict:
             conn, identity, "stuck",
             f"{MAX_STRIKES} fix cycles reached — humans needed. Last failure: {detail}",
         )
-        _slack(
+        _notify(
             conn, identity.task_id,
             f"[{identity.task_id}] STUCK: {MAX_STRIKES} fix cycles reached — humans needed. "
             f"Last failure: {detail}",
@@ -1339,7 +1662,7 @@ def _report_verified(conn, identity: Identity, detail: str) -> dict:
         )
     state = _transition(conn, identity.task_id, VERIFIED)
     service.post_message(conn, identity, "verified", detail)
-    _slack(conn, identity.task_id, f"[{identity.name}] VERIFIED: {detail}")
+    _notify(conn, identity.task_id, f"[{identity.name}] VERIFIED: {detail}")
     conn.commit()
     return {"status": STATUS_VERIFIED, "state": state}
 
@@ -1352,7 +1675,7 @@ def _report_resolved(conn, identity: Identity, detail: str) -> dict:
     state = _transition(conn, identity.task_id, RESOLVED)
     service.post_message(conn, identity, "resolved", detail)
     _event(conn, identity.task_id, "resolved", {"text": detail})
-    _slack(conn, identity.task_id, f"[{identity.name}] RESOLVED: {detail}")
+    _notify(conn, identity.task_id, f"[{identity.name}] RESOLVED: {detail}")
     conn.commit()
     return {"status": STATUS_RESOLVED, "state": state}
 
@@ -1369,7 +1692,7 @@ def _report_stuck(conn, identity: Identity, detail: str) -> dict:
     _assert_live(conn, identity.task_id)
     state = _transition(conn, identity.task_id, STUCK)
     service.post_message(conn, identity, "stuck", detail)
-    _slack(conn, identity.task_id, f"[{identity.task_id}] STUCK: {detail}")
+    _notify(conn, identity.task_id, f"[{identity.task_id}] STUCK: {detail}")
     conn.commit()
     return {"status": STATUS_STUCK, "state": state}
 
@@ -1387,7 +1710,7 @@ def _report_waiting(conn, identity: Identity, detail: str) -> dict:
     state = _state(conn, identity.task_id)
     service.post_message(conn, identity, "waiting", detail)
     _event(conn, identity.task_id, "waiting", {"text": detail})
-    _slack(conn, identity.task_id, f"[{identity.name}] WAITING — needs a human: {detail}")
+    _notify(conn, identity.task_id, f"[{identity.name}] WAITING — needs a human: {detail}")
     conn.commit()
     return {"status": STATUS_WAITING, "state": state}
 

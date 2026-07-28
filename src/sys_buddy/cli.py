@@ -29,11 +29,18 @@ def _cfg_from_args(args: argparse.Namespace, mode: str = "local") -> Config:
     # `serve --public-url` only configures the serving process, so the *other*
     # commands learn it from the --public-url flag (where they have one) or the
     # SYS_BUDDY_PUBLIC_URL env var. Export the env var once and they all agree.
+    # The Slack webhook is read here — for EVERY mode — rather than only in `serve`,
+    # where it used to live. Both `local` and the desktop app build their config through
+    # this path, so pinging a human silently did nothing on the two on-ramps people
+    # actually use. It is never persisted: the DB holds only sha256 token hashes and this
+    # is a replayable bearer credential, so it stays process-local (env var or the Host
+    # screen) and dies with the process.
     cfg = set_config(
         Config(
             mode=mode,
             db_path=Path(getattr(args, "db", None) or DEFAULT_DB_PATH),
             public_url=getattr(args, "public_url", None) or os.environ.get("SYS_BUDDY_PUBLIC_URL"),
+            slack_webhook=os.environ.get("SLACK_WEBHOOK_URL") or None,
         )
     )
     # Ensure the schema exists once per invocation (idempotent, cheap) so host-side
@@ -101,7 +108,7 @@ def cmd_host_viewer(args: argparse.Namespace) -> int:
 
 
 def cmd_join(args: argparse.Namespace) -> int:
-    from . import pairing
+    from . import onboarding, pairing
 
     # join is a network client; no local db/config needed.
     result = pairing.join(args.url, args.code, args.name, pubkey=args.pubkey)
@@ -113,13 +120,17 @@ def cmd_join(args: argparse.Namespace) -> int:
     print(f"  mcp_url:       {result['mcp_url']}")
     print(f"  agent_token:   {result['agent_token']}")
     print(f"  dashboard_url: {result['dashboard_url']}")
+    # Rendered from the client registry, never spelled out here: a hand-written copy of
+    # the `claude mcp add` line is exactly the kind of literal that drifts out of sync
+    # with onboarding.py and then fails silently.
     print("\nRegister the MCP with (the remove line is a no-op the first time,")
     print("and lets you re-pair later with a new URL/token without a collision):")
-    print(f"  claude mcp remove sys-buddy")
-    print(
-        f"  claude mcp add --transport http sys-buddy {result['mcp_url']} "
-        f'--header "Authorization: Bearer {result["agent_token"]}"'
-    )
+    for line in onboarding.claude_setup_command(
+        result["mcp_url"], result["agent_token"]
+    ).splitlines():
+        print(f"  {line}")
+    # Every other client we support (Claude desktop, Cursor, Gemini CLI, Other) is in
+    # `result["clients"]` — same renderer, same two facts, different packaging.
     if result.get("rules"):
         print("\n" + "-" * 68)
         print(result["rules"].rstrip())

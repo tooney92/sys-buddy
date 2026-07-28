@@ -46,31 +46,11 @@ Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y
 
 * version awareness — /api/version, single-sourced version, GUI banner ([2506b8a](https://github.com/tooney92/sys-buddy/commit/2506b8a26a107061585600ac7a116d0ffd87f3b7))
 * version awareness (/api/version + GUI update banner) ([4e23c5b](https://github.com/tooney92/sys-buddy/commit/4e23c5b1eaa5b94cd5bab07414719e22368ffec9))
-
-## [Unreleased]
-
-### Added
-- **Version awareness in the desktop app.** A new unauthenticated `GET /api/version`
-  reports the version the broker process is actually *running*. The desktop app compares
-  three numbers — installed (on disk), running (from the endpoint), and, if the user opts
-  in, the latest published GitHub release — and shows a banner when they disagree: a
-  "restart needed" warning when the broker is serving older code than what's installed
-  (the drift that hid a migration in 1.1.0/1.1.1), or an "update available" note with the
-  release notes inline when GitHub has something newer. The GitHub check is strictly
-  opt-in — the app makes no external request unless the toggle is on.
-- **Version is single-sourced.** `sys_buddy.__version__` now derives from the installed
-  package metadata rather than a second hand-edited literal, so `pyproject.toml` is the
-  one place to bump it; a test fails the build if the two ever drift.
-- **Docker packaging.** A multi-stage root `Dockerfile` (built with `uv`) and
+* Docker packaging — a multi-stage root `Dockerfile` (built with `uv`) and
   `docker-compose.yml` run the broker as a single container, non-root, with a persisted
   `sys-buddy-data` volume for the SQLite DB. Defaults to `serve` (auth-enforced) — never
-  `local`, which is unauthenticated and must not be reachable off-box. A `Makefile`
-  wraps the common flows and `.env.example` documents the tunnel setup for remote use.
-
-### Backlog
-- Tracked in `v2.md` — stronger auth (mTLS / OAuth 2.1); image/screenshot attachments;
-  non-HTTP / `interface_type` contracts; auto-revoke on completion + reopenable tasks +
-  token timer; multi-process presence & wait-cap accounting.
+  `local`, which is unauthenticated and must not be reachable off-box. A `Makefile` wraps
+  the common flows and `.env.example` documents the tunnel setup for remote use.
 
 ## [1.1.1] — 2026-07-24
 

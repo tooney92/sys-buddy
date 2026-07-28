@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS contracts (
     task_id     TEXT NOT NULL REFERENCES tasks(id),
     version     INTEGER NOT NULL,
     spec_json   TEXT NOT NULL,
-    status      TEXT NOT NULL,            -- 'draft' | 'locked'
+    status      TEXT NOT NULL,            -- 'draft' | 'locked' | 'declined'
     proposed_by INTEGER REFERENCES agents(id),
     -- NULL = a TASK-level contract (everything before todos existed, and every task
     -- that never grows a todo). Non-NULL keys the contract to one deliverable, whose
@@ -316,6 +316,20 @@ def init_db(db_path: Path | str | None = None) -> Path:
         }
         if "todo_id" not in contract_cols:
             conn.execute("ALTER TABLE contracts ADD COLUMN todo_id INTEGER REFERENCES todos(id)")
+        # Migration: a formal push-back on a PROPOSAL. Until now a contract had `lock`
+        # and nothing else, so an unsigned proposal meant either "I have read it and I
+        # object" or "I have not looked yet" — indistinguishable to the broker, so
+        # indistinguishable on the dashboard, so the humans had to hold that state in
+        # their heads. Todos already had accept AND decline; contracts were the odd one
+        # out. Declining marks that VERSION dead (nobody may sign it) and records who and
+        # why; the answer is a new version, never a mutation of this one. Pre-existing
+        # rows get NULL, i.e. "never declined", which is correct for all of them.
+        if "declined_by" not in contract_cols:
+            conn.execute("ALTER TABLE contracts ADD COLUMN declined_by INTEGER REFERENCES agents(id)")
+        if "decline_reason" not in contract_cols:
+            conn.execute("ALTER TABLE contracts ADD COLUMN decline_reason TEXT")
+        if "declined_at" not in contract_cols:
+            conn.execute("ALTER TABLE contracts ADD COLUMN declined_at REAL")
         # Migration: add messages.to_role to a db created before directed messages existed.
         msg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
         if "to_role" not in msg_cols:

@@ -34,7 +34,7 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import activity, files, identity, readiness, service, todos
+from . import activity, files, identity, notify, readiness, service, state, todos
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -42,7 +42,10 @@ from .identity import ViewerIdentity
 # HTTP verb set is small; the event ``kind`` set is fixed by the state machine.
 # ``todo`` is ONE kind carrying the specific action inside its detail (todos._event),
 # so the dashboard's filter vocabulary stays fixed as the todo actions grow.
-_EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "token", "todo", "waiting"}
+# `slack` is retained for rows written before notifications became multi-channel —
+# dropping it would make old events unfilterable. New rows use `notify`.
+_EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "notify",
+                "token", "todo", "waiting"}
 
 # Fallback for the UI's ``⟨api123⟩`` chip on rows written before the
 # ``messages.todo_id`` column existed: scrape "todo #N" from the body. New rows
@@ -143,6 +146,14 @@ def viewer_block(viewer: ViewerIdentity) -> dict:
     block: dict = {"mode": "host" if viewer.is_host else "buddy", "label": viewer.label}
     if not viewer.is_host:
         block["task_id"] = viewer.task_id
+    # Channel NAMES, never a credential. Everyone watching the task benefits from
+    # knowing whether terminal events actually reach a human — an unarmed channel looks
+    # identical to an armed one until a "stuck" ping silently goes nowhere. The webhook
+    # URL and bot token are bearer credentials and never cross to the browser.
+    # `slack_active` stays as a derived boolean so an older dashboard build keeps working.
+    channels = notify.active()
+    block["notify_channels"] = channels
+    block["slack_active"] = "slack" in channels
     return block
 
 
@@ -302,9 +313,15 @@ def _todos_for(conn, task_id: str) -> list[dict]:
     """The todo panel: every todo on the task, each with its own contract block.
 
     The wire shape is ``todos.to_dict`` verbatim (so the dashboard and the agents'
-    ``get_todos`` never drift) plus two view-only additions: ``time`` for the mono
-    HH:MM the rest of the dashboard uses, and ``contract`` — this deliverable's own
-    chain in exactly the shape the task card already renders.
+    ``get_todos`` never drift) plus three view-only additions: ``time`` for the mono
+    HH:MM the rest of the dashboard uses, ``contract`` — this deliverable's own
+    chain in exactly the shape the task card already renders — and ``next``.
+
+    ``next`` is ``state.next_step``: who owes the next move and the literal shorthand
+    they type. It is computed SERVER-SIDE, beside the gates ``report_status`` enforces,
+    precisely so it cannot become a second copy of the rules living in the dashboard's
+    JS — a "next step" that drifts from what the broker allows sends a human to type a
+    command that will be refused.
 
     Nothing is withheld by stage: a todo is a title, a scope and a party list, with no
     ``staging_url`` equivalent to protect until agreement (its contract block does the
@@ -315,6 +332,7 @@ def _todos_for(conn, task_id: str) -> list[dict]:
         d = dict(t)
         d["time"] = _hhmm(t["created_at"])
         d["contract"] = _contract_for(conn, task_id, todo_id=t["id"])
+        d["next"] = state.next_step(conn, task_id, t["id"])
         out.append(d)
     out.sort(key=lambda t: (_TODO_ORDER.get(t["status"], 1), t["id"]))
     return out

@@ -23,6 +23,48 @@ from .identity import Identity
 
 
 # --------------------------------------------------------------------------- #
+# role tags
+# --------------------------------------------------------------------------- #
+# Short tags a human types to their own agent ("sm @BE ...") so they don't have to
+# spell a role out. The agent is briefed to expand them (onboarding.py / rules.py),
+# but the BROKER resolves them too — a tag that reaches the wire is delivered rather
+# than rejected, which is the same "broker enforces, agents request" split used
+# everywhere else. Tags are a display convenience only: `roles_json` on the task keeps
+# storing canonical role names, so nothing downstream (delivery, dashboard, contracts)
+# ever sees a tag.
+ROLE_TAGS = {
+    "be": "backend",
+    "fe": "frontend",
+    "mb": "mobile",
+    "de": "designer",
+}
+
+
+def resolve_role(value: str, roles: list[str]) -> str | None:
+    """Resolve ``value`` to a role actually declared on the task, or None.
+
+    Accepts, in order: an exact match, a case-insensitive match ("Backend"), or a
+    short tag ("BE" → backend). Returns None when it resolves to nothing, so the
+    caller raises its own error — this function never decides policy.
+
+    A task is free to declare a role literally named "be"; the exact match wins
+    first, so a real role can never be shadowed by a tag.
+    """
+    if value in roles:
+        return value
+    folded = value.strip().lower()
+    for role in roles:
+        if role.lower() == folded:
+            return role
+    expanded = ROLE_TAGS.get(folded)
+    if expanded:
+        for role in roles:
+            if role.lower() == expanded:
+                return role
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # local-mode identity (self-declared, auto-provisioned on loopback)
 # --------------------------------------------------------------------------- #
 def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
@@ -39,25 +81,39 @@ def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
             "INSERT INTO tasks (id, title, state, roles_json, created_at) VALUES (?,?,?,?,?)",
             (task_id, task_id, "open", json.dumps([agent_name]), now),
         )
+        row_roles: list[str] = [agent_name]
     else:
-        roles = json.loads(row["roles_json"])
-        if agent_name not in roles:
-            roles.append(agent_name)
-            conn.execute("UPDATE tasks SET roles_json = ? WHERE id = ?", (json.dumps(roles), task_id))
+        row_roles = json.loads(row["roles_json"])
 
+    # Look the agent up by NAME, not by role. The name is the identity here ("make sure
+    # THIS agent exists"); the role merely defaults to it on first sight. Keying on role
+    # meant that once an agent's role differed from its name — reassigned on the task, or
+    # seeded then corrected — this lookup missed and inserted a SECOND agent with the same
+    # name, and appended that name to roles_json as a phantom role. The task then showed
+    # duplicate agents and bogus pre-flight chips that no flow could ever clear.
     agent = conn.execute(
-        "SELECT id, task_id, name, role FROM agents WHERE task_id = ? AND role = ?",
+        "SELECT id, task_id, name, role FROM agents WHERE task_id = ? AND name = ?",
         (task_id, agent_name),
     ).fetchone()
-    if agent is None:
-        cur = conn.execute(
-            "INSERT INTO agents (task_id, name, role, token_hash, created_at) VALUES (?,?,?,?,?)",
-            (task_id, agent_name, agent_name, None, now),
-        )
+    if agent is not None:
         conn.commit()
-        return Identity(agent_id=cur.lastrowid, task_id=task_id, name=agent_name, role=agent_name)
+        return Identity(
+            agent_id=agent["id"], task_id=agent["task_id"], name=agent["name"], role=agent["role"]
+        )
+
+    # Genuinely new agent: register its name as a role (local mode's name-doubles-as-role
+    # convention) only now, so re-seeing an existing agent can never grow roles_json.
+    if agent_name not in row_roles:
+        row_roles.append(agent_name)
+        conn.execute(
+            "UPDATE tasks SET roles_json = ? WHERE id = ?", (json.dumps(row_roles), task_id)
+        )
+    cur = conn.execute(
+        "INSERT INTO agents (task_id, name, role, token_hash, created_at) VALUES (?,?,?,?,?)",
+        (task_id, agent_name, agent_name, None, now),
+    )
     conn.commit()
-    return Identity(agent_id=agent["id"], task_id=agent["task_id"], name=agent["name"], role=agent["role"])
+    return Identity(agent_id=cur.lastrowid, task_id=task_id, name=agent_name, role=agent_name)
 
 
 def ensure_broker_identity(conn, task_id: str) -> Identity:
@@ -196,10 +252,16 @@ def post_message(
     # Empty string means broadcast, same as None.
     if not to_role:
         to_role = None
-    elif to_role not in json.loads(task["roles_json"]):
-        raise ValueError(
-            f"cannot address '{to_role}' — not a role on task '{identity.task_id}'"
-        )
+    else:
+        # Resolve tags/casing to the canonical role BEFORE storing, so `to_role` on the
+        # message row is always a real role name — the dashboard and delivery fan-out
+        # match on it exactly and must never see "BE".
+        resolved = resolve_role(to_role, json.loads(task["roles_json"]))
+        if resolved is None:
+            raise ValueError(
+                f"cannot address '{to_role}' — not a role on task '{identity.task_id}'"
+            )
+        to_role = resolved
     assert_content_size(body, "message body")
     state_at_send = task["state"]
     now = time.time()

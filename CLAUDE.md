@@ -4,6 +4,15 @@ sys-buddy is an authenticated, contract-enforcing MCP broker that lets two devel
 AI coding agents collaborate across the internet. **The broker enforces; agents request.**
 Source of truth: `SPEC.md`. Build brief: `KICKOFF.md`. Deviations/decisions: `DECISIONS.md`.
 
+## Concepts
+- **[`docs/todo-flow.md`](docs/todo-flow.md)** — how a todo goes from idea to verified: the two
+  state fields (`status` = the agreement, `state` = the march) and why the dashboard shows both,
+  the start-to-end walkthrough with the human shorthand (`todo` → `yes #N` → `pc #N` → `sign #N`
+  → `ready #N` → `ok #N` → `done #N`), who may act at each gate, why `#N` is mandatory, and the
+  two traps — `sign` before anything is proposed does nothing, and **nothing auto-advances**
+  (every arrow is a person deciding). Read it before touching `todos.py` or the todo paths in
+  `state.py`.
+
 ## Stack
 - Python 3.11+, FastMCP (HTTP transport), SQLite (WAL). Env & deps via **`uv`**.
 - One process, three surfaces: `/mcp` (MCP tools) · `/pair` (pairing REST) · `/ui` + `/api/*` (read-only dashboard).
@@ -12,9 +21,20 @@ Source of truth: `SPEC.md`. Build brief: `KICKOFF.md`. Deviations/decisions: `DE
 - Tests: `uv run pytest -q`.
 
 ## Local testing & deploy workflow (owner-directed)
+- **NEVER test on `:8787`.** That is the owner's real broker and they are often mid-session on
+  it. A second broker cannot bind it — it dies with `errno 48` while your requests silently go
+  to the LIVE one, which then looks like an auth or data bug. Never `pkill` a broker you did
+  not start.
+- **Test brokers bind `:9292`** (`SYS_BUDDY_DEV_PORT`, `config.DEV_PORT`) against a throwaway
+  db, never the default one:
+  ```
+  SYS_BUDDY_DB=~/.sys-buddy-dev/sys_buddy.db uv run sys-buddy local --port 9292
+  ```
+  Confirm the port is free first (`lsof -nP -iTCP:9292 -sTCP:LISTEN`) and check the boot log
+  actually says `9292` before driving it.
 - **We test LOCALLY.** A `git push` / publish is NEVER a prerequisite for testing. E2E runs
-  against the **local** broker: `uv run sys-buddy local` on `:8787`, driving the dashboard at
-  `http://127.0.0.1:8787/ui` with **Playwright**. Backend behaviour is covered by `pytest`.
+  against the **local** broker on `:9292`, driving the dashboard at
+  `http://127.0.0.1:9292/ui` with **Playwright**. Backend behaviour is covered by `pytest`.
 - **Push/publish happens ONLY on the owner's explicit directive, and ONLY AFTER** local pytest +
   Playwright are green — never to unblock a test.
 - The dashboard needs a viewer token. Mint one against the **local** db with

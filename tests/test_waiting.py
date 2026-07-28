@@ -69,6 +69,15 @@ def test_waiting_pings_slack_and_posts_to_the_thread(conn, monkeypatch):
     """The nudge is only useful if it reaches a human — it pings Slack — and it lands on
     the thread + event log so the dashboard shows it."""
     sent = []
+    # The registry only calls a channel it considers configured, so arm one first —
+    # that gate is the behaviour, not an inconvenience: an unconfigured channel must
+    # never be reported as having been notified.
+    from sys_buddy.config import Config, get_config, set_config
+
+    set_config(
+        Config(mode="local", db_path=get_config().db_path,
+               slack_webhook="https://hooks.example/x")
+    )
     monkeypatch.setattr(slack, "notify", lambda text: sent.append(text) or "")
     ag = _agents(conn)
     state.report_status(conn, ag["backend"], state.STATUS_WAITING, "mobile is silent")

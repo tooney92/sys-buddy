@@ -33,6 +33,20 @@ def test_all_tools_registered(tmp_path, mode):
     assert EXPECTED_TOOLS <= names
 
 
+def test_ship_is_shorthand_only_and_never_a_broker_tool(tmp_path):
+    """`ship #N` is vocabulary a human types to THEIR OWN agent — it maps to
+    propose_contract then lock_contract and lives in the briefing, not the tool set.
+
+    A broker tool would be a second way to do the same two things, and it would have to
+    decide on the human's behalf that proposing implies signing. The broker enforces; the
+    agent composes.
+    """
+    mcp = build_server(Config(mode="local", db_path=tmp_path / "s.db"))
+    names = {t.name for t in asyncio.run(mcp.list_tools())}
+    assert not [n for n in names if "ship" in n]
+    assert {"propose_contract", "lock_contract"} <= names
+
+
 @pytest.mark.parametrize("mode", ["local", "remote"])
 def test_all_http_routes_registered(tmp_path, mode):
     mcp = build_server(Config(mode=mode, db_path=tmp_path / "s.db"))

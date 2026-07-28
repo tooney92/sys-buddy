@@ -167,6 +167,28 @@ def test_relocking_locked_contract_is_rejected(conn):
         state.lock_contract(conn, ag["backend"], 1)
 
 
+def test_signing_with_nothing_proposed_names_the_missing_proposal(conn):
+    """The `sign`-before-`pc` stall, fixed at the highest-attention surface.
+
+    Observed live: a human said "lock the contract" where nothing had been proposed. The
+    agent was right that there was nothing to sign, but "no contract version 1" told it
+    only what was WRONG, so it went back to its human — three rounds for one move. The
+    error now names the move that is actually missing (the PROPOSAL), says the agent may
+    supply it, and says how (a stated assumption), because errors are where an agent is
+    paying most attention.
+    """
+    ag = _agents(conn, roles=("backend", "frontend"))
+    with pytest.raises(ValueError) as e:
+        state.lock_contract(conn, ag["backend"], 1)
+    msg = str(e.value)
+    low = msg.lower()
+    assert "nothing to sign" in low
+    assert "propose_contract(spec)" in msg
+    assert "assumption" in low
+    # ...and it must not read as "you decide alone": the peer still gates the lock.
+    assert "declines" in low or "decline" in low
+
+
 def test_lock_writes_lock_event_with_signed_roles(conn):
     ag = _agents(conn, roles=("backend", "frontend"))
     state.propose_contract(conn, ag["backend"], _valid_spec())

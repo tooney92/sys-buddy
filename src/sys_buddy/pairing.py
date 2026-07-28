@@ -211,22 +211,29 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
 
         # Lazy import: onboarding imports pairing at module top, so importing it here
         # (inside the handler) avoids a circular import.
-        from .onboarding import role_prompt
+        from .onboarding import connect_clients, role_prompt
 
         viewer_token = result["viewer_token"]
+        mcp_url = f"{cfg.base_url}/mcp"
         return JSONResponse(
             {
                 "agent_token": result["agent_token"],
                 "viewer_token": viewer_token,
                 "task_id": result["task_id"],
                 "role": result["role"],
-                "mcp_url": f"{cfg.base_url}/mcp",
+                "mcp_url": mcp_url,
                 "dashboard_url": f"{cfg.base_url}/ui?v={viewer_token}",
                 "expires_at": result["expires_at"],  # None = token never expires
                 # The briefing the operator pastes into their Claude agent.
                 "prompt": role_prompt(result["role"], result["task_id"], mode),
                 # The broker's non-negotiable charter, handed to the agent at setup.
                 "rules": RULES_OF_ENGAGEMENT,
+                # How to connect, for EVERY client we support — rendered here rather
+                # than in the page, for the same reason `prompt` and `rules` are: these
+                # literals fail silently when they drift, so there is exactly one copy.
+                # Stamped with cfg.base_url like mcp_url above, so a client that reached
+                # us through a tunnel rebases them the same way (see connect_clients).
+                "clients": connect_clients(mcp_url, result["agent_token"]),
             }
         )
 
@@ -282,12 +289,22 @@ def join(url: str, code: str, name: str, pubkey: str | None = None) -> dict | No
 
     # Rebase the broker's self-stamped URLs onto the origin we actually reached, so a
     # broker behind a tunnel it doesn't know about still hands back a reachable mcp_url.
+    mcp_url = _rebase(data.get("mcp_url"), url) or f"{url.rstrip('/')}/mcp"
+    agent_token = data.get("agent_token")
+
+    # Connect instructions: re-RENDER them locally against the rebased mcp_url rather
+    # than rebasing the server's copy by string surgery. We're in Python here with the
+    # same renderer the broker used, so a local render is exact and cannot go stale —
+    # and it still works against an older broker that doesn't send `clients` at all.
+    from .onboarding import connect_clients
+
     return {
         "task_id": data.get("task_id"),
         "role": data.get("role"),
-        "mcp_url": _rebase(data.get("mcp_url"), url) or f"{url.rstrip('/')}/mcp",
-        "agent_token": data.get("agent_token"),
+        "mcp_url": mcp_url,
+        "agent_token": agent_token,
         "dashboard_url": _rebase(data.get("dashboard_url"), url),
         "expires_at": data.get("expires_at"),
         "rules": data.get("rules"),  # surface the charter to the buddy (CLI prints it)
+        "clients": connect_clients(mcp_url, agent_token or ""),
     }

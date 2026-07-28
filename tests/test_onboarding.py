@@ -15,6 +15,7 @@ import json
 import pytest
 
 from sys_buddy import onboarding
+from sys_buddy.rules import RULES_OF_ENGAGEMENT
 
 
 # --- invite link round-trip -------------------------------------------------
@@ -118,18 +119,40 @@ def test_role_prompt_is_task_agnostic(role, mode):
     assert "readiness_check" in low and "rules" in low
 
 
-def test_role_prompt_is_role_aware_backend_vs_consumer():
-    """Producer convention (pinned): the `backend` role is drilled on PROPOSING; every
-    other role on ASSESSING/pushing back and signing — so the two prompts differ."""
-    backend = onboarding.role_prompt("backend", "signin")
-    frontend = onboarding.role_prompt("frontend", "signin")
-    assert backend != frontend.replace("`frontend`", "`backend`")
-    # Backend is the producer; consumer assesses and can push back.
-    assert "producer" in backend.lower()
-    assert "propose_contract" in backend
-    low_f = frontend.lower()
-    assert "assess" in low_f or "push back" in low_f
-    assert "not forced to sign" in low_f
+def test_role_prompt_is_identical_for_every_role():
+    """Model B (pinned): the producer is whoever PROPOSES the contract — decided per
+    deliverable, hardcoded to no role name (state._producer_role). So the briefing must be
+    the same for everyone bar the role it addresses.
+
+    This previously branched on `role == "backend"`, which silently broke any task without
+    a role by that name: in a designer+frontend session NEITHER matched, so both agents were
+    briefed as assessors, neither was told it could propose, and they waited on each other
+    while the broker was perfectly willing to proceed."""
+    for role in ("backend", "frontend", "mobile", "designer"):
+        rendered = onboarding.role_prompt(role, "signin")
+        assert rendered == onboarding.role_prompt("backend", "signin").replace(
+            "`backend`", f"`{role}`"
+        ), f"{role} got a different briefing — the producer must not be hardcoded"
+
+
+@pytest.mark.parametrize("role", ["backend", "frontend", "mobile", "designer"])
+def test_role_prompt_teaches_both_halves_to_every_role(role):
+    """Every role learns to propose AND to assess, because either may end up doing either."""
+    low = onboarding.role_prompt(role, "signin").lower()
+    assert "propose_contract" in low
+    assert "assess" in low or "push back" in low
+    assert "not forced to sign" in low
+
+
+@pytest.mark.parametrize("role", ["backend", "frontend", "mobile", "designer"])
+def test_role_prompt_never_claims_a_fixed_producer_role(role):
+    """The prompt must not tell anyone they ARE the producer up front — nobody is, until
+    someone proposes. Naming a role here is the exact drift this test exists to catch."""
+    low = onboarding.role_prompt(role, "signin").lower()
+    assert "you are the backend" not in low
+    assert "the backend proposes" not in low
+    # ...and it must say what actually decides it.
+    assert "whoever proposes" in low
 
 
 def test_role_prompt_teaches_planning_and_reopen():
@@ -142,13 +165,14 @@ def test_role_prompt_teaches_planning_and_reopen():
         assert "no re-lock" in low or "without" in low
 
 
-def test_role_prompt_consumer_mentions_optional_playwright():
-    """The consumer gets the optional Playwright-MCP setup nudge; the backend doesn't."""
-    frontend = onboarding.role_prompt("frontend", "signin").lower()
-    backend = onboarding.role_prompt("backend", "signin").lower()
-    assert "playwright" in frontend
-    assert "optional" in frontend  # never a gate
-    assert "playwright" not in backend
+@pytest.mark.parametrize("role", ["backend", "frontend", "mobile", "designer"])
+def test_role_prompt_mentions_optional_playwright_for_every_role(role):
+    """The Playwright nudge used to be consumer-only, which assumed we knew at briefing
+    time who would consume. We don't — any role may end up building against a peer's
+    contract, so everyone gets it, and it stays explicitly optional (never a gate)."""
+    low = onboarding.role_prompt(role, "signin").lower()
+    assert "playwright" in low
+    assert "optional" in low
 
 
 @pytest.mark.parametrize("mode", ["contract", "debug"])
@@ -169,6 +193,52 @@ def test_role_prompt_teaches_the_agent_owned_wait_loop_not_a_subagent(mode):
     assert 'report_status("stuck"' in text
     # Explicit turn-taking: the floor-passing signals so neither side stalls or over-waits.
     assert "over to you" in low and "i'll follow up" in low and "done for now" in low
+
+
+@pytest.mark.parametrize("role", ["backend", "frontend", "mobile", "designer"])
+def test_role_prompt_teaches_the_ship_shorthand(role):
+    """`ship [#N]` = propose-then-sign in ONE move, because that is how a human thinks
+    about it ("agree this and sign my side") while the broker needs two calls.
+
+    It is PROMPT-side only — it maps to propose_contract then lock_contract; there is no
+    `ship` tool (pinned in test_server.py). And it must never read as signing FOR the
+    peer: it signs one side, and the lock still waits for everyone.
+    """
+    text = onboarding.role_prompt(role, "signin")
+    low = text.lower()
+    assert "`ship [#n]`" in low
+    assert "propose_contract" in text and "lock_contract" in text
+    assert "signs your side only" in low
+    assert "every party has" in low or "everyone has" in low
+    # ...and it is the answer to a `sign` with nothing proposed, instead of stalling.
+    assert "nothing has been proposed" in low
+    assert "assumption" in low
+
+
+def test_ship_is_taught_to_every_role_identically():
+    """Same invariant as the rest of the briefing: no role-specific contract vocabulary
+    (the producer is whoever proposes — see test_role_prompt_is_identical_for_every_role)."""
+    ships = {
+        role: [ln for ln in onboarding.role_prompt(role, "signin").splitlines() if "`ship" in ln]
+        for role in ("backend", "frontend", "mobile", "designer")
+    }
+    assert all(v and v == ships["backend"] for v in ships.values())
+
+
+def test_charter_says_a_sign_with_nothing_proposed_means_propose_it_yourself():
+    """The stall this fixes: told to "lock the contract" with nothing proposed, the agent
+    explained the problem and asked — three times. The charter (re-readable mid-session via
+    the `rules` tool) now says the missing step is the PROPOSAL, that a party may supply it
+    under a stated assumption, and that a reaffirmation is a decision, not a re-ask.
+    """
+    r = RULES_OF_ENGAGEMENT.lower()
+    assert "the missing step is the proposal" in r
+    assert "explicit assumption" in r
+    assert "ask once" in r and "reaffirmation is a decision" in r
+    # Must not contradict decline_contract: the peer still gets to object, and the
+    # proposal is safe *because* nothing locks until everyone signs.
+    assert "decline_contract" in r
+    assert "until every party has signed" in r
 
 
 def test_role_prompt_debug_has_no_contract():
@@ -194,8 +264,20 @@ def test_claude_setup_command_removes_before_adding():
     lines = cmd.splitlines()
     assert len(lines) == 2
     assert lines[0].startswith("claude mcp remove sys-buddy")
-    assert lines[1].startswith("claude mcp add")
+    assert lines[1].startswith("claude mcp add --scope local")
     assert "sbk_tok" in lines[1]
+
+
+def test_connect_command_is_scoped_to_the_project_directory():
+    """The token is a seat on ONE task, so the connection belongs to the folder that task
+    is worked from. Global (user) scope was tried and reverted: it caps you at one active
+    task per machine, because pairing again replaces the single global entry — and it
+    leaves one task's bearer token in every project you open."""
+    add = onboarding.claude_add_command("https://abc.ngrok.app/mcp", "sbk_tok")
+    assert "--scope" in add and add[add.index("--scope") + 1] == "local"
+    # Remove passes NO scope on purpose: it then clears the entry wherever it lives,
+    # including the user-scope entries a short-lived earlier version created.
+    assert "--scope" not in onboarding.claude_remove_command()
 
 
 def test_configure_claude_runs_remove_before_add(monkeypatch):
@@ -393,7 +475,9 @@ def test_host_setup_seats_host_role(conn):
     assert invite_roles == {"frontend"}
 
     seat = r["host_seat"]
-    assert set(seat) == {"role", "mcp_url", "agent_token", "prompt", "config_command"}
+    assert set(seat) == {
+        "role", "mcp_url", "agent_token", "prompt", "config_command", "clients",
+    }
     assert seat["role"] == "backend"
     assert seat["mcp_url"] == "http://127.0.0.1:8787/mcp"
     assert seat["agent_token"]
@@ -401,6 +485,9 @@ def test_host_setup_seats_host_role(conn):
     # config_command is the ready-to-run claude mcp add line carrying the token.
     assert "claude mcp add" in seat["config_command"]
     assert seat["agent_token"] in seat["config_command"]
+    # The host may not be on Claude: every supported client comes with the seat, so
+    # the desktop app never has to spell one of these out itself.
+    assert [c["id"] for c in seat["clients"]] == list(onboarding.CLIENT_IDS)
 
 
 def test_host_setup_without_host_role_seats_nobody(conn):
@@ -547,3 +634,41 @@ def test_gui_start_host_without_a_staging_url_still_works(conn, monkeypatch):
     gui = _stub_broker(monkeypatch)
     r = gui.GuiApi().start_host("No Target", ["backend", "frontend"], host_role="backend")
     assert r["ok"] is True and r["staging_url"] is None
+
+
+# --------------------------------------------------------------------------- #
+# the no-terminal connect path
+# --------------------------------------------------------------------------- #
+# The CLI path assumes the `claude` binary. Someone driving Claude Code inside the
+# desktop app has no terminal and may not know the CLI exists — observed in the wild,
+# and it ended with the buddy installing a tool he had never heard of just to join.
+def test_mcp_json_snippet_is_valid_json_with_the_bearer_header():
+    import json as _json
+
+    snippet = onboarding.mcp_json_snippet("https://abc.ngrok.app/mcp", "sbk_tok")
+    parsed = _json.loads(snippet)
+    entry = parsed["mcpServers"]["sys-buddy"]
+    assert entry["url"] == "https://abc.ngrok.app/mcp"
+    assert entry["headers"]["Authorization"] == "Bearer sbk_tok"
+
+
+def test_mcp_json_states_the_transport_explicitly():
+    """VS Code REQUIRES `type`; the others infer it. Stating it costs nothing and stops
+    one snippet silently selecting the wrong transport in a client that needs it."""
+    import json as _json
+
+    parsed = _json.loads(onboarding.mcp_json_snippet("https://x/mcp", "t"))
+    assert parsed["mcpServers"]["sys-buddy"]["type"] == "http"
+
+
+def test_both_connect_paths_describe_the_same_connection():
+    """A file that disagrees with the command is worse than having only one of them."""
+    import json as _json
+
+    url, tok = "https://abc.ngrok.app/mcp", "sbk_tok"
+    argv = onboarding.claude_add_command(url, tok)
+    parsed = _json.loads(onboarding.mcp_json_snippet(url, tok))["mcpServers"]["sys-buddy"]
+
+    assert url in argv and parsed["url"] == url
+    assert f"Authorization: Bearer {tok}" in argv
+    assert parsed["headers"]["Authorization"] == f"Bearer {tok}"
