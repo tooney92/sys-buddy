@@ -43,3 +43,5 @@ tutorial/
 enterprise/
 ideas/
 demo/
+# Machine-local: a personal permission allowlist plus agent worktrees and scratch.
+.claude/
