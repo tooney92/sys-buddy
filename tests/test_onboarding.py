@@ -263,24 +263,21 @@ def test_claude_setup_command_removes_before_adding():
     cmd = onboarding.claude_setup_command("https://abc.ngrok.app/mcp", "sbk_tok")
     lines = cmd.splitlines()
     assert len(lines) == 2
-    assert lines[0].startswith("claude mcp remove --scope user sys-buddy")
-    assert lines[1].startswith("claude mcp add --scope user")
+    assert lines[0].startswith("claude mcp remove sys-buddy")
+    assert lines[1].startswith("claude mcp add --scope local")
     assert "sbk_tok" in lines[1]
 
 
-def test_connect_command_registers_at_user_scope_not_per_directory():
-    """`claude mcp add` defaults to `local` scope, which is stored PER PROJECT DIRECTORY.
-
-    Observed in the wild: an operator ran the connect command in their home directory,
-    opened their agent on a project folder, and had no sys-buddy tools — with
-    `claude mcp list` reporting nothing from that directory, so it looked like the add had
-    failed. A broker connection is not a property of one folder, and both halves must
-    agree on the scope or a re-pair leaves a stale user-scope entry for `add` to collide
-    with."""
+def test_connect_command_is_scoped_to_the_project_directory():
+    """The token is a seat on ONE task, so the connection belongs to the folder that task
+    is worked from. Global (user) scope was tried and reverted: it caps you at one active
+    task per machine, because pairing again replaces the single global entry — and it
+    leaves one task's bearer token in every project you open."""
     add = onboarding.claude_add_command("https://abc.ngrok.app/mcp", "sbk_tok")
-    remove = onboarding.claude_remove_command()
-    assert "--scope" in add and add[add.index("--scope") + 1] == "user"
-    assert "--scope" in remove and remove[remove.index("--scope") + 1] == "user"
+    assert "--scope" in add and add[add.index("--scope") + 1] == "local"
+    # Remove passes NO scope on purpose: it then clears the entry wherever it lives,
+    # including the user-scope entries a short-lived earlier version created.
+    assert "--scope" not in onboarding.claude_remove_command()
 
 
 def test_configure_claude_runs_remove_before_add(monkeypatch):
@@ -632,3 +629,41 @@ def test_gui_start_host_without_a_staging_url_still_works(conn, monkeypatch):
     gui = _stub_broker(monkeypatch)
     r = gui.GuiApi().start_host("No Target", ["backend", "frontend"], host_role="backend")
     assert r["ok"] is True and r["staging_url"] is None
+
+
+# --------------------------------------------------------------------------- #
+# the no-terminal connect path
+# --------------------------------------------------------------------------- #
+# The CLI path assumes the `claude` binary. Someone driving Claude Code inside the
+# desktop app has no terminal and may not know the CLI exists — observed in the wild,
+# and it ended with the buddy installing a tool he had never heard of just to join.
+def test_mcp_json_snippet_is_valid_json_with_the_bearer_header():
+    import json as _json
+
+    snippet = onboarding.mcp_json_snippet("https://abc.ngrok.app/mcp", "sbk_tok")
+    parsed = _json.loads(snippet)
+    entry = parsed["mcpServers"]["sys-buddy"]
+    assert entry["url"] == "https://abc.ngrok.app/mcp"
+    assert entry["headers"]["Authorization"] == "Bearer sbk_tok"
+
+
+def test_mcp_json_states_the_transport_explicitly():
+    """VS Code REQUIRES `type`; the others infer it. Stating it costs nothing and stops
+    one snippet silently selecting the wrong transport in a client that needs it."""
+    import json as _json
+
+    parsed = _json.loads(onboarding.mcp_json_snippet("https://x/mcp", "t"))
+    assert parsed["mcpServers"]["sys-buddy"]["type"] == "http"
+
+
+def test_both_connect_paths_describe_the_same_connection():
+    """A file that disagrees with the command is worse than having only one of them."""
+    import json as _json
+
+    url, tok = "https://abc.ngrok.app/mcp", "sbk_tok"
+    argv = onboarding.claude_add_command(url, tok)
+    parsed = _json.loads(onboarding.mcp_json_snippet(url, tok))["mcpServers"]["sys-buddy"]
+
+    assert url in argv and parsed["url"] == url
+    assert f"Authorization: Bearer {tok}" in argv
+    assert parsed["headers"]["Authorization"] == f"Bearer {tok}"

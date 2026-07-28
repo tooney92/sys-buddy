@@ -165,6 +165,17 @@ textarea.prompt:focus{outline:none;border-color:var(--accent)}
 textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .copy-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .hint{font-size:.84rem;color:var(--text-3);margin:2px 0 0;line-height:1.5}
+/* connect-method tabs — two peer options, not a command plus a footnote */
+.connect-tabs{display:flex;gap:6px;margin:2px 0 10px}
+.connect-tab{
+  appearance:none;cursor:pointer;font-family:inherit;font-size:.82rem;font-weight:600;
+  padding:6px 13px;border-radius:9px;color:var(--text-2);
+  background:var(--surface-2);border:1px solid var(--border-strong);
+}
+.connect-tab:hover{border-color:var(--accent);color:var(--text)}
+.connect-tab.is-on{background:var(--accent);border-color:var(--accent);color:#fff}
+.connect-tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
 /* optional, collapsible "recommended: Playwright" block (every role) */
 .pw{margin-top:10px;border:1px solid var(--border-strong);border-radius:11px;background:var(--surface)}
 .pw > summary{
@@ -232,12 +243,41 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
     <!-- Step 1 — connect Claude to sys-buddy -->
     <div class="blk">
-      <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your Claude to sys-buddy</span>
-      <pre class="code" id="connect-cmd"></pre>
-      <div class="copy-row">
-        <button type="button" class="btn copy" id="copy-cmd">Copy command</button>
+      <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your agent to sys-buddy</span>
+
+      <!-- Two ways in, presented as PEERS rather than a command with a footnote.
+           The CLI path assumes the `claude` binary; someone running Claude Code inside
+           the desktop app has no terminal and may never have heard of the CLI. That is
+           not hypothetical — it cost a real pairing session. The file path needs neither
+           a terminal nor an install, and is also what Cursor reads. -->
+      <div class="connect-tabs" role="tablist" aria-label="How to connect">
+        <button type="button" class="connect-tab is-on" id="tab-cli" role="tab" aria-selected="true">Run a command</button>
+        <button type="button" class="connect-tab" id="tab-file" role="tab" aria-selected="false">Save a file</button>
       </div>
-      <p class="hint">Run this in the terminal where you start Claude Code, then restart your Claude session.</p>
+
+      <div id="pane-cli">
+        <pre class="code" id="connect-cmd"></pre>
+        <div class="copy-row">
+          <button type="button" class="btn copy" id="copy-cmd">Copy command</button>
+        </div>
+        <p class="hint">Needs the <code>claude</code> CLI. Run it in the terminal where you
+           start Claude Code, then restart your session.</p>
+      </div>
+
+      <div id="pane-file" hidden>
+        <p class="hint">Using Claude Code inside the desktop app, or Cursor? Save this as
+           <code>.mcp.json</code> at the root of the project you have open — no terminal,
+           nothing to install. Your agent can create the file for you: paste the block and
+           ask it to save that as <code>.mcp.json</code>.</p>
+        <pre class="code" id="connect-json"></pre>
+        <div class="copy-row">
+          <button type="button" class="btn copy" id="copy-json">Copy .mcp.json</button>
+        </div>
+        <p class="hint"><strong>Then restart your agent</strong> — MCP servers are only read
+           at start-up, so the tools will not appear until you do.</p>
+        <p class="hint">⚠ It contains your token, so it is yours alone — don't commit it to a
+           shared repo.</p>
+      </div>
 
       <!-- Optional, collapsed by default; shown to every role (any role may consume). -->
       <details class="pw" id="playwright-note" hidden>
@@ -437,9 +477,39 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     var token  = res.agent_token || '';
     var cmd =
       'claude mcp remove sys-buddy\n' +
-      'claude mcp add --scope user --transport http sys-buddy ' + origin + '/mcp --header "Authorization: Bearer ' + token + '"';
+      'claude mcp add --scope local --transport http sys-buddy ' + origin + '/mcp --header "Authorization: Bearer ' + token + '"';
     connectCmd.textContent = cmd;                 // textContent — no manual escaping needed
     copyCmdBtn.onclick = function(){ copyText(cmd, copyCmdBtn); };
+
+    // The no-terminal path: the same connection as a file. Built here rather than
+    // server-side because the page already holds origin + token.
+    var connectJson = document.getElementById('connect-json');
+    var copyJsonBtn = document.getElementById('copy-json');
+    var jsonText = JSON.stringify({
+      mcpServers: { 'sys-buddy': {
+        type: 'http',
+        url: origin + '/mcp',
+        headers: { Authorization: 'Bearer ' + token }
+      } }
+    }, null, 2);
+    connectJson.textContent = jsonText;
+    copyJsonBtn.onclick = function(){ copyText(jsonText, copyJsonBtn); };
+
+    var tabCli = document.getElementById('tab-cli');
+    var tabFile = document.getElementById('tab-file');
+    var paneCli = document.getElementById('pane-cli');
+    var paneFile = document.getElementById('pane-file');
+    function pick(which){
+      var cli = which === 'cli';
+      tabCli.classList.toggle('is-on', cli);
+      tabFile.classList.toggle('is-on', !cli);
+      tabCli.setAttribute('aria-selected', String(cli));
+      tabFile.setAttribute('aria-selected', String(!cli));
+      paneCli.hidden = !cli;
+      paneFile.hidden = cli;
+    }
+    tabCli.onclick = function(){ pick('cli'); };
+    tabFile.onclick = function(){ pick('file'); };
 
     // Optional Playwright walkthrough — shown to EVERY role.
     // This used to be hidden for the role named 'backend', on the assumption that role

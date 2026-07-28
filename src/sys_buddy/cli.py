@@ -122,9 +122,9 @@ def cmd_join(args: argparse.Namespace) -> int:
     print(f"  dashboard_url: {result['dashboard_url']}")
     print("\nRegister the MCP with (the remove line is a no-op the first time,")
     print("and lets you re-pair later with a new URL/token without a collision):")
-    print(f"  claude mcp remove --scope user sys-buddy")
+    print(f"  claude mcp remove sys-buddy")
     print(
-        f"  claude mcp add --scope user --transport http sys-buddy {result['mcp_url']} "
+        f"  claude mcp add --scope local --transport http sys-buddy {result['mcp_url']} "
         f'--header "Authorization: Bearer {result["agent_token"]}"'
     )
     if result.get("rules"):

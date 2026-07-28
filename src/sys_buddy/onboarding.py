@@ -340,21 +340,62 @@ def role_prompt(
 def claude_add_command(mcp_url: str, token: str, name: str = "sys-buddy") -> list[str]:
     """The exact argv (no shell) that registers the MCP with the Claude Code CLI.
 
-    ``--scope user`` is load-bearing, not a nicety. ``claude mcp add`` defaults to
-    ``local`` scope, which is stored PER PROJECT DIRECTORY — so an operator who ran this
-    in their home directory and then opened their agent on a project folder found no
-    sys-buddy tools at all, with `claude mcp list` confirming "nothing here" from the
-    wrong directory. Observed in the wild, and it wasted a pairing session: the fix looks
-    like "restart", the restart doesn't help, and nothing says why. User scope registers
-    it once for every project, which is what a broker connection actually is.
+    ``--scope local`` is PER PROJECT DIRECTORY, and that is deliberate: the token in this
+    command is a seat on ONE task, so the connection belongs to the folder you work that
+    task from. User scope was tried and reverted — it registers a single global entry, so
+    pairing on a second task replaces the first (the setup command removes before adding),
+    capping you at one active task per machine, and it leaves one task's bearer token
+    sitting in every project you open.
+
+    The failure this scope causes is REAL but is an instruction problem, not a scope
+    problem: run it in the wrong directory and you get no tools, with ``claude mcp list``
+    reporting nothing from there — which reads as the add having failed. It cost a
+    pairing session. The answer is to say WHERE to run it, and to keep the "ask your
+    agent what sys-buddy tools it has" verification step, not to make the entry global.
+
+    Stated explicitly rather than relying on the default, so a future change to Claude
+    Code's default cannot silently move us. The REMOVE half deliberately passes no scope:
+    it then clears the entry from whichever scope holds it, which also cleans up after
+    the short-lived user-scope version.
 
     Returned as a list so callers can both display it and hand it straight to
     ``subprocess.run`` without shell-quoting hazards around the bearer token.
     """
     return [
-        "claude", "mcp", "add", "--scope", "user", "--transport", "http",
+        "claude", "mcp", "add", "--scope", "local", "--transport", "http",
         name, mcp_url, "--header", f"Authorization: Bearer {token}",
     ]
+
+
+def mcp_json_snippet(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
+    """The `.mcp.json` a project can carry instead of running a CLI command.
+
+    Why this exists at all: the CLI path assumes the ``claude`` binary. Someone driving
+    Claude Code inside the desktop app has no terminal in front of them and may not know
+    the CLI exists — that is not hypothetical, it cost a real pairing session, which
+    ended with the buddy installing a tool he had never heard of just to join. A file
+    needs neither. Claude Code reads a project-level ``.mcp.json`` at start-up, and it
+    can WRITE files, so "put this at your project root" is a paste that works with no
+    terminal at all.
+
+    Same shape Cursor uses, which is why this is the highest-value renderer to have: one
+    snippet serves two clients. ``type`` is stated explicitly rather than inferred —
+    VS Code requires it, and being explicit costs nothing where it is optional.
+
+    Two-space indented and stable-ordered so it diffs cleanly if committed.
+    """
+    return json.dumps(
+        {
+            "mcpServers": {
+                name: {
+                    "type": "http",
+                    "url": mcp_url,
+                    "headers": {"Authorization": f"Bearer {token}"},
+                }
+            }
+        },
+        indent=2,
+    )
 
 
 def claude_remove_command(name: str = "sys-buddy") -> list[str]:
@@ -364,7 +405,7 @@ def claude_remove_command(name: str = "sys-buddy") -> list[str]:
     tunnel URL and/or new token) must remove the stale one first. On a first-time
     setup this is a harmless no-op that prints "not found".
     """
-    return ["claude", "mcp", "remove", "--scope", "user", name]
+    return ["claude", "mcp", "remove", name]
 
 
 def claude_setup_command(mcp_url: str, token: str, name: str = "sys-buddy") -> str:
