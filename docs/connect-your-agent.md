@@ -35,6 +35,10 @@ cookie. Everything below is just per-client packaging of those two facts.
    on Claude Code; the broker neither knows nor cares. It must never become task state —
    that would invent a compatibility matrix we'd have to maintain.
 5. **Always include a verification step.** Every failure we found was silent.
+6. **Every merge instruction carries two guard lines.** A "stop if no project is open"
+   clause, and "show me the resulting file". The first turns a silent global write into a
+   visible halt; the second is the only reason a wrong-folder write is ever noticed. Both
+   were earned — see the Cursor Home trap below.
 
 ---
 
@@ -97,7 +101,10 @@ No terminal. Claude writes the file itself.
 **1 — paste into the chat** (copy button):
 
 ```
-Add an MCP server called "sys-buddy" to this project's .mcp.json.
+Add an MCP server called "sys-buddy" to THIS project's .mcp.json.
+
+If no project or folder is open, STOP and tell me instead of writing it —
+don't put it in a home-directory config.
 
 If .mcp.json already exists, KEEP every server already in it and add this one
 alongside them — do not replace the file or remove anything.
@@ -154,10 +161,16 @@ clients share one mental model. Two differences: the path is `.cursor/mcp.json` 
 `.cursor/` directory, not `.mcp.json` at the root), and no `"type": "http"` — Cursor
 infers transport from `url`.
 
+**0 — open your project in Cursor first.** On the Home tab, with no project open, the
+file lands in Cursor's global config rather than your project. See the trap below.
+
 **1 — paste into Cursor's chat:**
 
 ```
-Add an MCP server called "sys-buddy" to this project's .cursor/mcp.json.
+Add an MCP server called "sys-buddy" to THIS project's .cursor/mcp.json.
+
+If no project or folder is open — if this would land in ~/.cursor/mcp.json —
+STOP and tell me instead of writing it. Don't write to the global config.
 
 If that file already exists, KEEP every server already in it and add this one
 alongside them — do not replace the file or remove anything.
@@ -198,6 +211,12 @@ So the instruction MUST name the expected path and have the user check it:
 > Expect the file at `<your-project>/.cursor/mcp.json`. If your agent says it wrote
 > `~/.cursor/mcp.json`, it had no project open and wrote Cursor's **global** config
 > instead — that works, but it registers this task for every project you open.
+
+The paste's guard clause says STOP AND TELL ME, not "refuse". Global is not an error —
+it connected fine and served 26 tools. The cost is one task's token registered for every
+project, and a second pairing colliding with the first, which is exactly why `--scope
+user` was reverted. Some people genuinely only run one task, so the call is theirs; the
+system's job is to make it visible rather than silent.
 
 **The "show me the resulting file" line is what caught this**, because the agent printed
 the absolute path. Keep it in every merge instruction; it is the only reason a
