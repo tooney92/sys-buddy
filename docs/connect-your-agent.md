@@ -4,8 +4,9 @@ How a buddy connects **their** agent to a sys-buddy broker, for every agent we s
 This is the spec the join page (`src/sys_buddy/join.html`) and the desktop app
 (`src/sys_buddy/gui_app.html`) render from.
 
-**Status:** Claude is LOCKED (verified end-to-end 2026-07-28). Cursor, Gemini CLI and
-"Other" are drafted but NOT yet verified. Nothing here is built yet.
+**Status:** Claude and Cursor are LOCKED (both verified end-to-end 2026-07-28 against a
+real broker). Gemini CLI and "Other" are drafted but NOT yet verified. Nothing here is
+built yet.
 
 ---
 
@@ -143,18 +144,64 @@ the CLI and ended up installing it just to join.
 
 ---
 
-## Cursor — DRAFT, not verified
+## Cursor — LOCKED ✅
 
-Same JSON as the desktop-app path, saved to `~/.cursor/mcp.json` (global) or the
-project's `.cursor/mcp.json`. Key is `mcpServers`, URL field is `url`.
+Verified 2026-07-28 against a real broker on `:9292`. Connected, **26 tools**, and the
+requests landed server-side.
 
-Cursor is installed on the owner's machine, so this IS verifiable — do it before shipping.
+Same shape as Claude's desktop branch — merge instruction, reload, verify — so both
+clients share one mental model. Two differences: the path is `.cursor/mcp.json` (inside a
+`.cursor/` directory, not `.mcp.json` at the root), and no `"type": "http"` — Cursor
+infers transport from `url`.
 
-⚠ Known conflict to preserve: if a server answers RFC 9728 OAuth discovery, Cursor
-**ignores configured headers** and starts OAuth instead (maintainer-confirmed, unfixed).
-sys-buddy is immune today — verified: `/.well-known/oauth-protected-resource` and
-`/.well-known/oauth-authorization-server` both 404. This breaks the moment anyone adds
-OAuth.
+**1 — paste into Cursor's chat:**
+
+```
+Add an MCP server called "sys-buddy" to this project's .cursor/mcp.json.
+
+If that file already exists, KEEP every server already in it and add this one
+alongside them — do not replace the file or remove anything.
+If it doesn't exist, create it.
+
+Add under "mcpServers":
+
+"sys-buddy": {
+  "url": "<url>",
+  "headers": { "Authorization": "Bearer <token>" }
+}
+
+Then show me the resulting file so I can confirm nothing was lost.
+```
+
+**2 — reload.** Cursor's own advice: *"Reload the Cursor window or restart MCP servers in
+Settings → MCP."* ⟨cheapest sufficient step still TBD — connection was confirmed, but we
+did not isolate which reload achieved it⟩
+
+**3 — verify:** ask *"what sys-buddy tools do you have?"*, or check **Settings → Tools &
+MCPs**, where a working server shows a green dot and a tool count.
+
+### ⚠ Cursor has a "Home" context, and it is a trap
+
+Cursor scopes MCP servers per workspace, with tabs per project **plus a `Home` tab for
+when no project is open**. With no project open, "this project's `.cursor/mcp.json`"
+resolves to Home — which is `~/.cursor/mcp.json`, Cursor's GLOBAL config. Observed
+exactly this: the agent reported *"No existing mcp.json in this workspace"* and created
+the global file, while the scratch project's own `.cursor/mcp.json` sat untouched.
+
+That is the same failure class as running `claude mcp add` in the wrong directory, and it
+lands in the global scope we deliberately rejected — one task registered for every
+project. The tools also get namespaced by scope: a Home install appears as
+**`user-sys-buddy`**.
+
+So the instruction MUST name the expected path and have the user check it:
+
+> Expect the file at `<your-project>/.cursor/mcp.json`. If your agent says it wrote
+> `~/.cursor/mcp.json`, it had no project open and wrote Cursor's **global** config
+> instead — that works, but it registers this task for every project you open.
+
+**The "show me the resulting file" line is what caught this**, because the agent printed
+the absolute path. Keep it in every merge instruction; it is the only reason a
+wrong-folder write is visible rather than silent.
 
 ## Gemini CLI — DRAFT, not verified
 
