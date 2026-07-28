@@ -144,7 +144,17 @@ var IC={
   moon:svg(16,'<path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>'),
   link:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7l1.5-1.5"/></svg>',
   next:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg>',
-  check:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6L9 17l-5-5"/></svg>'
+  check:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6L9 17l-5-5"/></svg>',
+  /* `>_` — the Commands reference. A prompt caret, NOT a run button: the panel it opens
+     is a cheatsheet of what a human types to THEIR OWN agent (D11 — this dashboard
+     never acts), which is why the panel is captioned rather than the glyph carrying it. */
+  term:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l4.5 5L4 17M12.5 17H20"/></svg>',
+  /* The Workflows glyph deliberately ECHOES the stepper — a line with three nodes on it
+     (`──●───●───●──`), the same shape stepVisual paints for the task stepper and the todo
+     mini-stepper. Seeing it should read as "the thing that explains those stages".
+     Not a lightbulb (that is the "tips" framing we removed), not IC.doc (documentation),
+     not a branch (the flow is linear, nothing diverges). */
+  flow:'<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M1.5 12h21"/><circle cx="4.6" cy="12" r="2.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none"/><circle cx="19.4" cy="12" r="2.5" fill="currentColor" stroke="none"/></svg>'
 };
 function dividerIcon(kind){
   if(kind==='lock') return svg(13,'<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>');
@@ -176,7 +186,16 @@ var state = {
      null when the overlay is closed. MUST appear in sig() below or opening/closing the
      lightbox would never re-render. Cleared on navigation (openTask/goHome). */
   lightbox:null,
+  /* which slide-out reference panel is open: null | 'commands' | 'workflows'. Reference
+     only — neither panel has an input or a button that calls anything (DECISIONS D11).
+     MUST appear in sig() below or opening/closing it would never re-render. */
+  panel:null,
   mobileTab:'thread', switcherOpen:false, isMobile: window.innerWidth<900,
+  /* a desktop that is merely NARROW (>=900 so not gated, but under ~1150): the header
+     is already dense, so the two reference buttons drop their text labels and the
+     "last refreshed" wording collapses to its dot + tooltip. Nothing is lost, and the
+     header never overflows horizontally. */
+  narrow: window.innerWidth<1150,
   lastRefresh:0, refreshing:false
 };
 var lastSig=null;
@@ -519,8 +538,34 @@ function headerHTML(){
     ? '<button data-newtask="1" title="Start a new task" style="display:flex;align-items:center;gap:5px;padding:6px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text);flex:none">+ New task</button>'
     : '';
 
+  /* The two REFERENCE buttons, grouped: they are siblings ("how do I drive this thing?"),
+     so they sit adjacent with a divider separating them from the theme toggle, which is
+     a display preference and nothing to do with them. Labelled in words wherever the
+     header has room — an icon-only pair here would be pure guesswork. */
+  function refBtn(key, icon, label, tip){
+    var on = state.panel===key;
+    var pad = state.narrow ? 'width:34px;justify-content:center' : 'padding:0 11px;gap:7px';
+    return '<button data-panel="'+key+'" title="'+esc(tip)+'" aria-expanded="'+(on?'true':'false')+'" '+
+      'style="height:34px;display:flex;align-items:center;'+pad+';border-radius:9px;cursor:pointer;flex:none;'+
+      'font-size:13px;font-weight:600;font-family:inherit;'+
+      'background:'+(on?'var(--accent-soft)':'var(--surface-2)')+';'+
+      'border:1px solid '+(on?'var(--accent)':'var(--border)')+';'+
+      'color:'+(on?'var(--accent-2)':'var(--text-2)')+'">'+
+      '<span style="display:flex">'+icon+'</span>'+(state.narrow?'':'<span>'+esc(label)+'</span>')+'</button>';
+  }
+  var refGroup = '<div style="display:flex;align-items:center;gap:6px;flex:none">'+
+      refBtn('commands', IC.term, 'Commands',
+             'Commands — what you type to YOUR agent. Reference only; the dashboard never runs anything.')+
+      refBtn('workflows', IC.flow, 'Workflows',
+             'Workflows — how a todo goes from idea to verified, plus debug and pre-flight.')+
+    '</div>'+
+    '<span style="width:1px;height:22px;background:var(--border);flex:none"></span>';
+
   var refreshDot = 'var(--st-verified-dot)';
-  return '<div style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:'+(m?'10px':'14px')+';padding:11px '+(m?'14px':'20px')+';background:var(--surface);border-bottom:1px solid var(--border)">'+
+  /* The header sits ABOVE an open reference panel (which starts at HEADER_H, below it) so
+     the two buttons stay visible and clickable while a panel is open — you can swap
+     Commands ⇄ Workflows, or close by clicking the lit one, without hunting for the ✕. */
+  return '<div style="position:sticky;top:0;z-index:'+(state.panel?9992:40)+';display:flex;align-items:center;gap:'+(m?'10px':'14px')+';padding:11px '+(m?'14px':'20px')+';background:var(--surface);border-bottom:1px solid var(--border)">'+
     '<div data-home="1" style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;flex:none">'+
       '<div style="display:flex;align-items:center;gap:3px">'+
         '<span style="width:9px;height:9px;border-radius:50%;background:var(--accent);display:inline-block"></span>'+
@@ -539,8 +584,9 @@ function headerHTML(){
     scopeBadge+
     '<div style="display:flex;align-items:center;gap:7px;flex:none" title="'+esc(refreshText())+'">'+
       '<span id="sb-refresh-dot" style="width:7px;height:7px;border-radius:50%;background:'+refreshDot+';animation:pulsedot 2.4s ease-in-out infinite"></span>'+
-      (m?'':'<span id="sb-refresh-text" style="font-size:12px;color:var(--text-2);white-space:nowrap">'+refreshText()+'</span>')+
+      ((m||state.narrow)?'':'<span id="sb-refresh-text" style="font-size:12px;color:var(--text-2);white-space:nowrap">'+refreshText()+'</span>')+
     '</div>'+
+    refGroup+
     '<button data-theme-toggle="1" title="Toggle theme" style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;color:var(--text-2);flex:none">'+(dark?IC.sun:IC.moon)+'</button>'+
   '</div>';
 }
@@ -603,7 +649,7 @@ function listHTML(){
           '<span style="font-size:15px;font-weight:600;color:var(--text)">'+esc(t.title)+'</span>'+
           '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:600;background:'+c.bg+';color:'+c.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+c.dot+'"></span>'+esc(c.label)+'</span>'+roll+
         '</div>'+
-        '<div style="display:flex;align-items:center;gap:6px;margin-top:9px">'+avs+'</div>'+
+        '<div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;align-items:center;gap:6px;margin-top:9px">'+avs+'</div>'+
       '</div>'+
       '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:7px;flex:none">'+
         '<span data-last="'+esc(t.id)+'" style="font-size:12.5px;color:var(--text-2);white-space:nowrap">'+esc(t.last||'')+'</span>'+strike+
@@ -724,8 +770,39 @@ function threadHTML(d){
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
     '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">'+
       '<span style="font-weight:600;font-size:14px;color:var(--text)">Message thread</span>'+
-      '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+lps+'<div style="display:flex;gap:4px">'+avs+'</div></div></div>'+
+      '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+lps+
+        '<div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;gap:4px">'+avs+'</div></div></div>'+
+    threadLegendHTML()+
     '<div style="padding:20px 18px;display:flex;flex-direction:column;gap:17px;max-height:640px;overflow-y:auto">'+inner+'</div></div>';
+}
+
+/* ---------- thread legend (the old "Tips" items, rehomed) ----------
+   These three lines used to sit in a collapsed "Tips" card at the very bottom of the page,
+   which is nowhere near the thing they explain. They are LEGEND, not workflow, so they did
+   not move into the Workflows panel either — they live here, one row under the thread
+   header, inches from the avatars they decode and the `→ role` chips they define. The test
+   this has to pass: someone who sees a `→ designer` chip can learn what it means without
+   opening anything. */
+var ROLE_COLOR_TIP='Roles are colour-coded — backend · frontend · mobile · designer.';
+function roleDotsHTML(){
+  var dot='width:7px;height:7px;border-radius:50%;flex:none';
+  return ['backend','frontend','mobile','designer'].map(function(r){
+    return '<span title="'+esc(r)+'" style="'+dot+';background:var(--role-'+r+')"></span>';
+  }).join('');
+}
+function threadLegendHTML(){
+  /* No `·` separators between the items: the row WRAPS on a narrow desktop and a
+     separator that lands at the end of a line reads as a dangling bullet. Gap does the
+     same job and survives the wrap. */
+  return '<div style="padding:8px 18px;border-bottom:1px solid var(--border);background:var(--surface-2);'+
+      'display:flex;align-items:center;gap:6px 18px;flex-wrap:wrap;font-size:11px;color:var(--text-2);line-height:1.5">'+
+    '<span title="'+esc(ROLE_COLOR_TIP)+'" style="display:inline-flex;align-items:center;gap:6px">'+
+      '<span style="display:inline-flex;gap:3px;flex:none">'+roleDotsHTML()+'</span>Roles are colour-coded</span>'+
+    '<span>Messages broadcast to everyone on the task by default</span>'+
+    '<span style="display:inline-flex;align-items:center;gap:6px">'+
+      '<span style="font-family:'+MONO+';font-size:10px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:999px;padding:1px 7px;white-space:nowrap">→ role</span>'+
+      'means it went to that one role only</span>'+
+  '</div>';
 }
 
 /* ---------- contract panel ----------
@@ -1094,7 +1171,7 @@ function debugTaskHTML(d){
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
     '<span style="display:inline-flex;align-items:center;gap:7px;padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:7px;height:7px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
     '<span style="font-size:12.5px;color:var(--text-2)">Debug session — collaborate, then mark resolved.</span>'+
-    '<div style="flex:1"></div><div style="display:flex;gap:4px">'+avs+'</div></div>'+
+    '<div style="flex:1"></div><div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;gap:4px">'+avs+'</div></div>'+
     preflightRow(d)+'</div>';
   return '<div style="max-width:1200px;margin:0 auto;padding:20px 20px 80px">'+
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px">'+
@@ -1109,37 +1186,26 @@ function debugTaskHTML(d){
     attachmentsHTML(d)+
     eventLogHTML(d)+
     readinessPreviewHTML(d)+
-    shortcodesHTML(d)+
-    tipsHTML()+
   '</div>'+lightboxHTML();
 }
 
-/* ---------- tips (compact, collapsed-by-default legend) ---------- */
-function tipsHTML(){
-  var dot='width:7px;height:7px;border-radius:50%;flex:none';
-  return '<details style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden">'+
-    '<summary style="list-style:none;cursor:pointer;padding:11px 16px;font-size:12.5px;font-weight:600;color:var(--text-2);display:flex;align-items:center;gap:8px;user-select:none">'+
-      '<span style="color:var(--text-3);display:flex">'+IC.warn+'</span>Tips</summary>'+
-    '<div style="padding:2px 16px 14px;display:flex;flex-direction:column;gap:8px;font-size:12.5px;color:var(--text-2);line-height:1.5">'+
-      '<div style="display:flex;align-items:center;gap:8px">'+
-        '<span style="display:inline-flex;gap:3px;flex:none">'+
-          '<span style="'+dot+';background:var(--role-backend)"></span>'+
-          '<span style="'+dot+';background:var(--role-frontend)"></span>'+
-          '<span style="'+dot+';background:var(--role-mobile)"></span>'+
-          '<span style="'+dot+';background:var(--role-designer)"></span></span>'+
-        '<span>Roles are color-coded (backend · frontend · mobile · designer).</span></div>'+
-      '<div>Messages broadcast to everyone on the task by default.</div>'+
-      '<div>A <span style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:999px;padding:1px 7px">→ role</span> chip means a private message directed to that one role.</div>'+
-    '</div></details>';
-}
-
-/* ---------- shorthand cheatsheet (collapsed-by-default) ---------- */
+/* ---------- shorthand cheatsheet ---------- */
 /* The short commands a human types to THEIR OWN agent (taught in the agent prompt).
    Mirrored here so a watcher has the same reference. Contract vs debug show the
-   codes that apply to each mode. */
+   codes that apply to each mode.
+
+   This used to be an inline `<details>` at the bottom of the task page; it now renders
+   INSIDE the Commands slide-out (panelHTML below). The content is unchanged — it was
+   moved, not rewritten — and in particular the role-tag row is still generated FROM
+   ROLE_TAGS. Hard-coding that list is literally how `upto` went missing from the
+   cheatsheet; one source, never a hand-maintained copy. */
 function shortcodesHTML(d){
   var contract = !(d && d.mode==='debug');
-  function code(c){ return '<span style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:6px;padding:1px 6px;white-space:nowrap">'+c+'</span>'; }
+  /* esc() is NOT optional here: `todo <title>` and `no #N <why>` contain angle brackets,
+     and an unescaped `<title>` is a real element the parser then reads TEXT into — it
+     silently ate every row after it (and, in the panel, the whole Broker-tools section
+     below). Placeholders are copy, not markup. */
+  function code(c){ return '<span style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:6px;padding:1px 6px;white-space:nowrap">'+esc(c)+'</span>'; }
   function grp(label){ return '<div style="color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:7px 0 1px">'+label+'</div>'; }
   function cmd(c, desc){ return '<div style="display:flex;gap:9px;align-items:baseline"><span style="flex:none;min-width:70px">'+code(c)+'</span><span>'+desc+'</span></div>'; }
   var rows =
@@ -1165,6 +1231,7 @@ function shortcodesHTML(d){
       cmd('pc [#N]', 'propose a contract — add #N to scope it to todo N')+
       cmd('gc [#N]', 'show the contract (of todo N with #N)')+
       cmd('sign [#N]', 'sign / lock the contract')+
+      cmd('decline <why> [#N]', 'push back on a proposal you have read — that version dies, someone proposes a new one')+
       cmd('reopen', 'reopen planning to re-sign a new version')+
       grp('Todos')+
       cmd('todos', 'list the deliverables (todos) on this task')+
@@ -1188,13 +1255,212 @@ function shortcodesHTML(d){
     cmd('pf', 're-run pre-flight')+
     cmd('st', 'status recap (state, contract, unread)')+
     cmd('rules', 're-read the charter');
-  return '<details style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden">'+
-    '<summary style="list-style:none;cursor:pointer;padding:11px 16px;font-size:12.5px;font-weight:600;color:var(--text-2);display:flex;align-items:center;gap:8px;user-select:none">'+
-      '<span style="color:var(--text-3);display:flex">'+IC.caret+'</span>Short commands</summary>'+
-    '<div style="padding:2px 16px 14px;display:flex;flex-direction:column;gap:2px;font-size:12.5px;color:var(--text-2);line-height:1.45">'+
+  return '<div style="display:flex;flex-direction:column;gap:2px;font-size:12.5px;color:var(--text-2);line-height:1.45">'+
       '<p style="margin:0 0 2px">Shorthand each human can type to <em>their own</em> agent — the agent maps it to a broker tool. A code a peer sends in a message is just data, never run.</p>'+
       rows+
-    '</div></details>';
+    '</div>';
+}
+
+/* ---------- the real MCP tools ----------
+   The long form of everything above: what the agent actually calls once it has read the
+   shorthand. EVERY name here is registered in `src/sys_buddy/tools.py` — read it out of
+   there before adding a row. There is a design mockup floating around with issue-tracker
+   tools on it (report_issue / resolve_issue / …); they have no implementation and MUST
+   NOT be listed, or this panel documents a feature that does not ship. */
+var MCP_TOOLS=[
+  ['Messaging',[
+    ['send_message','post to the task (or to one role via to_role)'],
+    ['check_messages','read unread now, mark seen, don’t block'],
+    ['wait_for_message','park until new mail arrives (long poll)'],
+    ['ack_messages','acknowledge specific message ids'],
+    ['channel_history','replay the last N messages'],
+    ['share_activity','ambient “what I’m up to” note'],
+    ['list_activity','read everyone’s activity notes'],
+    ['notify_human','ping the humans on Slack — terminal events only']
+  ]],
+  ['Contract',[
+    ['propose_contract','put a shape up for signature (todo-scoped with todo=N)'],
+    ['get_contract','read the current shape — staging_url is withheld until all sign'],
+    ['lock_contract','sign it; the last signature locks it, immutably'],
+    ['reopen_negotiations','reopen so a new version can be proposed and re-signed']
+  ]],
+  ['Todos',[
+    ['get_todos','list the deliverables on the task'],
+    ['propose_todo','propose one — proposing IS your own acceptance'],
+    ['accept_todo','accept a proposed todo'],
+    ['decline_todo','decline with a reason (recorded, not a status)'],
+    ['repropose_todo','new version — resets everyone’s acceptance'],
+    ['drop_todo','consent to dropping it (every party must)']
+  ]],
+  ['Status',[
+    ['report_status','ready / checked / blocked / verified / stuck, on todo N']
+  ]],
+  ['Files',[
+    ['upload_file','share a screenshot, design or artefact'],
+    ['list_files','what has been shared on the task'],
+    ['get_file','fetch one back']
+  ]],
+  ['Meta',[
+    ['readiness_check','see the pre-flight questions'],
+    ['submit_readiness','answer them — passing unlocks the action tools'],
+    ['rules','re-read the charter'],
+    ['rotate_token','rotate this agent’s own credential']
+  ]]
+];
+/* A debug task has no contract and never carries todos, so those groups are dropped for
+   one — same mode-awareness the shorthand rows already have, applied to the long form. */
+function mcpToolsHTML(d){
+  var debug = !!(d && d.mode==='debug');
+  var out=MCP_TOOLS.filter(function(sec){
+    /* `Status` stays: report_status is how a debug task reaches `resolved`. */
+    return !(debug && (sec[0]==='Contract' || sec[0]==='Todos'));
+  }).map(function(sec){
+    var rows=sec[1].map(function(t){
+      if(debug && t[0]==='report_status') t=[t[0],'resolved / stuck on a debug task'];
+      return '<div style="display:flex;gap:9px;align-items:baseline;padding:2px 0">'+
+        '<span style="flex:none;font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);white-space:nowrap">'+esc(t[0])+'</span>'+
+        '<span style="color:var(--text-3)">·</span>'+
+        '<span style="min-width:0">'+esc(t[1])+'</span></div>';
+    }).join('');
+    return '<div style="color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:9px 0 2px">'+esc(sec[0])+'</div>'+rows;
+  }).join('');
+  return '<div style="font-size:12px;color:var(--text-2);line-height:1.45">'+
+    '<p style="margin:0 0 2px">The broker tools the shorthand maps to. Your agent calls these; you never type them.</p>'+
+    out+'</div>';
+}
+
+/* ---------- the two reference panels ----------
+   Both are slide-outs off the header, and both are REFERENCE ONLY. There is no input,
+   no button that calls anything, and nothing here executes — DECISIONS D11: "the
+   dashboard surfaces state and tells the human what to type — it never acts". The
+   Commands panel is a cheatsheet of what you say to YOUR OWN agent; it is not a console.
+
+   They are state-driven (state.panel) and ride the normal render/bind/sig loop, so the
+   SSE stream keeps flowing and repainting underneath. Focus is NOT trapped — Tab still
+   walks the page — and Esc or the ✕ dismisses. */
+var DOC_TODO_FLOW='https://github.com/tooney92/sys-buddy/blob/main/docs/todo-flow.md';
+/* The desktop header's own height: 11px padding + its tallest child (a 34px button) +
+   11px + the 1px bottom border. The panel starts here rather than at 0 so it docks UNDER
+   the header instead of burying the very buttons that opened it. */
+var HEADER_H=57;
+
+function panelSection(title, body, note){
+  return '<section style="margin:0 0 20px">'+
+    '<h3 style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--text-3)">'+esc(title)+'</h3>'+
+    (note?'<p style="margin:0 0 9px;font-size:12px;color:var(--text-2);line-height:1.55">'+note+'</p>':'')+
+    body+'</section>';
+}
+/* a mono chip in the same spelling nextStepHTML and the cheatsheet use, so all three
+   read as "this is the literal thing a human types" */
+function shChip(c){
+  return '<code style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);background:var(--surface-2);border:1px solid var(--border-strong);border-radius:6px;padding:1px 6px;white-space:nowrap">'+esc(c)+'</code>';
+}
+function flowRow(step, who, what){
+  return '<div style="display:flex;gap:10px;align-items:baseline;padding:5px 0;border-top:1px solid var(--border)">'+
+    '<span style="flex:none;min-width:74px">'+shChip(step)+'</span>'+
+    '<span style="flex:none;min-width:88px;font-size:11px;font-weight:600;color:var(--text)">'+esc(who)+'</span>'+
+    '<span style="min-width:0;font-size:11.5px;color:var(--text-2);line-height:1.5">'+what+'</span></div>';
+}
+
+/* Every rule below is a SUMMARY of docs/todo-flow.md, deliberately not a second copy of
+   it — two statements of the same rules drift, and the doc is the one that gets updated
+   alongside todos.py/state.py. Anything needing detail links out instead. */
+function workflowsPanelBody(){
+  var fields='<div style="display:flex;flex-direction:column;gap:8px">'+
+    '<div style="padding:9px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px">'+
+      '<div style="font-size:11.5px;font-weight:700;color:var(--text)">'+shChip('status')+' — the agreement</div>'+
+      '<div style="margin-top:5px;font-size:11.5px;color:var(--text-2);line-height:1.5">“How much have we agreed?” pending → accepted → contracted → verified / dropped. Derived on every read, shown as the <strong>status chip</strong>.</div></div>'+
+    '<div style="padding:9px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px">'+
+      '<div style="font-size:11.5px;font-weight:700;color:var(--text)">'+shChip('state')+' — the march</div>'+
+      '<div style="margin-top:5px;font-size:11.5px;color:var(--text-2);line-height:1.5">“How far has it been built?” Shown as the <strong>mini-stepper</strong>, whose four labels fold six march values: planning · building · ready · verified. <strong>“building” means the contract is locked</strong>, not that anything is being built yet.</div></div>'+
+    '<div style="padding:9px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px">'+
+      '<div style="font-size:11.5px;font-weight:700;color:var(--text)">'+shChip('stuck')+' — a flag, not a state</div>'+
+      '<div style="margin-top:5px;font-size:11.5px;color:var(--text-2);line-height:1.5">A stuck deliverable stays exactly where it was on the march so it can’t brick the other five. It just carries a ⚠.</div></div>'+
+  '</div>';
+
+  var walk=
+    flowRow('todo <title>','any party','propose a deliverable. Proposing <em>is</em> your own acceptance, and you must name yourself a party.')+
+    flowRow('yes #N','every other','accept it. Status turns <em>accepted</em> once all have. '+shChip('no #N <why>')+' records a reason and hands it back.')+
+    flowRow('pc #N','any party','propose the contract — and <strong>whoever proposes becomes the producer</strong> for that todo. Only after it is accepted.')+
+    flowRow('sign #N','every party','sign it. The last signature locks it, immutably, and releases the '+shChip('staging_url')+'.')+
+    flowRow('ready #N','producer only','“my side is live, build against it.”')+
+    flowRow('ok #N','consumers only','“it works.” '+shChip('block #N')+' instead is a <strong>strike</strong> — three and the broker pulls the cord on that one deliverable.')+
+    flowRow('done #N','any party','verified. The task concludes when the <strong>last</strong> todo verifies.');
+
+  var traps='<div style="display:flex;flex-direction:column;gap:8px">'+
+    '<div style="padding:9px 11px;background:var(--st-testing-bg);border:1px solid var(--st-testing-dot);border-radius:10px;font-size:11.5px;color:var(--text);line-height:1.55">'+
+      '<strong>1 · '+shChip('sign')+' before anything is proposed does nothing.</strong> A signature needs a proposal to attach to. If you typed '+shChip('sign #N')+' and nothing moved, nobody has run '+shChip('pc #N')+' yet.</div>'+
+    '<div style="padding:9px 11px;background:var(--st-testing-bg);border:1px solid var(--st-testing-dot);border-radius:10px;font-size:11.5px;color:var(--text);line-height:1.55">'+
+      '<strong>2 · Nothing auto-advances.</strong> No timer, no daemon. Every arrow above is a person deciding and the broker allowing it. A todo parked at <em>building</em> forever isn’t a hung process — the producer just hasn’t typed '+shChip('ready #N')+'. The <strong>Next</strong> line on the todo card names who owes the move.</div>'+
+  '</div>';
+
+  var gates='<div style="font-size:11.5px;color:var(--text-2);line-height:1.6">'+
+    'Refused unless: you are a <strong>named party</strong> on the todo · '+shChip('pc #N')+' needs it <em>accepted</em> · '+
+    shChip('ready #N')+' needs you to be the <strong>producer</strong> with a locked contract · '+shChip('ok #N')+' / '+shChip('block #N')+
+    ' needs you <strong>not</strong> to be the producer, after a ready · '+shChip('done #N')+' needs it in <em>testing</em>. '+
+    'Every refusal raises an error the agent can read.</div>';
+
+  var why='<div style="font-size:11.5px;color:var(--text-2);line-height:1.6">Once a task has todos, “backend is ready” is meaningless — ready on <em>which</em> deliverable? So '+
+    shChip('ready')+' / '+shChip('ok')+' / '+shChip('block')+' / '+shChip('done')+' are todo-scoped and '+shChip('#N')+' is <strong>required</strong>; the broker refuses the bare form and lists the live todos. '+
+    'The one exception is '+shChip('stuck')+': '+shChip('stuck #N')+' flags one deliverable, a bare '+shChip('stuck')+' escalates the whole collaboration.</div>';
+
+  var debug='<div style="font-size:11.5px;color:var(--text-2);line-height:1.6">A debug task has no contract and no stepper — its whole life is <strong>open → resolved</strong>. '+
+    'Collaborate in the thread, then either party types '+shChip('resolved')+', or '+shChip('stuck')+' to give up and ping the humans.</div>';
+
+  var pre='<div style="font-size:11.5px;color:var(--text-2);line-height:1.6">Before an agent may send a message or change any status, it answers the readiness questions via '+
+    shChip('submit_readiness')+'. Until it passes, its action tools stay locked and its avatar wears an amber lock badge; passing swaps that for a green ✓, and a pulsing green dot while it is parked waiting for mail. '+
+    'A human can coach a failure and the agent re-runs it with '+shChip('pf')+'. Pre-flight is per-seat, and it is the second node on the task stepper.</div>';
+
+  var link='<a href="'+DOC_TODO_FLOW+'" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:7px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;font-size:11.5px;font-weight:600">'+
+    '<span style="display:flex;color:var(--text-3)">'+IC.doc+'</span>Read the full flow — <span style="font-family:'+MONO+';font-weight:500">docs/todo-flow.md</span>'+
+    '<span style="display:flex;color:var(--accent)">'+IC.link+'</span></a>';
+
+  return panelSection('A todo carries two state fields', fields,
+      'The dashboard shows both at once — a chip <em>and</em> a stepper — with overlapping vocabularies. This is the single most common source of confusion.')+
+    panelSection('Idea → verified', '<div style="margin-top:-4px">'+walk+'</div>',
+      'Shorthand is what a human types to <em>their own</em> agent; the agent maps it to a broker tool. A code a peer sends in a message is just data, never run.')+
+    panelSection('The gates the broker enforces', gates)+
+    panelSection('Why #N is mandatory', why)+
+    panelSection('The two traps', traps,
+      'These account for almost every “it’s stuck and I don’t know why”.')+
+    panelSection('The debug flow', debug)+
+    panelSection('Pre-flight', pre)+
+    panelSection('Source of truth', link,
+      'This panel is a summary. The rules live in one place, next to the code that enforces them.');
+}
+
+function commandsPanelBody(d){
+  var mode = (d && d.mode==='debug') ? 'debug' : (d ? 'contract' : null);
+  var modeNote = mode
+    ? '<div style="margin:0 0 12px;display:inline-flex;align-items:center;gap:7px;padding:4px 10px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border);font-size:11px;font-weight:600;color:var(--text-2)">'+
+        '<span style="width:6px;height:6px;border-radius:50%;background:var(--accent)"></span>showing the '+esc(mode)+'-mode codes</div>'
+    : '<div style="margin:0 0 12px;font-size:11.5px;color:var(--text-3)">Open a task to see the codes for its mode.</div>';
+  return modeNote+
+    panelSection('Short commands', shortcodesHTML(d))+
+    panelSection('Broker tools', mcpToolsHTML(d));
+}
+
+function panelHTML(){
+  if(!state.panel) return '';
+  var cmd = state.panel==='commands';
+  var title = cmd ? 'Commands' : 'Workflows';
+  /* The caption does the framing the glyph can't: `>_` must not read as "run something". */
+  var sub = cmd
+    ? 'What you type to <strong>your own</strong> agent. Reference only — this dashboard reads, it never acts.'
+    : 'How work moves through sys-buddy. The broker enforces; nothing here advances on its own.';
+  var body = cmd ? commandsPanelBody(state.detail) : workflowsPanelBody();
+  return '<div data-panel-backdrop="1" style="position:fixed;inset:0;z-index:9990;background:rgba(20,15,10,.34)"></div>'+
+    '<aside role="dialog" aria-modal="false" aria-label="'+esc(title)+'" style="position:fixed;top:'+HEADER_H+'px;right:0;bottom:0;width:min(452px,94vw);max-width:100vw;z-index:9991;background:var(--bg);border-left:1px solid var(--border);box-shadow:-10px 0 34px rgba(20,15,10,.18);display:flex;flex-direction:column">'+
+      '<div style="flex:none;padding:15px 18px 13px;background:var(--surface);border-bottom:1px solid var(--border)">'+
+        '<div style="display:flex;align-items:center;gap:10px">'+
+          '<span style="display:flex;color:var(--accent);flex:none">'+(cmd?IC.term:IC.flow)+'</span>'+
+          '<span style="font-size:15px;font-weight:700;letter-spacing:-.01em;color:var(--text);flex:1;min-width:0">'+esc(title)+'</span>'+
+          '<button data-panel-close="1" title="Close (Esc)" style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;color:var(--text-2);font-size:15px;line-height:1;flex:none">✕</button>'+
+        '</div>'+
+        '<p style="margin:7px 0 0;font-size:11.5px;color:var(--text-2);line-height:1.55">'+sub+'</p>'+
+      '</div>'+
+      '<div style="flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;padding:16px 18px 42px">'+body+'</div>'+
+    '</aside>';
 }
 
 /* ---------- readiness pre-flight (compact, collapsed-by-default) ---------- */
@@ -1410,8 +1676,6 @@ function taskHTML(){
     '</div>'+
     '<div style="display:'+logDisp+'">'+eventLogHTML(d)+'</div>'+
     readinessPreviewHTML(d)+
-    shortcodesHTML(d)+
-    tipsHTML()+
   '</div>'+lightboxHTML();
 }
 
@@ -1423,7 +1687,7 @@ function sig(){
     view:state.view, taskId:state.taskId, error:state.error, theme:state.theme, isMobile:state.isMobile,
     viewer:state.viewer, tasks:tasksLite, detail:state.detail,
     expanded:state.expanded, version:state.version, selectedTodo:state.selectedTodo,
-    lightbox:state.lightbox,
+    lightbox:state.lightbox, panel:state.panel, narrow:state.narrow,
     eventFilter:state.eventFilter,
     eventLogOpen:state.eventLogOpen, mobileTab:state.mobileTab, switcherOpen:state.switcherOpen,
     loading:state.detail?0:state.loadingDetail
@@ -1441,6 +1705,10 @@ function render(){
     else if(state.error==='forbidden') html=headerHTML()+messageBody('Not your task','This token can only view its own task. '+ (state.viewer&&state.viewer.task_id?('You have access to “'+state.viewer.task_id+'”.'):''));
     else if(state.error==='not-found') html=headerHTML()+messageBody('Task not found','That task doesn’t exist (or was closed).');
     else html=headerHTML()+(state.view==='task'?taskHTML():listHTML());
+    /* the reference slide-out overlays whatever is underneath — including the error
+       screens, whose header carries the same two buttons. Never on the mobile gate,
+       which has no header at all. */
+    if(!state.isMobile) html+=panelHTML();
     app.innerHTML=html;
     bind();
   }
@@ -1481,6 +1749,17 @@ function bind(){
      the ✕ close it. Escape also closes — see the document keydown handler below. */
   app.querySelectorAll('[data-lightbox]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.lightbox=el.getAttribute('data-lightbox'); render(); }; });
   var lbb=app.querySelector('[data-lb-backdrop]'); if(lbb) lbb.onclick=function(e){ if(e.target===lbb){ state.lightbox=null; render(); } };
+  /* reference panels: the header buttons TOGGLE (clicking the open one closes it, and
+     clicking the other swaps straight across); the backdrop and ✕ dismiss. */
+  app.querySelectorAll('[data-panel]').forEach(function(el){ el.onclick=function(){
+    /* deliberately NOT stopping propagation: the document-level handler still gets to
+       close an open task switcher, so the two never sit on screen together. */
+    var k=el.getAttribute('data-panel');
+    state.panel = (state.panel===k) ? null : k;
+    render();
+  }; });
+  app.querySelectorAll('[data-panel-close]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.panel=null; render(); }; });
+  var pbd=app.querySelector('[data-panel-backdrop]'); if(pbd) pbd.onclick=function(){ state.panel=null; render(); };
   app.querySelectorAll('[data-lb-close]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.lightbox=null; render(); }; });
   app.querySelectorAll('[data-ep]').forEach(function(el){ el.onclick=function(){ var k=el.getAttribute('data-ep'); state.expanded[k]=!state.expanded[k]; render(); }; });
   app.querySelectorAll('[data-filter]').forEach(function(el){ el.onclick=function(){ state.eventFilter=el.getAttribute('data-filter'); render(); }; });
@@ -1491,9 +1770,12 @@ function bind(){
     el.onmouseleave=function(){ el.style.borderColor='var(--border)'; el.style.boxShadow='none'; };
   });
 }
-/* Esc closes the screenshot lightbox */
+/* Esc closes the screenshot lightbox, then the reference panel — innermost first, so a
+   lightbox opened over a panel doesn't take the panel down with it. */
 document.addEventListener('keydown', function(e){
-  if(e.key==='Escape' && state.lightbox!=null){ state.lightbox=null; render(); }
+  if(e.key!=='Escape') return;
+  if(state.lightbox!=null){ state.lightbox=null; render(); }
+  else if(state.panel){ state.panel=null; render(); }
 });
 /* close switcher on outside click */
 document.addEventListener('click', function(e){
@@ -1502,8 +1784,8 @@ document.addEventListener('click', function(e){
   }
 });
 window.addEventListener('resize', function(){
-  var mob=window.innerWidth<900;
-  if(mob!==state.isMobile){ state.isMobile=mob; render(); }
+  var mob=window.innerWidth<900, nar=window.innerWidth<1150;
+  if(mob!==state.isMobile || nar!==state.narrow){ state.isMobile=mob; state.narrow=nar; render(); }
 });
 
 /* ---------- boot + live stream (SSE) ---------- */
