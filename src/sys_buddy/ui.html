@@ -900,9 +900,28 @@ function todoById(d,id){
 }
 function selectedTodo(d){ return d ? todoById(d, state.selectedTodo[d.id]) : null; }
 
-/* The agreement stage as a chip, in the shared state palette. `stuck` is an orthogonal
-   FLAG on a todo (it must not brick the other deliverables), so it overrides the label. */
+/* The agreement stage as a chip — rendered ONLY when it says something the stepper
+   cannot, which is the whole reason a todo carries two state fields.
+
+   A todo has `status` (the AGREEMENT: pending → accepted → contracted → verified) and
+   `state` (the MARCH: open → contract_proposed → contract_locked → backend_live →
+   testing → verified). Showing both side by side was the single biggest source of
+   confusion about this screen: `accepted` sits under a stepper reading "planning",
+   `contracted` under "building", `verified` under "verified" — the same fact in two
+   vocabularies, inviting the reader to hunt for a difference that isn't there.
+
+   So the march wins: the stepper plus the Next line carry it. The chip survives only
+   for the states the march genuinely cannot express —
+     · `pending`  — the march maps BOTH `open` and `contract_proposed` to node 0, so
+                    "waiting on someone to accept the scope" is invisible there, and it
+                    is the one row on this screen blocking a human;
+     · `dropped`  — no march equivalent at all;
+     · `stuck`    — an orthogonal FLAG (a stuck deliverable must not brick the others),
+                    so it overrides the label wherever it appears.
+   Everything else returns ''. */
+var TODO_STATUS_SHOWN = {pending:1, dropped:1};
 function todoStatusChip(t){
+  if(!t.stuck && !TODO_STATUS_SHOWN[t.status]) return '';
   var k = t.stuck ? 'stuck' : (TODO_STATUS[t.status]||'open');
   var label = t.stuck ? 'stuck' : t.status;
   return '<span style="display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:600;background:var(--st-'+k+'-bg);color:var(--st-'+k+'-fg);white-space:nowrap">'+
