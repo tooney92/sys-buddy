@@ -1482,8 +1482,11 @@ def _report_todo_verified(conn, identity: Identity, row, detail: str) -> dict:
     if row["state"] != TESTING:
         raise ValueError(
             f"cannot report 'verified' on todo {row['id']} before checks have run on it "
-            f"(the todo is '{row['state']}', need '{TESTING}'); a consuming party must "
-            f"report a check first"
+            f"(the todo is '{row['state']}', need '{TESTING}'): nobody has checked it yet. "
+            f"A CONSUMING party — not the producer, who may not check its own work — "
+            f"reports it first with report_status('checked', todo={row['id']}), which is "
+            f"what moves this todo to 'testing'; 'verified' is available after that. That "
+            f"gate is why a verified todo can never mean 'nobody actually tried it'."
         )
     _todo_march(conn, identity.task_id, row["id"], row["state"], VERIFIED)
     conn.execute(
