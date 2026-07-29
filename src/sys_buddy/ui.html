@@ -1260,11 +1260,11 @@ function shortcodesHTML(d){
   if(contract){
     rows +=
       grp('Contract')+
-      cmd('pc [#N]', 'propose a contract — add #N to scope it to todo N')+
-      cmd('gc [#N]', 'show the contract (of todo N with #N)')+
-      cmd('sign [#N]', 'sign / lock the contract')+
-      cmd('ship [#N]', 'propose the contract AND sign your own side in one move — the peer still signs, and it locks only when everyone has')+
-      cmd('decline <why> [#N]', 'push back on a proposal you have read — that version dies, someone proposes a new one')+
+      cmd('pc #N', 'propose the contract for todo N')+
+      cmd('gc #N', 'show todo N’s contract')+
+      cmd('sign #N', 'sign / lock todo N’s contract')+
+      cmd('ship #N', 'propose the contract AND sign your own side in one move — the peer still signs, and it locks only when everyone has')+
+      cmd('decline <why> #N', 'push back on a proposal you have read — that version dies, someone proposes a new one')+
       cmd('reopen', 'reopen planning to re-sign a new version')+
       grp('Todos')+
       cmd('todos', 'list the deliverables (todos) on this task')+
@@ -1272,10 +1272,10 @@ function shortcodesHTML(d){
       cmd('yes #N', 'accept todo N')+
       cmd('no #N <why>', 'decline todo N')+
       grp('Status')+
-      cmd('ready [#N]', 'producer: my side is ready to build on')+
-      cmd('ok [#N]', 'consumer: it works against the producer’s side')+
-      cmd('block [#N]', 'consumer: it doesn’t work (a strike — 3 → stuck)')+
-      cmd('done [#N]', 'verified — #N required on a task with todos')+
+      cmd('ready #N', 'producer: my side is ready to build on')+
+      cmd('ok #N', 'consumer: it works against the producer’s side')+
+      cmd('block #N', 'consumer: it doesn’t work (a strike — 3 → stuck)')+
+      cmd('done #N', 'todo N is verified end to end')+
       cmd('stuck [#N]', 'give up; ping the humans (with #N: just that todo)');
   } else {
     rows +=
