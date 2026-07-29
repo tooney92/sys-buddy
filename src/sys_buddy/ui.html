@@ -88,9 +88,14 @@ var STEPS=[['open','open'],['preflight','pre-flight assessments'],['contract_pro
    exactly the code paths that shipped before. */
 var STEPS_TODO=[['open','open'],['preflight','pre-flight assessments'],['todos','todos']];
 /* The mini-stepper INSIDE a todo — the five dropped phases folded to four nodes, so
-   nobody learns a second idiom; it is the familiar widget one level down. `testing`
-   shares the `ready` node: a todo under test is still standing on the producer's
-   delivery until it verifies.
+   nobody learns a second idiom; it is the familiar widget one level down.
+
+   `testing` used to share the `ready` node, which hid the step that confuses people most:
+   `verified` transitions from `testing` ONLY (state._report_verified), so a consumer must
+   report a check before anyone can verify. With the two collapsed, the stepper stopped
+   moving when the producer said ready and gave no sign whether anyone had actually
+   checked — the exact question a human asks at that moment. Its own node makes `ok #N`
+   visibly advance something, and makes "has anyone tested this?" answerable at a glance.
 
    The labels name what is HAPPENING, not the event that just fired. Locking is an
    instant, not a phase — so `contract_locked` lights `building`, because that is what
@@ -98,8 +103,8 @@ var STEPS_TODO=[['open','open'],['preflight','pre-flight assessments'],['todos',
    step behind reality: `locked` sat current while people built, and `build` only lit
    up once the producer was already live, i.e. once building was over. `ready` matches
    the shorthand the producer actually types (`ready #N`). */
-var TODO_STEPS=[['planning','planning'],['building','building'],['ready','ready'],['verified','verified']];
-var TODO_MARCH={open:0,contract_proposed:0,contract_locked:1,backend_live:2,testing:2,verified:3};
+var TODO_STEPS=[['planning','planning'],['building','building'],['ready','ready'],['testing','testing'],['verified','verified']];
+var TODO_MARCH={open:0,contract_proposed:0,contract_locked:1,backend_live:2,testing:3,verified:4};
 /* The AGREEMENT stage (todo.status) — NOT the march above. `pending` borrows the amber
    `testing` palette on purpose: it is the one row on this screen asking a human for
    something, so it reads as a request, and it is the row that carries the ⚠. */
