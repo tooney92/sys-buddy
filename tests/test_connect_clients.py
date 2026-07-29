@@ -463,6 +463,23 @@ def test_join_flow_and_host_seat_both_carry_the_clients(monkeypatch):
     assert [c["id"] for c in res["clients"]] == list(onboarding.CLIENT_IDS)
 
 
+def test_host_seat_carries_the_clients_too(conn):
+    """The HOST may not be on Claude either. Their own seat is minted in-process (no
+    /pair round-trip), so it has its own path to the registry — and gui_app.html renders
+    both seats through one function, which needs both to carry the same field."""
+    res = onboarding.host_setup(
+        None, ["backend", "frontend"], "http://127.0.0.1:9292",
+        title="Sign-in", host_role="backend",
+    )
+    assert res["ok"] is True
+    seat = res["host_seat"]
+    assert [c["id"] for c in seat["clients"]] == list(onboarding.CLIENT_IDS)
+    # Rendered for THIS seat's url + token, not some other seat's.
+    for c in seat["clients"]:
+        assert c["mcp_url"] == seat["mcp_url"] == "http://127.0.0.1:9292/mcp"
+        assert f"Bearer {seat['agent_token']}" in json.dumps(c)
+
+
 # --------------------------------------------------------------------------- #
 # the old Claude-specific names still work (gui.py and cli.py call them)
 # --------------------------------------------------------------------------- #
