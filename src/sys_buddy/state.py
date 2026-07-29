@@ -1658,7 +1658,10 @@ def _report_verified(conn, identity: Identity, detail: str) -> dict:
     if state != TESTING:
         raise ValueError(
             f"cannot report 'verified' before tests have run (task is '{state}', "
-            f"need '{TESTING}'); a client must report a test result first"
+            f"need '{TESTING}'): nobody has checked yet. A consumer — not the producer — "
+            f"reports the check first with report_status('checked'), which is what moves "
+            f"this to 'testing'; then 'verified' is available. That gate is why a verified "
+            f"task can never mean 'nobody actually tried it'."
         )
     state = _transition(conn, identity.task_id, VERIFIED)
     service.post_message(conn, identity, "verified", detail)

@@ -671,68 +671,40 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
     function put(id, text){ document.getElementById(id).textContent = text; }
 
-    // Claude · terminal
-    put('cmd-claude-cli',
-      'claude mcp remove sys-buddy\n' +
-      'claude mcp add --scope local --transport http sys-buddy ' + url + ' \\\n' +
-      '  --header "' + header + '"');
+    /* The instructions come from the BROKER (onboarding.connect_clients, echoed on the
+       /pair response beside `prompt` and `rules`) — the page renders no field name of its
+       own. That matters more than it looks: the per-client keys differ in ways that read
+       as cosmetic (`mcpServers` vs `servers` vs `context_servers`, `url` vs `serverUrl`
+       vs `httpUrl`), so a second copy here would drift and emit configs that fail
+       silently. It is the same failure that lost `upto` from the cheatsheet and grew a
+       second vocabulary on the todo card. The Python copy is covered by tests that assert
+       these blocks appear in docs/connect-your-agent.md verbatim; a copy in this file
+       would be covered by nothing.
 
-    // Claude · desktop app — a merge instruction, not a file to save. Both guard lines
-    // ("STOP and tell me", "show me the resulting file") are load-bearing: the first
-    // turns a silent global write into a visible halt, the second is the only reason a
-    // wrong-folder write is ever noticed — it makes the agent print the absolute path.
-    put('cmd-claude-app',
-      'Add an MCP server called "sys-buddy" to THIS project\'s .mcp.json.\n' +
-      '\n' +
-      'If no project or folder is open, STOP and tell me instead of writing it —\n' +
-      'don\'t put it in a home-directory config.\n' +
-      '\n' +
-      'If .mcp.json already exists, KEEP every server already in it and add this one\n' +
-      'alongside them — do not replace the file or remove anything.\n' +
-      'If it doesn\'t exist, create it with just this entry.\n' +
-      '\n' +
-      'The entry to add under "mcpServers":\n' +
-      '\n' +
-      '"sys-buddy": {\n' +
-      '  "type": "http",\n' +
-      '  "url": "' + url + '",\n' +
-      '  "headers": { "Authorization": "Bearer ' + token + '" }\n' +
-      '}\n' +
-      '\n' +
-      'Then show me the resulting file so I can confirm nothing was lost.');
+       REBASE: the broker stamps its own base_url, which is loopback whenever the operator
+       is reachable through a tunnel — so a served string can say 127.0.0.1 while this page
+       is on an https origin. Every entry echoes the `mcp_url` it was rendered with, so one
+       substitution per string fixes every occurrence (the same trick pairing._rebase
+       plays server-side). */
+    var byId = {};
+    (res.clients || []).forEach(function(c){ byId[c.id] = c; });
 
-    // Cursor — same shape; different path, and no "type" (Cursor infers it from `url`).
-    put('cmd-cursor',
-      'Add an MCP server called "sys-buddy" to THIS project\'s .cursor/mcp.json.\n' +
-      '\n' +
-      'If no project or folder is open — if this would land in ~/.cursor/mcp.json —\n' +
-      'STOP and tell me instead of writing it. Don\'t write to the global config.\n' +
-      '\n' +
-      'If that file already exists, KEEP every server already in it and add this one\n' +
-      'alongside them — do not replace the file or remove anything.\n' +
-      'If it doesn\'t exist, create it.\n' +
-      '\n' +
-      'Add under "mcpServers":\n' +
-      '\n' +
-      '"sys-buddy": {\n' +
-      '  "url": "' + url + '",\n' +
-      '  "headers": { "Authorization": "Bearer ' + token + '" }\n' +
-      '}\n' +
-      '\n' +
-      'Then show me the resulting file so I can confirm nothing was lost.');
+    function rebase(text, entry){
+      if(!text || !entry || !entry.mcp_url) return text || '';
+      return String(text).split(entry.mcp_url).join(url);
+    }
+    function field(id, name){
+      var e = byId[id];
+      return e ? rebase(e[name], e) : '';
+    }
 
-    // Gemini CLI
-    put('cmd-gemini', 'gemini mcp add -t http sys-buddy ' + url + ' -H "' + header + '"');
-
-    // Other — the two raw facts separately copyable, plus the generic shape.
-    put('other-url', url);
-    put('other-header', header);
-    put('other-json', JSON.stringify({
-      mcpServers: { 'sys-buddy': {
-        url: url,
-        headers: { Authorization: 'Bearer ' + token }
-      } }
-    }, null, 2));
+    put('cmd-claude-cli', field('claude-cli', 'command'));
+    put('cmd-claude-app', field('claude-desktop', 'paste'));
+    put('cmd-cursor',     field('cursor', 'paste'));
+    put('cmd-gemini',     field('gemini-cli', 'command'));
+    put('other-url',      field('other', 'url') || url);
+    put('other-header',   field('other', 'header') || header);
+    put('other-json',     field('other', 'config'));
 
     // Every copy button names the <pre> it copies, so the two can never drift apart.
     Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function(btn){
