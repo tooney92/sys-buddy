@@ -34,7 +34,18 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import activity, files, identity, notify, readiness, service, state, todos
+from . import (
+    activity,
+    contracts,
+    files,
+    identity,
+    notify,
+    readiness,
+    seats,
+    service,
+    state,
+    todos,
+)
 from .config import Config
 from .db import connect
 from .identity import ViewerIdentity
@@ -47,11 +58,11 @@ from .identity import ViewerIdentity
 _EVENT_KINDS = {"task", "transition", "lock", "deploy", "test", "slack", "notify",
                 "token", "todo", "waiting"}
 
-# Fallback for the UI's ``⟨api123⟩`` chip on rows written before the
-# ``messages.todo_id`` column existed: scrape "todo #N" from the body. New rows
-# carry the id in the column and never reach this; a matched id is validated against
-# the task's real todos either way (see ``_messages_for``), so a stale "#999" gets
-# no chip.
+# Fallback for the UI's ``⟨api123⟩`` chip when ``messages.todo_id`` is NULL: scrape
+# "todo #N" out of the body. What it captures is a string a HUMAN typed, so it is a
+# per-task ``todos.number`` — NOT a ``todos.id``. See ``_messages_for`` for the
+# precedence that reading implies, and for why this path is not limited to rows written
+# before the column existed. A capture that matches nothing on the task gets no chip.
 _TODO_REF_RE = re.compile(r"\btodos?\s*#(\d+)", re.IGNORECASE)
 
 # Sort buckets for the todo panel. A PENDING todo is the only thing on that screen
@@ -119,7 +130,13 @@ def _render_detail(kind: str, detail: dict) -> str:
         # so the log reads as a sentence instead of a JSON dump.
         action = (detail.get("action") or "todo").removeprefix("todo_")
         title = detail.get("title")
-        text = f"Todo #{detail.get('todo_id', '?')}"
+        # Print the per-task ``#N`` the humans typed. ``todo_number`` is written on every
+        # row since numbering landed; rows written before it carry only the internal
+        # ``todo_id``, and showing that is still better than showing "#?".
+        ref = detail.get("todo_number")
+        if ref is None:
+            ref = detail.get("todo_id", "?")
+        text = f"Todo #{ref}"
         if title:
             text += f" '{title}'"
         text += f" {action}"
@@ -189,11 +206,13 @@ def _list_tasks_for(conn, viewer: ViewerIdentity, *, now: float | None = None) -
     """
     if viewer.is_host:
         rows = conn.execute(
-            "SELECT id, title, state, mode, roles_json, strikes, created_at FROM tasks ORDER BY created_at"
+            "SELECT id, title, state, mode, roles_json, seat_roles_json, strikes, created_at "
+            "FROM tasks ORDER BY created_at"
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, title, state, mode, roles_json, strikes, created_at FROM tasks WHERE id = ?",
+            "SELECT id, title, state, mode, roles_json, seat_roles_json, strikes, created_at "
+            "FROM tasks WHERE id = ?",
             (viewer.task_id,),
         ).fetchall()
 
@@ -204,7 +223,11 @@ def _list_tasks_for(conn, viewer: ViewerIdentity, *, now: float | None = None) -
             "title": r["title"],
             "state": r["state"],
             "mode": r["mode"] or "contract",
-            "roles": json.loads(r["roles_json"]),
+            # SEAT HANDLES (see db.SCHEMA on tasks.roles_json), plus the map that
+            # says what KIND of work each does — the list view counts by role type to
+            # render `(B×2)(F×2)(Q)` rather than one chip per seat.
+            "roles": seats.handles_of(conn, r["id"]),
+            "seat_roles": seats.seat_roles_of(conn, r["id"]),
             "last": _time_ago(_last_activity(conn, r["id"], r["created_at"]), now=now),
             "strikes": r["strikes"],
         }
@@ -241,6 +264,39 @@ def _times_for(conn, task_id: str, created_at: float) -> dict:
     return times
 
 
+def _units_of(spec: dict) -> dict:
+    """The kind-agnostic half of a contract version: which KIND it is and its units.
+
+    A contract is ≥1 named unit with attributes, and the unit KEY names the kind
+    (``endpoints`` → http, ``types`` → schema, ``screens`` → ui, ``criteria`` → none),
+    so this reads the kind off the spec exactly as the validator does — the dashboard
+    must never carry a second, drifting copy of that mapping. ``kind``/``unit_key``/
+    ``units`` is what the renderer picks a table from.
+
+    ``endpoints`` is ALSO emitted, always, and that is deliberate rather than legacy:
+    it is what every deployed dashboard reads, so a broker that has learned kinds must
+    not blank the endpoint table of a browser tab that hasn't reloaded. For an http
+    contract it is the same list as ``units``; for every other kind it is ``[]``,
+    which is the truth — that contract has no endpoints.
+
+    A malformed spec (a unit key holding a string, say) can reach here: rows were
+    written by a validator that may not have run in this process's version. Units are
+    coerced to a list so a bad row renders empty instead of breaking the panel.
+    """
+    kind = contracts.infer_kind(spec) or contracts.DEFAULT_KIND
+    unit_key = contracts.KINDS[kind].unit_key
+    units = spec.get(unit_key)
+    if not isinstance(units, list):
+        units = []
+    endpoints = spec.get("endpoints", [])
+    return {
+        "kind": kind,
+        "unit_key": unit_key,
+        "units": units,
+        "endpoints": endpoints if isinstance(endpoints, list) else [],
+    }
+
+
 def _contract_for(conn, task_id: str, *, todo_id: int | None = None) -> dict:
     """The contract block: versions, the default to show, and per-version data.
 
@@ -249,22 +305,27 @@ def _contract_for(conn, task_id: str, *, todo_id: int | None = None) -> dict:
     contract has been proposed. Empty state: ``exists=False`` with empty
     ``versions``/``data`` so the UI can render its "awaiting contract" panel.
 
-    ``todo_id=None`` means the TASK-level chain (``contracts.todo_id IS NULL``) — every
-    contract that existed before todos, and every task that never grows one. Passing a
-    todo id gives that deliverable's own chain, which is what the right-hand panel
-    renders when a todo is selected: same shape, same renderer, one level down. The two
-    are kept apart on purpose — folding six todos' contracts into the task card would
-    show a jumble of unrelated shapes under a single "API contract" heading.
+    ``todo_id`` names the deliverable whose chain to read — which is the only kind of
+    chain there is, since a contract is an agreement about ONE todo. That is what the
+    right-hand panel renders when a todo is selected.
+
+    ``todo_id=None`` asks for contracts belonging to no todo, and therefore now always
+    answers ``exists: False``. It is kept, and kept EMPTY rather than folding every
+    todo's chain into one block, because that is exactly what the task card needs: the
+    card renders only on a task with no todos (``ui.html`` swaps to the todo panel
+    otherwise), and such a task has nothing to contract — so "no contract yet" is the
+    true answer, not a stub. Folding six todos' shapes under a single "API contract"
+    heading would be the wrong one.
     """
     if todo_id is None:
         contracts = conn.execute(
-            "SELECT id, version, spec_json, status FROM contracts "
+            "SELECT id, version, spec_json, status, staging_url_at_lock FROM contracts "
             "WHERE task_id = ? AND todo_id IS NULL ORDER BY version",
             (task_id,),
         ).fetchall()
     else:
         contracts = conn.execute(
-            "SELECT id, version, spec_json, status FROM contracts "
+            "SELECT id, version, spec_json, status, staging_url_at_lock FROM contracts "
             "WHERE task_id = ? AND todo_id = ? ORDER BY version",
             (task_id, todo_id),
         ).fetchall()
@@ -285,7 +346,7 @@ def _contract_for(conn, task_id: str, *, todo_id: int | None = None) -> dict:
 
         signed = conn.execute(
             """
-            SELECT a.role AS role, s.signed_at AS signed_at
+            SELECT COALESCE(a.handle, a.role) AS role, s.signed_at AS signed_at
             FROM contract_signatures s
             JOIN agents a ON a.id = s.agent_id
             WHERE s.contract_id = ?
@@ -297,8 +358,16 @@ def _contract_for(conn, task_id: str, *, todo_id: int | None = None) -> dict:
         data[vid] = {
             "locked": locked,
             "signed": [{"role": s["role"], "time": _hhmm(s["signed_at"])} for s in signed],
-            "endpoints": spec.get("endpoints", []),
-            "staging_url": spec.get("staging_url"),
+            **_units_of(spec),
+            # The LIVE target, resolved on every read from the host's task/todo
+            # configuration — not read out of the signed spec, which no longer carries
+            # one. So the dashboard's "Connect to" line follows a restarted tunnel
+            # without any version, signature or renegotiation moving.
+            "staging_url": state.resolve_staging_url(conn, task_id, todo_id, spec),
+            # …and what was live when this version locked, so the panel can show that
+            # the agreement predates the current target instead of quietly conflating
+            # "where we point now" with "what we signed".
+            "staging_url_at_lock": c["staging_url_at_lock"],
         }
 
     return {
@@ -307,6 +376,12 @@ def _contract_for(conn, task_id: str, *, todo_id: int | None = None) -> dict:
         "default": latest_locked_vid or latest_vid,
         "data": data,
     }
+
+
+def _todo_staging_url(conn, todo_id: int) -> str | None:
+    """A todo's own host-set target override, or None (= inherit the task's)."""
+    row = conn.execute("SELECT staging_url FROM todos WHERE id = ?", (todo_id,)).fetchone()
+    return (row["staging_url"] or None) if row is not None else None
 
 
 def _todos_for(conn, task_id: str) -> list[dict]:
@@ -333,9 +408,36 @@ def _todos_for(conn, task_id: str) -> list[dict]:
         d["time"] = _hhmm(t["created_at"])
         d["contract"] = _contract_for(conn, task_id, todo_id=t["id"])
         d["next"] = state.next_step(conn, task_id, t["id"])
+        # The host's per-deliverable target override and what this todo actually
+        # resolves to. VIEW-ONLY and deliberately not on `todos.to_dict`: that shape is
+        # what the AGENTS' get_todos returns, and putting the target there would hand
+        # an agent the URL without signing anything — the one incentive get_contract's
+        # withholding exists to create. A viewer token is a human reading a dashboard.
+        d["staging_url"] = _todo_staging_url(conn, t["id"])
+        d["staging_url_effective"] = state.resolve_staging_url(conn, task_id, t["id"])
         out.append(d)
-    out.sort(key=lambda t: (_TODO_ORDER.get(t["status"], 1), t["id"]))
+    # Creation order within a bucket, which is `number` order: numbers are handed out
+    # MAX+1 as todos are proposed and never renumbered, so this is also the order the
+    # humans discussed them in.
+    out.sort(key=lambda t: (_TODO_ORDER.get(t["status"], 1), t["number"]))
     return out
+
+
+def _todo_keys(conn, task_id: str) -> tuple[dict[int, int], dict[int, int]]:
+    """``(id → number, number → id)`` for one task's todos.
+
+    Both directions, because the two things that name a deliverable in the message thread
+    name it with DIFFERENT keys: the ``messages.todo_id`` column holds the internal
+    ``todos.id``, while a ``#N`` written in prose holds the per-task ``todos.number``.
+    Conflating them chips a message onto the wrong deliverable.
+    """
+    rows = conn.execute(
+        "SELECT id, number FROM todos WHERE task_id = ?", (task_id,)
+    ).fetchall()
+    return (
+        {r["id"]: r["number"] for r in rows},
+        {r["number"]: r["id"] for r in rows},
+    )
 
 
 def _messages_for(conn, task_id: str) -> list[dict]:
@@ -375,7 +477,8 @@ def _messages_for(conn, task_id: str) -> list[dict]:
 
     rows = conn.execute(
         """
-        SELECT m.id, m.type, m.body_json, m.to_role, m.todo_id, m.created_at, a.role AS role
+        SELECT m.id, m.type, m.body_json, m.to_role, m.todo_id, m.created_at,
+               COALESCE(a.handle, a.role) AS role
         FROM messages m
         JOIN agents a ON a.id = m.from_agent_id
         WHERE m.task_id = ?
@@ -386,7 +489,8 @@ def _messages_for(conn, task_id: str) -> list[dict]:
 
     out = []
     test_idx = 0
-    todo_ids: set[int] | None = None  # loaded lazily: a pre-todo task never queries it
+    # (id → number, number → id), loaded lazily: a pre-todo task never queries it.
+    todo_keys: tuple[dict[int, int], dict[int, int]] | None = None
     for r in rows:
         body = json.loads(r["body_json"])
         role = service.BROKER_ROLE if r["type"] in service.BROKER_TYPES else r["role"]
@@ -407,26 +511,46 @@ def _messages_for(conn, task_id: str) -> list[dict]:
                     msg["strike"] = strike
                 test_idx += 1
 
-        # Which deliverable this message belongs to (the UI's ⟨todo⟩ chip). The
-        # authoritative source is the ``messages.todo_id`` column, set at post time.
-        # A row written before that column existed carries NULL, so we fall back to
-        # scraping "todo #N" from any body that references one. Either candidate is
-        # validated against this TASK's real todos, so a stale/foreign "#999" gets no
-        # chip rather than one pointing at nothing.
-        cand = r["todo_id"]
-        if cand is None:
+        # Which deliverable this message belongs to (the UI's ⟨todo⟩ chip). There are two
+        # sources and they DO NOT speak the same language — the bug this shape exists to
+        # prevent is reading one as the other:
+        #
+        #  * ``messages.todo_id`` — authoritative, the internal ``todos.id``, stamped at
+        #    post time by every broker write that names a deliverable;
+        #  * a ``#N`` scraped out of the BODY — used only when that column is NULL. This is
+        #    a string a HUMAN typed (or an agent quoting one), so it is a per-task
+        #    ``todos.number``. NOT a legacy-only path: ``service.post_message`` defaults
+        #    ``todo_id`` to None, so any message that merely MENTIONS a deliverable in
+        #    prose without being filed under one arrives here today.
+        #
+        # PRECEDENCE on a scrape: ``number`` first, ``id`` only if no number matches.
+        # Both readings can be valid integers for the same task at once (task A takes id 1;
+        # task B then holds ids 2 and 3 as numbers 1 and 2, so "#2" on task B is number 2
+        # AND id 2 — two different deliverables), so the tie must be broken deliberately.
+        # Number wins because that is what ``#N`` means today and from here on; the id
+        # fallback survives only for rows written BEFORE numbering, whose bodies quoted the
+        # global id. Matching neither means NO chip: a missing chip is a small gap, while a
+        # chip on the wrong deliverable is exactly the confusion numbering exists to end.
+        todo_id = r["todo_id"]
+        scraped = None
+        if todo_id is None:
             ref = _TODO_REF_RE.search(str(msg.get("body") or ""))
-            cand = int(ref.group(1)) if ref is not None else None
-        if cand is not None:
-            if todo_ids is None:
-                todo_ids = {
-                    row["id"]
-                    for row in conn.execute(
-                        "SELECT id FROM todos WHERE task_id = ?", (task_id,)
-                    ).fetchall()
-                }
-            if cand in todo_ids:
-                msg["todo"] = cand
+            scraped = int(ref.group(1)) if ref is not None else None
+        if todo_id is not None or scraped is not None:
+            if todo_keys is None:
+                todo_keys = _todo_keys(conn, task_id)
+            by_id, by_number = todo_keys
+            if todo_id is not None:
+                resolved = todo_id if todo_id in by_id else None
+            else:
+                resolved = by_number.get(scraped)
+                if resolved is None and scraped in by_id:
+                    resolved = scraped          # a pre-numbering body, quoting the id
+            if resolved is not None:
+                # ``todo`` is the internal id the UI keys its selection on; the chip
+                # PRINTS ``todo_number``, the per-task ``#N`` the humans type.
+                msg["todo"] = resolved
+                msg["todo_number"] = by_id[resolved]
         out.append(msg)
     return out
 
@@ -467,8 +591,8 @@ def _agents_for(conn, task_id: str) -> list[dict]:
     is the streak start, for the dashboard's "listening — 42m".
     """
     rows = conn.execute(
-        "SELECT name, role, ready, readiness_status, readiness_report, "
-        "listening_until, listening_since "
+        "SELECT name, role AS role_type, COALESCE(handle, role) AS role, ready, "
+        "readiness_status, readiness_report, listening_until, listening_since "
         "FROM agents WHERE task_id = ? AND revoked_at IS NULL ORDER BY id",
         (task_id,),
     ).fetchall()
@@ -481,7 +605,11 @@ def _agents_for(conn, task_id: str) -> list[dict]:
             report = None
         out.append({
             "name": r["name"],
+            # `role` is the SEAT (the handle) — it is what the dashboard matches against
+            # party lists, signatures and `to_role`, all of which carry handles.
+            # `role_type` is the kind of work, and it is what picks the avatar colour.
             "role": r["role"],
+            "role_type": r["role_type"],
             "ready": bool(r["ready"]),
             "readiness_status": r["readiness_status"] or "pending",
             "readiness_report": report,
@@ -547,7 +675,8 @@ def _task_detail(conn, task_id: str) -> dict | None:
     it already falls back on the thread's raw ``ts``.
     """
     t = conn.execute(
-        "SELECT id, title, state, mode, roles_json, strikes, created_at FROM tasks WHERE id = ?",
+        "SELECT id, title, state, mode, roles_json, seat_roles_json, strikes, created_at "
+        "FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if t is None:
@@ -557,13 +686,23 @@ def _task_detail(conn, task_id: str) -> dict | None:
         "title": t["title"],
         "state": t["state"],
         "mode": t["mode"] or "contract",
-        "roles": json.loads(t["roles_json"]),
+        "roles": seats.handles_of(conn, task_id),
+        "seat_roles": seats.seat_roles_of(conn, task_id),
         "strikes": t["strikes"],
+        # The HOST's deployment target for the task, so the dashboard can show what is
+        # in force and where it came from. Host-owned configuration — the only surface
+        # that CHANGES it is the host's (CLI / desktop app), never an agent tool.
+        "staging_url": state._task_staging_url(conn, task_id),
         "times": _times_for(conn, task_id, t["created_at"]),
         "contract": _contract_for(conn, task_id),
         "messages": _messages_for(conn, task_id),
         "events": _events_for(conn, task_id),
         "agents": _agents_for(conn, task_id),
+        # The cast, from the SAME source the agent-facing `roster` tool reads
+        # (seats.roster_summary) — one roster, two renderers. Includes UNJOINED
+        # seats, which is the whole point: that is the state that silently stalls a
+        # task and no list built from joined agents can show it.
+        "roster": seats.roster_summary(conn, task_id),
         "readiness_preview": readiness.preview_questions(),
     }
     todo_list = _todos_for(conn, task_id)
@@ -649,6 +788,18 @@ def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
                 [a["role"], a["ready"], a["readiness_status"], a["listening"]]
                 for a in _agents_for(conn, tid)
             ],
+            # The CAST, not just the joined agents: adding a seat mid-task changes
+            # "4 of 5 joined" while `agents` above is unmoved, so without this the
+            # roster panel would sit stale on exactly the change it exists to show.
+            # `address` rides along because it is what the panel PRINTS and it is
+            # DERIVED: adding a second frontend re-spells the first seat's token from
+            # `@frontend` to `@frontend-1` without touching that seat's own row, so a
+            # fingerprint built from handles alone would leave the panel showing the
+            # stale, now-ambiguous spelling.
+            "seats": [
+                [r["seat"], r["address"], r["role"], r["joined"], r["invite_pending"]]
+                for r in seats.roster(conn, tid)
+            ],
             "contract": [
                 [v["id"], v["locked"], len(contract["data"][v["id"]]["signed"])]
                 for v in contract["versions"]
@@ -657,6 +808,13 @@ def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
         # Todos move the detail token on every part the panel renders — a new acceptance,
         # a decline, a repropose, a march step, a stuck flag, a drop. Added as a key only
         # when the task HAS todos, so a pre-todo task's token is byte-identical to before.
+        #
+        # The trailing element is the SIGNATURE COUNT per version, and it has to be here
+        # rather than in the task-level `contract` above: a contract belongs to a todo, so
+        # every signature lands on a todo's chain and the task-level fingerprint sees none
+        # of them. Without it the panel goes stale on the one moment that matters most —
+        # a peer signing — since `contract_versions`/`locked_versions` move only when a
+        # version is PROPOSED or fully LOCKED, never on the signatures in between.
         task_todos = _todos_for(conn, tid)
         if task_todos:
             fingerprint["todos"] = [
@@ -664,6 +822,7 @@ def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
                     d["id"], d["version"], d["status"], d["state"], d["stuck"],
                     d["accepted_by"], d["declined_by"], d["parties"],
                     d["contract_versions"], d["locked_versions"], d["drop_consents"],
+                    [len(v["signed"]) for v in d["contract"]["data"].values()],
                 ]
                 for d in task_todos
             ]

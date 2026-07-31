@@ -32,12 +32,13 @@ def test_waiting_does_not_change_state_or_end_the_task(conn):
     _to_backend_live(conn, ag)
     r = state.report_status(conn, ag["backend"], state.STATUS_WAITING, "mobile's gone quiet")
     assert r["status"] == state.STATUS_WAITING
-    # State is whatever it was — a nudge never transitions.
+    # State is whatever it was — a nudge never transitions. The task's state is a rollup
+    # of its todos, and the one deliverable here is backend_live.
     assert r["state"] == state.BACKEND_LIVE
-    # Not terminal: nudge again, and the normal flow still works afterwards.
+    # Not terminal: nudge again, and the normal (todo-scoped) flow still works afterwards.
     state.report_status(conn, ag["backend"], state.STATUS_WAITING, "still waiting")
-    state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, "green")
-    done = state.report_status(conn, ag["frontend"], state.STATUS_VERIFIED, "e2e green")
+    state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, "green", 1)
+    done = state.report_status(conn, ag["frontend"], state.STATUS_VERIFIED, "e2e green", 1)
     assert done["state"] == state.VERIFIED
 
 
@@ -49,12 +50,12 @@ def test_waiting_works_on_a_debug_task(conn):
     assert r["status"] == state.STATUS_WAITING
 
 
-def test_waiting_rejects_a_todo_id(conn):
-    """'waiting' is a task-level nudge — a todo id is a category error; use 'stuck' with a
-    todo to flag one deliverable."""
+def test_waiting_rejects_a_todo_number(conn):
+    """'waiting' is a task-level nudge — a todo `#N` is a category error; use 'stuck' with
+    a todo to flag one deliverable."""
     ag = _agents(conn)
     with pytest.raises(ValueError, match="task-level nudge"):
-        state.report_status(conn, ag["backend"], state.STATUS_WAITING, "x", todo_id=1)
+        state.report_status(conn, ag["backend"], state.STATUS_WAITING, "x", number=1)
 
 
 def test_waiting_rejected_on_a_terminal_task(conn):

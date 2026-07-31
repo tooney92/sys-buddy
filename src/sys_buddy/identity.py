@@ -47,12 +47,32 @@ def new_invite_code(task_id: str, length: int = 8) -> str:
 
 @dataclass(frozen=True)
 class Identity:
-    """The broker-stamped identity for a request. Never built from tool input."""
+    """The broker-stamped identity for a request. Never built from tool input.
+
+    ``role`` holds the SEAT HANDLE — WHO you are on this task (``frontend-2``), not
+    what kind of work you do. That is deliberate and it is why this feature was small:
+    every party list, every quorum check and every provenance record already keyed on
+    ``identity.role``, and a handle is precisely the thing they all needed to key on.
+    Before seats and role types were split apart the two were the same string, so
+    nothing that reads this field changed meaning for an existing task.
+
+    ``role_type`` is WHAT KIND of work the seat does (``frontend``) — many seats may
+    share one. It drives the briefing, the pre-flight question set, the ``@FE`` tags
+    and the dashboard colour, and NOTHING that binds. Read it through :attr:`kind`,
+    which falls back to the handle for the identities that predate the split (local
+    mode, the broker's own seat, and every test that constructs one positionally).
+    """
 
     agent_id: int
     task_id: str
     name: str
     role: str
+    role_type: str | None = None
+
+    @property
+    def kind(self) -> str:
+        """The role TYPE, falling back to the handle when none was stamped."""
+        return self.role_type or self.role
 
 
 @dataclass(frozen=True)
@@ -90,7 +110,7 @@ def resolve_agent_token(conn: sqlite3.Connection, token: str) -> Identity | None
     if not token:
         return None
     row = conn.execute(
-        "SELECT id, task_id, name, role, expires_at FROM agents "
+        "SELECT id, task_id, name, role, handle, expires_at FROM agents "
         "WHERE token_hash = ? AND revoked_at IS NULL",
         (sha256_hex(token),),
     ).fetchone()
@@ -98,7 +118,16 @@ def resolve_agent_token(conn: sqlite3.Connection, token: str) -> Identity | None
         return None
     if row["expires_at"] is not None and row["expires_at"] < time.time():
         return None  # expired token — treat exactly like a revoked one
-    return Identity(agent_id=row["id"], task_id=row["task_id"], name=row["name"], role=row["role"])
+    # The token maps to one SEAT, so `role` is stamped from the handle; `role_type`
+    # carries the kind of work alongside it. COALESCE is belt and braces for a row
+    # written between the ALTER and the backfill — the migration asserts fullness.
+    return Identity(
+        agent_id=row["id"],
+        task_id=row["task_id"],
+        name=row["name"],
+        role=row["handle"] or row["role"],
+        role_type=row["role"],
+    )
 
 
 def resolve_viewer_token(conn: sqlite3.Connection, token: str) -> ViewerIdentity | None:

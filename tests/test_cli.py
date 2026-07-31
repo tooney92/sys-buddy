@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from sys_buddy import cli
+from sys_buddy import cli, onboarding
 
 
 def _make_task(db: str, task_id: str = "signin") -> None:
@@ -62,3 +62,82 @@ def test_host_viewer_prints_real_url_not_placeholder(tmp_path, monkeypatch, caps
     out = capsys.readouterr().out
     assert "https://abc123.ngrok.app/ui?v=sbv_" in out
     assert "<broker-url>" not in out
+
+
+# --------------------------------------------------------------------------- #
+# --port on the link-printing commands
+#
+# `host-viewer` and `invite` never bind a socket, so before this they built a Config
+# at DEFAULT_PORT and printed a :8787 link no matter which port the broker was on.
+# On a dev broker (:9292) that link 404s; worse, if the owner's real broker IS on
+# :8787 it resolves to a DIFFERENT broker that has never seen the token — which
+# reads as an auth bug, not a wrong URL.
+# --------------------------------------------------------------------------- #
+def _parse(argv: list[str]) -> SimpleNamespace:
+    """Parse real argv, so these tests prove the FLAG exists — not just that the
+    handler would honour a hand-built namespace."""
+    return cli.build_parser().parse_args(argv)
+
+
+def test_host_viewer_link_honours_port_flag(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "t.db")
+    monkeypatch.delenv("SYS_BUDDY_PUBLIC_URL", raising=False)
+    args = _parse(["--db", db, "host-viewer", "--port", "9292"])
+    args.func(args)
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:9292/ui?v=sbv_" in out
+    assert "8787" not in out  # the bug: pointed at a broker that isn't serving this token
+
+
+def test_invite_links_honour_port_flag(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "t.db")
+    monkeypatch.delenv("SYS_BUDDY_PUBLIC_URL", raising=False)
+    _make_task(db)
+    args = _parse(["--db", db, "invite", "--task", "signin", "--role", "frontend", "--port", "9292"])
+    args.func(args)
+    out = capsys.readouterr().out
+    # Every printed origin must agree — the browser link, the desktop link and the
+    # `sys-buddy join` line are all handed to another human. Two are plaintext; the
+    # desktop `sb1_` link packs the origin as base64, so it gets decoded rather than
+    # grepped — a substring check would pass while the embedded origin stayed :8787.
+    assert "8787" not in out
+    assert "http://127.0.0.1:9292/join" in out
+    assert "cli:  sys-buddy join http://127.0.0.1:9292 " in out
+
+    link = next(w for w in out.split() if w.startswith(onboarding.INVITE_PREFIX))
+    embedded_origin, _code = onboarding.parse_invite_link(link)
+    assert embedded_origin == "http://127.0.0.1:9292"
+
+
+def test_public_url_still_beats_port_flag(tmp_path, monkeypatch, capsys):
+    """A tunnel origin carries its own port; --port must not leak into it."""
+    db = str(tmp_path / "t.db")
+    monkeypatch.delenv("SYS_BUDDY_PUBLIC_URL", raising=False)
+    _make_task(db)
+    args = _parse([
+        "--db", db, "invite", "--task", "signin", "--role", "frontend",
+        "--port", "9292", "--public-url", "https://abc123.ngrok.app",
+    ])
+    args.func(args)
+    out = capsys.readouterr().out
+    assert "https://abc123.ngrok.app/join" in out
+    assert "9292" not in out
+    assert "127.0.0.1" not in out
+
+
+def test_port_defaults_when_flag_absent(tmp_path, monkeypatch, capsys):
+    """Omitting --port keeps the documented default, so nothing changes for the
+    normal single-broker user."""
+    db = str(tmp_path / "t.db")
+    monkeypatch.delenv("SYS_BUDDY_PUBLIC_URL", raising=False)
+    args = _parse(["--db", db, "host-viewer"])
+    args.func(args)
+    out = capsys.readouterr().out
+    assert f"http://127.0.0.1:{cli.DEFAULT_PORT}/ui?v=sbv_" in out
+
+
+def test_link_printing_commands_all_accept_port():
+    """Guard against a future link-printing command forgetting the flag."""
+    for argv in (["host-viewer"], ["invite", "--task", "t", "--role", "backend"]):
+        args = _parse([*argv, "--port", "1234"])
+        assert args.port == 1234, f"{argv[0]} dropped --port"

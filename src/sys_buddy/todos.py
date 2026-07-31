@@ -26,6 +26,16 @@ removes it and locks without the dissent — "both sides sign" quietly becomes
 drop deadlocks on the very party who is missing. So the escape hatch is HUMAN:
 :func:`host_drop_todo`, reachable from the CLI/GUI, never from a peer's tool.
 
+**TWO IDENTIFIERS, and they are not interchangeable.** ``todos.id`` is a global
+AUTOINCREMENT and the target of every foreign key in the schema; ``todos.number`` is
+the ``#N`` a person types, allocated per TASK from 1. This is the GitHub pattern, and
+it is not cosmetic: with a global id, three tasks holding one todo each read ``#1``,
+``#2``, ``#3``, so on the third task the ONLY deliverable is "#3" — a number nobody
+can guess and nobody can type. So :func:`get_row` resolves what a human or an agent
+supplied (a NUMBER, scoped to the task) and :func:`row_by_id` resolves what a join
+handed us (an id). Numbers are never reused and never renumbered: ``#2`` is quoted in
+the thread, in the event log, and in whatever the two humans said yesterday.
+
 Backwards compatibility is load-bearing: a task with NO todos never enters this
 module, keeps today's single contract chain, its agent-driven state machine, and a
 terminal ``verified``. Todos are additive; the migration story is "do nothing".
@@ -34,6 +44,7 @@ terminal ``verified``. Todos are additive; the migration story is "do nothing".
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 
 from . import service
@@ -120,18 +131,64 @@ def has_todos(conn, task_id: str) -> bool:
     )
 
 
-def get_row(conn, task_id: str, todo_id: int) -> dict:
-    """One todo, SCOPED to ``task_id`` — a caller can never reach across tasks."""
+def get_row(conn, task_id: str, number: int) -> dict:
+    """One todo by the HUMAN's ``#N``, SCOPED to ``task_id``.
+
+    THE resolver for anything a person or an agent typed. ``#N`` is
+    ``todos.number`` — per-task, starting at 1 — and never ``todos.id``, which is a
+    global AUTOINCREMENT: on a broker with three tasks the third task's only
+    deliverable would otherwise be ``#3``, which nobody can guess and nobody can type.
+
+    Scoping is what makes the number safe: task A's ``#1`` and task B's ``#1`` are
+    different rows and a caller can never reach across tasks.
+
+    Internal callers that already hold a ``todos.id`` (from ``contracts.todo_id``,
+    ``messages.todo_id``, or a row they just wrote) must use :func:`row_by_id`.
+    """
     try:
-        todo_id = int(todo_id)
+        number = int(number)
     except (TypeError, ValueError):
-        raise ValueError(f"todo id must be a number, got {todo_id!r}") from None
+        raise ValueError(f"todo number must be a number, got {number!r}") from None
     row = conn.execute(
-        "SELECT * FROM todos WHERE id = ? AND task_id = ?", (todo_id, task_id)
+        "SELECT * FROM todos WHERE number = ? AND task_id = ?", (number, task_id)
     ).fetchone()
     if row is None:
-        raise ValueError(f"no todo {todo_id} on task '{task_id}'")
+        raise ValueError(
+            f"no todo #{number} on task '{task_id}'. Todos are numbered PER TASK from "
+            f"#1 — call get_todos() for the live list."
+        )
     return row
+
+
+def row_by_id(conn, task_id: str, todo_id: int) -> dict:
+    """One todo by its INTERNAL ``todos.id``, still scoped to ``task_id``.
+
+    The other half of the split: every foreign key in the schema
+    (``contracts.todo_id``, ``messages.todo_id``, ``todo_decisions.todo_id``,
+    ``todo_drop_consents.todo_id``) points at ``todos.id``, so code walking those joins
+    must resolve on the id. Nothing a human types ever arrives here — that is
+    :func:`get_row`.
+    """
+    row = conn.execute(
+        "SELECT * FROM todos WHERE id = ? AND task_id = ?", (int(todo_id), task_id)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"no todo with id {todo_id} on task '{task_id}'")
+    return row
+
+
+def next_number(conn, task_id: str) -> int:
+    """The number the next todo on this task gets: ``MAX(number) + 1``.
+
+    MAX and not COUNT, deliberately: numbers are NEVER REUSED. Drop #2 and the next
+    todo is #3, because ``#2`` is already quoted in the thread, in the event log and in
+    whatever the two humans said to each other about it. Must be read inside the same
+    transaction as the INSERT that consumes it; the ``todos_task_number`` unique index
+    is the backstop if two proposals race.
+    """
+    return conn.execute(
+        "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM todos WHERE task_id = ?", (task_id,)
+    ).fetchone()["n"]
 
 
 def decisions(conn, todo_id: int, version: int) -> dict[str, dict]:
@@ -183,19 +240,48 @@ def status_of(conn, row) -> str:
     return PENDING
 
 
+def unjoined_parties(conn, task_id: str, parties: list[str]) -> list[str]:
+    """Which of ``parties`` are seats NOBODY has ever accepted an invite for.
+
+    A party list may legitimately name an unjoined seat — you can propose ahead of
+    someone's arrival — but then "waiting on Priya" and "waiting on a seat nobody ever
+    accepted" look identical, and they need different actions: nudge a colleague, or
+    chase an invite. This is the difference, in party order.
+
+    There is deliberately NO timeout attached to it. Any number would be arbitrary, and
+    a todo that silently expires is worse than one visibly waiting; ``host_drop_todo``
+    is already the escape hatch.
+    """
+    from . import seats as _seats
+
+    joined = _seats.joined_handles(conn, task_id)
+    return [p for p in parties if p not in joined]
+
+
 def to_dict(conn, row) -> dict:
     """The wire shape for ``get_todos`` and ``/api``.
 
-    NOTHING is withheld by stage. A todo is a title, a scope and a party list —
-    there is no ``staging_url`` equivalent to protect until agreement, so unlike
-    ``get_contract`` there is nothing to strip from a proposal.
+    NOTHING is withheld by stage. A todo is a title, a scope and a party list — there
+    is nothing here to protect until agreement, so unlike ``get_contract`` there is
+    nothing to strip from a proposal.
+
+    A todo row DOES now carry a host-set ``staging_url`` override, and it is
+    deliberately NOT in this shape. This is what the agents' ``get_todos`` returns, and
+    publishing the target here would hand an agent the one fetchable URL without it
+    having signed anything — dissolving the exact incentive ``get_contract``'s
+    withholding exists to create. The dashboard adds it in ``api._todos_for``, where the
+    reader is a human holding a viewer token.
     """
     d = decisions(conn, row["id"], row["version"])
     parties = parties_of(row)
     contracts = _contract_rows(conn, row["id"])
     locked = [c["version"] for c in contracts if c["status"] == "locked"]
     return {
+        # BOTH, on purpose: `number` is the handle humans and agents type (`#N`,
+        # `todo=N`), `id` is the internal key every join in the schema uses. The
+        # dashboard needs `id` to key its selection and `number` to print.
         "id": row["id"],
+        "number": row["number"],
         "title": row["title"],
         "scope": row["scope"],
         "parties": parties,
@@ -205,6 +291,10 @@ def to_dict(conn, row) -> dict:
         "accepted_by": sorted(r for r, v in d.items() if v["decision"] == ACCEPT),
         "declined_by": sorted(r for r, v in d.items() if v["decision"] == DECLINE),
         "awaiting": [p for p in parties if p not in d],
+        # The seats on this todo that nobody ever paired into. "awaiting @designer —
+        # never joined" and "awaiting Priya" are different problems with different
+        # fixes, and without this field every surface renders them the same.
+        "unjoined": unjoined_parties(conn, row["task_id"], parties),
         "decline_reasons": {r: v["reason"] for r, v in d.items() if v["decision"] == DECLINE},
         # The per-todo march + its own contract chain, for the mini-stepper.
         "state": row["state"],
@@ -252,10 +342,17 @@ def rollup(conn, task_id: str) -> dict | None:
         return None
     counts = {s: 0 for s in STATUSES}
     stuck = 0
+    # Todos still waiting on a seat NOBODY ever accepted an invite for. Counted
+    # separately from `pending` because the fix is different: pending is a colleague to
+    # nudge, this is an invite to chase. No timeout — see `unjoined_parties`.
+    unjoined = 0
     for r in rows:
-        counts[status_of(conn, r)] += 1
+        status = status_of(conn, r)
+        counts[status] += 1
         if r["stuck_at"] is not None:
             stuck += 1
+        if status == PENDING and unjoined_parties(conn, task_id, parties_of(r)):
+            unjoined += 1
 
     states = [r["state"] for r in rows]
     if all(s == "verified" for s in states):
@@ -270,6 +367,8 @@ def rollup(conn, task_id: str) -> dict | None:
         "verified": counts[VERIFIED],
         "pending": counts[PENDING],
         "stuck": stuck,
+        # ⊆ pending: how many of those are blocked on a seat nobody ever joined.
+        "unjoined": unjoined,
         "dropped": conn.execute(
             "SELECT COUNT(*) AS n FROM todos WHERE task_id = ? AND dropped_at IS NOT NULL",
             (task_id,),
@@ -309,7 +408,7 @@ def assert_party(row, role: str, action: str) -> None:
     parties = parties_of(row)
     if role not in parties:
         raise ValueError(
-            f"you ('{role}') are not a party on todo {row['id']} '{row['title']}' — "
+            f"you ('{role}') are not a party on todo #{row['number']} '{row['title']}' — "
             f"it binds {', '.join(parties)}. You can read it with get_todos, but only "
             f"a named party can {action} it."
         )
@@ -317,31 +416,85 @@ def assert_party(row, role: str, action: str) -> None:
 
 def _assert_open(row, action: str) -> None:
     if row["dropped_at"] is not None:
-        raise ValueError(f"todo {row['id']} was dropped; cannot {action} it")
+        raise ValueError(f"todo #{row['number']} was dropped; cannot {action} it")
 
 
 def _validate_parties(conn, task_id: str, parties: object) -> list[str]:
-    roles = task_roles(conn, task_id)
+    """Resolve a party list to SEAT HANDLES, refusing anything that names more than one.
+
+    A party list BINDS. ``@FE`` fans out perfectly well in a message — telling every
+    frontend something is unambiguous — but binding "both frontends" and binding
+    "Sarah only" are different agreements, so the broker must not choose between them.
+    Hence :func:`service.resolve_seat` rather than the generous addressee resolver, and
+    a refusal that NAMES the candidates instead of guessing.
+
+    Handles, role types that name exactly one seat, tags and display names all resolve
+    here — a human types what they have in their head and the broker canonicalises it.
+    """
+    from . import seats as _seats
+
+    handles, seat_roles = _seats.cast_of(conn, task_id)
+    names = _seats.names_of(conn, task_id)
     if isinstance(parties, str):
         parties = [p.strip() for p in parties.split(",")]
     if not isinstance(parties, (list, tuple)):
-        raise ValueError("parties must be a list of role names already seated on the task")
-    cleaned = [str(p).strip() for p in parties if str(p).strip()]
+        raise ValueError("parties must be a list of seats already on the task")
+    cleaned = [
+        service.resolve_seat(
+            str(p).strip(), handles, seat_roles, names, task_id=task_id,
+            binding="A todo binds specific people",
+            hint=" A todo reuses the task's existing seats — you pair once, at the "
+                 "task; there is no per-todo pairing.",
+        )
+        for p in parties
+        if str(p).strip()
+    ]
     if len(cleaned) != len(set(cleaned)):
         raise ValueError("parties must be unique (no duplicates)")
-    unknown = [p for p in cleaned if p not in roles]
-    if unknown:
-        raise ValueError(
-            f"not seated on task '{task_id}': {', '.join(unknown)}. A todo reuses the "
-            f"task's existing seats ({', '.join(roles)}) — you pair once, at the task; "
-            f"there is no per-todo pairing."
-        )
     if len(cleaned) < 2:
         raise ValueError(
             "a todo binds at least TWO of the task's seats — one to produce the "
             "deliverable and one to build against it (same rule as a contract task's cast)"
         )
+    _assert_parties_ready(conn, task_id, cleaned)
     return cleaned
+
+
+def _assert_parties_ready(conn, task_id: str, parties: list[str]) -> None:
+    """Refuse to BIND a seat that has not passed pre-flight.
+
+    Naming someone a party is the moment you start depending on them, so it is the
+    right moment to block — and the only one where blocking is a choice the caller can
+    act on, since it is CHOOSING the seats. Everything downstream is scoped instead:
+    ``state.propose_contract`` waits only on the parties of its own todo, and a seat
+    the todo does not name never blocks it at all.
+
+    Messaging is deliberately NOT gated anywhere. "Go finish your pre-flight" is the
+    most natural thing to say to an unready seat, and refusing to carry it would leave
+    the task with no way out of exactly this state — so the refusal below points at
+    ``send_message`` rather than closing that door.
+
+    Remote-only, like every readiness gate here: local self-declared identities never
+    run pre-flight (nor does the middleware gate them), so enforcing it locally would
+    brick the whole local todo flow.
+    """
+    from . import config as _config
+    from . import seats as _seats
+
+    if not _config.get_config().is_remote:
+        return
+    not_ready = _seats.unready(conn, task_id, parties)
+    if not_ready:
+        who = ", ".join(f"{r['seat']} ({r['status']} pre-flight)" for r in not_ready)
+        one = not_ready[0]["seat"]
+        raise ValueError(
+            f"a todo cannot bind a seat that has not passed pre-flight; not ready: "
+            f"{who}. Their agent calls readiness_check() then "
+            f"submit_readiness(answers) — ask them to, with "
+            f"send_message('question', '...', to_role='{one}'), and propose the todo "
+            f"once they have. Or bind only the seats that are ready: a seat a todo "
+            f"does not name is not blocked by it and does not block it."
+        )
 
 
 def _assert_text(title: str, scope: str) -> tuple[str, str]:
@@ -405,12 +558,25 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
         )
 
     now = _now()
-    cur = conn.execute(
-        "INSERT INTO todos (task_id, title, scope, parties_json, version, state, "
-        "proposed_by, proposed_role, created_at) VALUES (?,?,?,?,1,'open',?,?,?)",
-        (identity.task_id, title, scope, json.dumps(parties), identity.agent_id,
-         identity.role, now),
-    )
+    # The human's `#N` is allocated here, MAX+1 within this task, in the SAME
+    # transaction as the INSERT that consumes it. Two concurrent proposals can read the
+    # same MAX and collide on the `todos_task_number` unique index; retry re-reads it.
+    for _attempt in range(6):
+        number = next_number(conn, identity.task_id)
+        try:
+            cur = conn.execute(
+                "INSERT INTO todos (task_id, number, title, scope, parties_json, version, "
+                "state, proposed_by, proposed_role, created_at) "
+                "VALUES (?,?,?,?,?,1,'open',?,?,?)",
+                (identity.task_id, number, title, scope, json.dumps(parties),
+                 identity.agent_id, identity.role, now),
+            )
+            break
+        except sqlite3.IntegrityError:
+            conn.rollback()
+    else:
+        raise ValueError("could not allocate a todo number — please retry")
+
     todo_id = cur.lastrowid
     _record(conn, todo_id, 1, identity, ACCEPT, None)
     _event(conn, identity.task_id, "todo_proposed", todo_id,
@@ -420,10 +586,10 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
     others = [p for p in parties if p != identity.role]
     service.post_message(
         conn, identity, "todo_proposal",
-        f"Proposed todo #{todo_id}: {title}. Scope: {scope}. This binds "
+        f"Proposed todo #{number}: {title}. Scope: {scope}. This binds "
         f"{', '.join(parties)} — proposing is my acceptance, so I'm waiting on "
-        f"{', '.join(others)}. Read it with get_todos(), then accept_todo({todo_id}) "
-        f"if the scope is right, or decline_todo({todo_id}, reason) / message me to "
+        f"{', '.join(others)}. Read it with get_todos(), then accept_todo({number}) "
+        f"if the scope is right, or decline_todo({number}, reason) / message me to "
         f"reshape it. Accepting agrees on WHAT; the contract on this todo is a "
         f"separate, later agreement about HOW.",
         todo_id=todo_id,
@@ -431,10 +597,10 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
     return _result(conn, identity.task_id, todo_id)
 
 
-def accept_todo(conn, identity: Identity, todo_id: int) -> dict:
+def accept_todo(conn, identity: Identity, number: int) -> dict:
     """Agree to WHAT this deliverable is. Not a lock — only "yes, let's work on it"."""
     _assert_task_usable(conn, identity.task_id)
-    row = get_row(conn, identity.task_id, todo_id)
+    row = get_row(conn, identity.task_id, number)
     _assert_open(row, "accept")
     assert_party(row, identity.role, "accept")
 
@@ -448,21 +614,21 @@ def accept_todo(conn, identity: Identity, todo_id: int) -> dict:
     awaiting = [p for p in parties if d.get(p, {}).get("decision") != ACCEPT]
     if awaiting:
         body = (
-            f"Accepted todo #{row['id']} v{row['version']} ({row['title']}). "
+            f"Accepted todo #{row['number']} v{row['version']} ({row['title']}). "
             f"Still waiting on {', '.join(awaiting)}."
         )
     else:
         body = (
-            f"Accepted todo #{row['id']} v{row['version']} ({row['title']}) — every party "
+            f"Accepted todo #{row['number']} v{row['version']} ({row['title']}) — every party "
             f"({', '.join(parties)}) has now agreed on WHAT. Next is HOW: one of us "
-            f"proposes a contract on this todo with propose_contract(spec, todo={row['id']}), "
-            f"and the SAME parties sign it."
+            f"proposes a contract on this todo with "
+            f"propose_contract(spec, todo={row['number']}), and the SAME parties sign it."
         )
     service.post_message(conn, identity, "todo_accept", body, todo_id=row["id"])
     return _result(conn, identity.task_id, row["id"])
 
 
-def decline_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
+def decline_todo(conn, identity: Identity, number: int, reason: str) -> dict:
     """Bounce a todo back to its creator, with a reason.
 
     Recorded as a LIST entry beside the acceptances, not as a `declined` STATUS: a
@@ -470,7 +636,7 @@ def decline_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
     reproposes, and it would lose "who said no, and why".
     """
     _assert_task_usable(conn, identity.task_id)
-    row = get_row(conn, identity.task_id, todo_id)
+    row = get_row(conn, identity.task_id, number)
     _assert_open(row, "decline")
     assert_party(row, identity.role, "decline")
     reason = (reason or "").strip()
@@ -485,8 +651,8 @@ def decline_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
     conn.commit()
     service.post_message(
         conn, identity, "todo_decline",
-        f"Declined todo #{row['id']} v{row['version']} ({row['title']}): {reason}. "
-        f"Reshape it and repropose_todo({row['id']}, ...) — that issues a new version "
+        f"Declined todo #{row['number']} v{row['version']} ({row['title']}): {reason}. "
+        f"Reshape it and repropose_todo({row['number']}, ...) — that issues a new version "
         f"and resets everyone's acceptance, so nobody is held to a scope they didn't read.",
         todo_id=row["id"],
     )
@@ -496,7 +662,7 @@ def decline_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
 def repropose_todo(
     conn,
     identity: Identity,
-    todo_id: int,
+    number: int,
     title: str | None = None,
     scope: str | None = None,
     parties: list[str] | None = None,
@@ -517,19 +683,19 @@ def repropose_todo(
       through ``reopen_negotiations`` → new version → everyone signs.
     """
     _assert_task_usable(conn, identity.task_id)
-    row = get_row(conn, identity.task_id, todo_id)
+    row = get_row(conn, identity.task_id, number)
     _assert_open(row, "repropose")
     assert_party(row, identity.role, "repropose")
     if row["state"] == "verified":
         raise ValueError(
-            f"todo {row['id']} is verified — reproposing finished work would make the "
+            f"todo #{row['number']} is verified — reproposing finished work would make the "
             f"task's rollup lie. Propose a NEW todo for follow-up work."
         )
 
     contracts = _contract_rows(conn, row["id"])
     if any(c["status"] == "locked" for c in contracts):
         raise ValueError(
-            f"todo {row['id']} already has a LOCKED contract, which is immutable. Call "
+            f"todo #{row['number']} already has a LOCKED contract, which is immutable. Call "
             f"reopen_negotiations(reason) and propose a new contract version on this "
             f"todo; every party re-signs it."
         )
@@ -576,15 +742,15 @@ def repropose_todo(
     )
     service.post_message(
         conn, identity, "todo_proposal",
-        f"Reproposed todo #{row['id']} as v{version}: {new_title}. Scope: {new_scope}. "
+        f"Reproposed todo #{row['number']} as v{version}: {new_title}. Scope: {new_scope}. "
         f"Binds {', '.join(new_parties)}.{note} Everyone's earlier acceptance is cleared — "
-        f"accept_todo({row['id']}) again if v{version} is right.{sig_note}",
+        f"accept_todo({row['number']}) again if v{version} is right.{sig_note}",
         todo_id=row["id"],
     )
     return _result(conn, identity.task_id, row["id"])
 
 
-def drop_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
+def drop_todo(conn, identity: Identity, number: int, reason: str) -> dict:
     """"We don't need this after all" — MUTUAL: every named party must consent.
 
     Blocked once the todo is ``verified``: abandoning finished work would make the
@@ -595,13 +761,13 @@ def drop_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
     :func:`host_drop_todo`, never a peer-removal tool.
     """
     _assert_task_usable(conn, identity.task_id)
-    row = get_row(conn, identity.task_id, todo_id)
+    row = get_row(conn, identity.task_id, number)
     if row["dropped_at"] is not None:
         return _result(conn, identity.task_id, row["id"])
     assert_party(row, identity.role, "drop")
     if row["state"] == "verified":
         raise ValueError(
-            f"todo {row['id']} is verified and cannot be dropped — the task's rollup "
+            f"todo #{row['number']} is verified and cannot be dropped — the task's rollup "
             f"reports it as done, and abandoning it would make that count a lie."
         )
     reason = (reason or "").strip()
@@ -623,9 +789,9 @@ def drop_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
     if remaining:
         service.post_message(
             conn, identity, "todo_drop",
-            f"Proposed dropping todo #{row['id']} ({row['title']}): {reason}. Dropping is "
+            f"Proposed dropping todo #{row['number']} ({row['title']}): {reason}. Dropping is "
             f"mutual — waiting on {', '.join(remaining)} to also call "
-            f"drop_todo({row['id']}, reason). Say so in chat if you'd rather keep it.",
+            f"drop_todo({row['number']}, reason). Say so in chat if you'd rather keep it.",
             todo_id=row["id"],
         )
         return _result(conn, identity.task_id, row["id"])
@@ -634,7 +800,7 @@ def drop_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
     conn.commit()
     service.post_message(
         conn, identity, "todo_drop",
-        f"Todo #{row['id']} ({row['title']}) is DROPPED by mutual consent of "
+        f"Todo #{row['number']} ({row['title']}) is DROPPED by mutual consent of "
         f"{', '.join(parties)}: {reason}. It no longer counts toward the task.",
         todo_id=row["id"],
     )
@@ -643,7 +809,7 @@ def drop_todo(conn, identity: Identity, todo_id: int, reason: str) -> dict:
     return _result(conn, identity.task_id, row["id"])
 
 
-def host_drop_todo(conn, task_id: str, todo_id: int, reason: str, by: str = HOST) -> dict:
+def host_drop_todo(conn, task_id: str, number: int, reason: str, by: str = HOST) -> dict:
     """The HOST drops a todo unilaterally. The escape hatch, and the ONLY one.
 
     A mutual drop needs every named party's consent — including the party who went
@@ -656,16 +822,13 @@ def host_drop_todo(conn, task_id: str, todo_id: int, reason: str, by: str = HOST
     ``service.BROKER_TYPES``) lands in EVERY seat's message queue saying who dropped
     it and why, so they read a decision rather than discovering a hole.
     """
-    row = conn.execute(
-        "SELECT * FROM todos WHERE id = ? AND task_id = ?", (int(todo_id), task_id)
-    ).fetchone()
-    if row is None:
-        raise ValueError(f"no todo {todo_id} on task '{task_id}'")
+    # The host types `#N` at a terminal, so this resolves the same way an agent's does.
+    row = get_row(conn, task_id, number)
     if row["dropped_at"] is not None:
-        raise ValueError(f"todo {todo_id} is already dropped")
+        raise ValueError(f"todo #{row['number']} is already dropped")
     if row["state"] == "verified":
         raise ValueError(
-            f"todo {todo_id} is verified and cannot be dropped — the task's rollup "
+            f"todo #{row['number']} is verified and cannot be dropped — the task's rollup "
             f"reports it as done, and abandoning it would make that count a lie."
         )
     reason = (reason or "").strip()
@@ -679,7 +842,7 @@ def host_drop_todo(conn, task_id: str, todo_id: int, reason: str, by: str = HOST
     broker = service.ensure_broker_identity(conn, task_id)
     service.post_message(
         conn, broker, "todo_dropped",
-        f"Todo #{row['id']} ({row['title']}) was DROPPED by the host ({by}): {reason}. "
+        f"Todo #{row['number']} ({row['title']}) was DROPPED by the host ({by}): {reason}. "
         f"It bound {', '.join(parties_of(row))} and no longer counts toward this task. "
         f"This was a human decision, not a peer's — if you were mid-work on it, stop, "
         f"and check get_todos() for what is still live.",
@@ -687,7 +850,7 @@ def host_drop_todo(conn, task_id: str, todo_id: int, reason: str, by: str = HOST
     )
     apply_rollup(conn, task_id)
     conn.commit()
-    return to_dict(conn, get_row(conn, task_id, row["id"]))
+    return to_dict(conn, row_by_id(conn, task_id, row["id"]))
 
 
 # --------------------------------------------------------------------------- #
@@ -717,14 +880,30 @@ def _finalise_drop(conn, task_id: str, todo_id: int, by: str, reason: str,
 
 def _event(conn, task_id: str, kind: str, todo_id: int, detail: dict) -> None:
     """Append a ``todo`` event. One kind in the log (``todo``) with the specific
-    action inside, so the dashboard's existing kind filter keeps a fixed vocabulary."""
+    action inside, so the dashboard's existing kind filter keeps a fixed vocabulary.
+
+    Records BOTH ids: ``todo_id`` (internal, so the row is still joinable) and
+    ``todo_number`` (what the log PRINTS, because "#3" in the log has to be the same
+    "#3" the humans typed). Rows written before numbering carry only ``todo_id`` and
+    the renderer falls back to it — see ``api._render_detail``.
+    """
+    ref = conn.execute("SELECT number FROM todos WHERE id = ?", (todo_id,)).fetchone()
     conn.execute(
         "INSERT INTO events (task_id, kind, detail_json, created_at) VALUES (?,?,?,?)",
-        (task_id, "todo", json.dumps({"action": kind, "todo_id": todo_id, **detail}), _now()),
+        (task_id, "todo",
+         json.dumps({
+             "action": kind,
+             "todo_id": todo_id,
+             "todo_number": (ref["number"] if ref is not None else None),
+             **detail,
+         }),
+         _now()),
     )
 
 
 def _result(conn, task_id: str, todo_id: int) -> dict:
-    out = to_dict(conn, get_row(conn, task_id, todo_id))
+    """The wire result for a write. Takes the INTERNAL id — the caller just wrote the
+    row and holds it; nothing human arrives here."""
+    out = to_dict(conn, row_by_id(conn, task_id, todo_id))
     out["task_rollup"] = rollup(conn, task_id)
     return out

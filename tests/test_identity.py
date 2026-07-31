@@ -107,13 +107,17 @@ def test_ensure_local_identity_is_idempotent_after_a_role_change(conn):
     from sys_buddy import service
 
     first = service.ensure_local_identity(conn, "demo", "be-agent")
-    conn.execute("UPDATE agents SET role = ? WHERE id = ?", ("backend", first.agent_id))
+    conn.execute(
+        "UPDATE agents SET role = ?, handle = ? WHERE id = ?",
+        ("backend", "backend", first.agent_id),
+    )
     conn.commit()
 
     again = service.ensure_local_identity(conn, "demo", "be-agent")
 
     assert again.agent_id == first.agent_id, "must find the existing agent, not duplicate it"
-    assert again.role == "backend", "must return the CURRENT role, not the name"
+    assert again.role == "backend", "must return the CURRENT seat, not the name"
+    assert again.kind == "backend", "must return the CURRENT role type, not the name"
 
     rows = conn.execute(
         "SELECT COUNT(*) FROM agents WHERE task_id = ? AND name = ?", ("demo", "be-agent")

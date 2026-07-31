@@ -19,7 +19,13 @@ EXPECTED_TOOLS = {
     "channel_history", "propose_contract", "lock_contract", "get_contract",
     "report_status", "notify_human",
 }
-EXPECTED_ROUTES = {"/pair", "/api/tasks", "/api/task/{id}", "/api/task/{id}/events", "/ui"}
+EXPECTED_ROUTES = {
+    "/pair",
+    # Read-only, and gated on the same invite code /pair is: it shows the joiner the
+    # task, their seat and the cast BEFORE they burn a single-use invite on it.
+    "/pair/preview",
+    "/api/tasks", "/api/task/{id}", "/api/task/{id}/events", "/ui",
+}
 
 
 def _routes(mcp):

@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 import json
 import time
+from typing import NamedTuple
 
 from .identity import Identity
 
@@ -40,28 +41,244 @@ ROLE_TAGS = {
 }
 
 
-def resolve_role(value: str, roles: list[str]) -> str | None:
-    """Resolve ``value`` to a role actually declared on the task, or None.
+class Resolution(NamedTuple):
+    """What ``@something`` turned out to name.
 
-    Accepts, in order: an exact match, a case-insensitive match ("Backend"), or a
-    short tag ("BE" → backend). Returns None when it resolves to nothing, so the
-    caller raises its own error — this function never decides policy.
+    ``handles`` is a SET of seats (as a list, in declaration order) because a role type
+    may now name several of them. ``kind`` says HOW it matched, which is the fact
+    callers branch on: a role type naming two seats is a legitimate fan-out for a
+    MESSAGE and a refusal in a PARTY LIST. ``canonical`` is the string to store in
+    ``messages.to_role`` — the handle for a single seat, the role type for a fan-out.
 
-    A task is free to declare a role literally named "be"; the exact match wins
-    first, so a real role can never be shadowed by a tag.
+    ``kind == 'collision'`` is the one case nothing may use: the token is BOTH a role
+    type and the handle of a seat that does not hold that role type, so it has two
+    honest readings and the broker refuses both rather than picking one.
     """
-    if value in roles:
-        return value
-    folded = value.strip().lower()
-    for role in roles:
-        if role.lower() == folded:
-            return role
+
+    handles: list[str]
+    kind: str        # 'role' | 'handle' | 'tag' | 'name' | 'collision'
+    canonical: str
+
+
+def _seat_roles(seats: list[str], seat_roles: dict[str, str] | None) -> dict[str, str]:
+    """The identity map for anything the caller did not declare — which is exactly
+    right for every task written before seats and role types were split apart."""
+    return {s: (seat_roles or {}).get(s, s) for s in seats}
+
+
+def resolve_role(
+    value: str,
+    seats: list[str],
+    seat_roles: dict[str, str] | None = None,
+    names: dict[str, str] | None = None,
+) -> Resolution | None:
+    """Resolve ``value`` against a task's cast, or None when it names nothing.
+
+    Priority order, and it matters: **role type → handle → tag → agent name**.
+
+    * ``@frontend`` / ``@FE`` → every frontend-TYPE seat (a fan-out), always.
+    * ``@frontend-2`` → one seat.
+    * ``@sarah`` → the seat held by the agent named Sarah, case-insensitively.
+
+    **A role type always means the TYPE.** The first seat of a type is handled
+    ``frontend`` — the same string as the type it holds — so with two frontends the
+    old handle-first order made ``@frontend`` mean "both frontends" in a message and
+    "Sarah's seat" in a party list. One token, two meanings: a human will not hold that
+    distinction, and the party-list reading can bind the wrong person to a contract.
+    Now it is the type in both, and the unambiguous way to name the first frontend is
+    the PERSON'S NAME (which is why names are unique per task). There is deliberately
+    no ``@frontend-1`` alias: a second spelling for a seat is the same trap again.
+
+    Nothing is silently shadowed. On a one-seat-per-type task — every task written
+    before seats and role types were split — the handle and the role type ARE the same
+    string, so this order returns exactly what handle-first returned. A seat whose
+    handle equals a role type it does NOT hold (only reachable by a host overriding the
+    derived handle) is a genuine two-way collision and comes back as ``kind
+    == 'collision'``, refused by every caller.
+
+    This function decides NO policy — it never raises and never picks a winner between
+    candidates. Ambiguity is resolved by the caller, because the right answer depends
+    on what is being asked: see :func:`resolve_addressee` (fan-out is fine) and
+    :func:`resolve_seat` (it is not).
+    """
+    roles = _seat_roles(seats, seat_roles)
+    folded = (value or "").strip().lower()
+    if not folded:
+        return None
+
+    # The exact seat this token would have named under the old handle-first order.
+    # Case-sensitive first, so a cast holding both `QA` and `qa` resolves each to
+    # itself rather than to whichever came first.
+    exact = value if value in seats else next(
+        (s for s in seats if s.lower() == folded), None
+    )
+
+    # 1. role type — may name several seats, and it OUTRANKS a like-named handle.
+    #    Store the ROLE TYPE as the canonical `to_role`; that single string is what
+    #    makes the fan-out work at read time.
+    by_role = [s for s in seats if roles[s].lower() == folded]
+    if by_role:
+        if exact is not None and exact not in by_role:
+            # `qa` is a role type here AND the handle of a seat doing something else.
+            # Both readings are honest, so neither is chosen — the caller refuses and
+            # names every candidate.
+            return Resolution(by_role + [exact], "collision", roles[by_role[0]])
+        return Resolution(by_role, "role", roles[by_role[0]])
+
+    # 2. exact handle — for everything the role types do not already claim
+    #    (`frontend-2`, or a seat the host named by hand).
+    if exact is not None:
+        return Resolution([exact], "handle", exact)
+
+    # 2b. the derived alias of a SHADOWED seat: `frontend-1` for a seat whose stored
+    #     handle is the bare `frontend` on a task that later grew a second frontend.
+    #     Its handle cannot be renumbered (it is quoted in message history and
+    #     signatures), so it gains an ADDRESS instead — and canonicalises straight back
+    #     to the stored handle, so nothing downstream ever sees the alias. Casts
+    #     declared today number every seat of a shared type and never land here; see
+    #     `seats.seat_aliases`.
+    from .seats import seat_aliases  # local: seats imports this module lazily too
+
+    aliased = seat_aliases(seats, roles).get(folded)
+    if aliased is not None:
+        return Resolution([aliased], "handle", aliased)
+
+    # 3. tag — a typing shortcut for a role type, never for a person or a seat.
     expanded = ROLE_TAGS.get(folded)
     if expanded:
-        for role in roles:
-            if role.lower() == expanded:
-                return role
+        tagged = [s for s in seats if roles[s].lower() == expanded]
+        if tagged:
+            return Resolution(tagged, "tag", roles[tagged[0]])
+
+    # 4. display name — unique per task, so this names exactly one seat unless a
+    #    legacy database carries a duplicate, which is refused rather than guessed.
+    from .seats import fold_name  # local: seats imports this module lazily too
+
+    wanted = fold_name(value)
+    named = [s for s, n in (names or {}).items() if s in seats and fold_name(n) == wanted]
+    if named:
+        ordered = [s for s in seats if s in named]
+        return Resolution(ordered, "name", ordered[0])
     return None
+
+
+def seat_addresses(seats: list[str], seat_roles: dict[str, str] | None = None) -> dict[str, str]:
+    """``{handle: the token a human should type for it}``.
+
+    Identical to the handle for every seat but one: a seat shadowed by a role type
+    several seats share is typed as its alias (``@frontend-1``), because typing its
+    stored handle (``@frontend``) would name the TYPE. Refusals list candidates through
+    this map so that every token they print can actually be typed back — a refusal that
+    answers "`@frontend` is ambiguous" with "did you mean `@frontend`?" is no answer.
+    """
+    from .seats import seat_aliases  # local: seats imports this module lazily too
+
+    return {h: a for a, h in seat_aliases(seats, _seat_roles(seats, seat_roles)).items()}
+
+
+def describe_seats(
+    handles: list[str],
+    names: dict[str, str] | None = None,
+    addresses: dict[str, str] | None = None,
+) -> str:
+    """``@frontend-1 (Sarah) and @frontend-2 (Priya)`` — for a refusal that has to NAME
+    the candidates rather than leave the human guessing which two it meant.
+
+    ``addresses`` (from :func:`seat_addresses`) overrides how a seat is SPELLED, never
+    which seat it is.
+    """
+    names = names or {}
+    addresses = addresses or {}
+    parts = [
+        f"@{addresses.get(h, h)} ({names[h]})" if names.get(h) else f"@{addresses.get(h, h)}"
+        for h in handles
+    ]
+    if len(parts) <= 1:
+        return "".join(parts)
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def resolve_addressee(
+    value: str,
+    seats: list[str],
+    seat_roles: dict[str, str] | None = None,
+    names: dict[str, str] | None = None,
+    task_id: str = "",
+) -> str:
+    """The ``to_role`` string for a MESSAGE, or ValueError.
+
+    Fan-out is fine here and always was: telling every frontend something is
+    unambiguous. A duplicated NAME is not — "Sarah" with two Sarahs on the task means
+    the sender has one particular person in mind and the broker must not pick.
+    """
+    res = resolve_role(value, seats, seat_roles, names)
+    at = seat_addresses(seats, seat_roles)
+    if res is None:
+        raise ValueError(
+            f"cannot address '{value}' — not a seat, role or tag on task '{task_id}'. "
+            f"This task seats {describe_seats(seats, names, at)}."
+        )
+    if res.kind == "collision":
+        raise ValueError(
+            f"'{value}' is both a role type and the name of a seat that does not hold "
+            f"it on this task — {describe_seats(res.handles, names, at)}. One token cannot "
+            f"mean two things; address the seat you mean by name."
+        )
+    if res.kind == "name" and len(res.handles) > 1:
+        raise ValueError(
+            f"'{value}' is the name of {len(res.handles)} people on this task — "
+            f"{describe_seats(res.handles, names, at)}. Names are display only and may be "
+            f"shared; address the SEAT instead."
+        )
+    return res.canonical
+
+
+def resolve_seat(
+    value: str,
+    seats: list[str],
+    seat_roles: dict[str, str] | None = None,
+    names: dict[str, str] | None = None,
+    task_id: str = "",
+    binding: str = "This binds specific people",
+    hint: str = "",
+) -> str:
+    """Exactly ONE seat handle, or ValueError naming the candidates.
+
+    The strict counterpart to :func:`resolve_addressee`, for anything that BINDS —
+    a todo's party list, an invite, a seat lookup. ``@FE`` is refused here even though
+    it fans out perfectly well in a message, because binding "both frontends" and
+    binding "Sarah only" are different agreements and the broker must not choose one.
+
+    ``binding`` is a whole SENTENCE ("A todo binds specific people"), not a fragment —
+    it is joined verbatim, so the caller owns the grammar and the refusal reads as
+    English rather than as a template with a visible seam in it.
+
+    Note what this means once a role type has two seats: ``@frontend`` is the TYPE
+    everywhere, so it is refused here even though a legacy first frontend's handle may
+    be spelled the same way. EVERY seat still has a token of its own to say instead —
+    a cast declared today numbers all the seats of a shared type (``@frontend-1``,
+    ``@frontend-2``), and a task that grew its second frontend later reaches the first
+    through the derived alias ``@frontend-1``. The refusal lists those tokens, so it can
+    be answered without knowing anyone's name — which matters because an UNJOINED seat
+    has no name to know.
+    """
+    res = resolve_role(value, seats, seat_roles, names)
+    at = seat_addresses(seats, seat_roles)
+    if res is None:
+        raise ValueError(
+            f"'{value}' is not a seat on task '{task_id}'. This task seats "
+            f"{describe_seats(seats, names, at)}.{hint}"
+        )
+    if len(res.handles) > 1:
+        alt = (
+            " Name the seat or the person, not the role type."
+            if res.kind in ("role", "tag", "collision") else ""
+        )
+        raise ValueError(
+            f"'{value}' names {len(res.handles)} seats on this task — "
+            f"{describe_seats(res.handles, names, at)}. {binding}, so say which.{alt}"
+        )
+    return res.handles[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -74,12 +291,19 @@ def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
     name doubles as the role (fine on a single developer's machine). Remote mode
     never calls this — identity is stamped from the token by the middleware.
     """
+    from . import seats as _seats
+
     row = conn.execute("SELECT roles_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
     now = time.time()
     if row is None:
+        # Local mode's name-doubles-as-role convention means the seat handle and the
+        # role type are the same string, so the seat map is the identity map — exactly
+        # what every pre-split task carries.
         conn.execute(
-            "INSERT INTO tasks (id, title, state, roles_json, created_at) VALUES (?,?,?,?,?)",
-            (task_id, task_id, "open", json.dumps([agent_name]), now),
+            "INSERT INTO tasks (id, title, state, roles_json, seat_roles_json, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (task_id, task_id, "open", json.dumps([agent_name]),
+             json.dumps({agent_name: agent_name}), now),
         )
         row_roles: list[str] = [agent_name]
     else:
@@ -92,28 +316,36 @@ def ensure_local_identity(conn, task_id: str, agent_name: str) -> Identity:
     # name, and appended that name to roles_json as a phantom role. The task then showed
     # duplicate agents and bogus pre-flight chips that no flow could ever clear.
     agent = conn.execute(
-        "SELECT id, task_id, name, role FROM agents WHERE task_id = ? AND name = ?",
+        "SELECT id, task_id, name, role, handle FROM agents WHERE task_id = ? AND name = ?",
         (task_id, agent_name),
     ).fetchone()
     if agent is not None:
         conn.commit()
         return Identity(
-            agent_id=agent["id"], task_id=agent["task_id"], name=agent["name"], role=agent["role"]
+            agent_id=agent["id"],
+            task_id=agent["task_id"],
+            name=agent["name"],
+            role=agent["handle"] or agent["role"],
+            role_type=agent["role"],
         )
 
-    # Genuinely new agent: register its name as a role (local mode's name-doubles-as-role
+    # Genuinely new agent: register its name as a seat (local mode's name-doubles-as-role
     # convention) only now, so re-seeing an existing agent can never grow roles_json.
     if agent_name not in row_roles:
         row_roles.append(agent_name)
-        conn.execute(
-            "UPDATE tasks SET roles_json = ? WHERE id = ?", (json.dumps(row_roles), task_id)
-        )
+        seat_roles = _seats.seat_roles_of(conn, task_id)
+        seat_roles[agent_name] = agent_name
+        _seats.write_cast(conn, task_id, row_roles, seat_roles)
     cur = conn.execute(
-        "INSERT INTO agents (task_id, name, role, token_hash, created_at) VALUES (?,?,?,?,?)",
-        (task_id, agent_name, agent_name, None, now),
+        "INSERT INTO agents (task_id, name, role, handle, token_hash, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (task_id, agent_name, agent_name, agent_name, None, now),
     )
     conn.commit()
-    return Identity(agent_id=cur.lastrowid, task_id=task_id, name=agent_name, role=agent_name)
+    return Identity(
+        agent_id=cur.lastrowid, task_id=task_id, name=agent_name,
+        role=agent_name, role_type=agent_name,
+    )
 
 
 def ensure_broker_identity(conn, task_id: str) -> Identity:
@@ -137,15 +369,21 @@ def ensure_broker_identity(conn, task_id: str) -> Identity:
         (task_id, BROKER_ROLE),
     ).fetchone()
     if row is not None:
-        return Identity(agent_id=row["id"], task_id=task_id, name=row["name"], role=row["role"])
+        return Identity(
+            agent_id=row["id"], task_id=task_id, name=row["name"],
+            role=row["role"], role_type=row["role"],
+        )
     now = time.time()
     cur = conn.execute(
-        "INSERT INTO agents (task_id, name, role, token_hash, created_at, revoked_at) "
-        "VALUES (?,?,?,NULL,?,?)",
-        (task_id, BROKER_NAME, BROKER_ROLE, now, now),
+        "INSERT INTO agents (task_id, name, role, handle, token_hash, created_at, revoked_at) "
+        "VALUES (?,?,?,?,NULL,?,?)",
+        (task_id, BROKER_NAME, BROKER_ROLE, BROKER_ROLE, now, now),
     )
     conn.commit()
-    return Identity(agent_id=cur.lastrowid, task_id=task_id, name=BROKER_NAME, role=BROKER_ROLE)
+    return Identity(
+        agent_id=cur.lastrowid, task_id=task_id, name=BROKER_NAME,
+        role=BROKER_ROLE, role_type=BROKER_ROLE,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -234,16 +472,27 @@ def post_message(
     Delivery rows are created lazily on fetch, so an agent that pairs later still
     picks up anything it hasn't acked.
 
-    ``to_role`` directs the message at a single role; None/empty broadcasts to all
-    other agents on the task (the unchanged default). A non-empty ``to_role`` must
-    name a role declared on the task.
+    ``to_role`` directs the message; None/empty broadcasts to all other agents on the
+    task (the unchanged default). A non-empty ``to_role`` must name something on the
+    task's cast — a SEAT (``frontend-2``), a ROLE TYPE (``frontend``), a tag (``FE``)
+    or an agent's display name — and is stored CANONICALISED: the handle for one seat,
+    the role type for a fan-out, which is what makes ``@FE`` reach both frontends at
+    read time with no storage change.
+
+    A handle that is ALSO a role type shared with other seats (``frontend`` alongside
+    ``frontend-2``) delivers to every seat of that type. ``to_role`` is one string
+    matched against both fields at read time, so the two cases are indistinguishable
+    on the wire — and fanning out is the safer reading of "tell the frontend". Address
+    ``@frontend-2`` when you mean one particular seat.
 
     ``todo_id`` records which deliverable the message belongs to, so the dashboard's
     ⟨todo⟩ chip keys on a real id rather than a string scraped from the body. None
     (the default) is a task-level message — every message before todos existed.
     """
+    from . import seats as _seats
+
     task = conn.execute(
-        "SELECT state, closed_at, roles_json FROM tasks WHERE id = ?", (identity.task_id,)
+        "SELECT state, closed_at FROM tasks WHERE id = ?", (identity.task_id,)
     ).fetchone()
     if task is None:
         raise ValueError(f"unknown task '{identity.task_id}'")
@@ -253,15 +502,14 @@ def post_message(
     if not to_role:
         to_role = None
     else:
-        # Resolve tags/casing to the canonical role BEFORE storing, so `to_role` on the
-        # message row is always a real role name — the dashboard and delivery fan-out
-        # match on it exactly and must never see "BE".
-        resolved = resolve_role(to_role, json.loads(task["roles_json"]))
-        if resolved is None:
-            raise ValueError(
-                f"cannot address '{to_role}' — not a role on task '{identity.task_id}'"
-            )
-        to_role = resolved
+        # Resolve tags/casing/names to the canonical string BEFORE storing, so
+        # `to_role` on the message row is always a real seat or role type — the
+        # dashboard and the delivery fan-out match on it exactly and must never see "BE".
+        cast, seat_roles = _seats.cast_of(conn, identity.task_id)
+        to_role = resolve_addressee(
+            to_role, cast, seat_roles, _seats.names_of(conn, identity.task_id),
+            task_id=identity.task_id,
+        )
     assert_content_size(body, "message body")
     state_at_send = task["state"]
     now = time.time()
@@ -336,20 +584,25 @@ def _fetch(conn, identity: Identity, only_new: bool, mark_delivered: bool = True
     Both stamp ``delivered_at`` (first-seen) on return; neither sets ``acked_at``.
     """
     unseen = "d.delivered_at IS NULL" if only_new else "d.acked_at IS NULL"
+    # A directed message matches EITHER of the reader's two names: its seat handle
+    # (`@frontend-2` → exactly one) or its role type (`@FE` → every frontend seat).
+    # That single OR is the whole of the fan-out — `to_role` stays a plain string
+    # filtered at read time, so nothing about the storage changed.
     rows = conn.execute(
         f"""
         SELECT m.id, m.from_agent_id, m.type, m.body_json, m.created_at, m.to_role,
-               a.name AS from_name, a.role AS from_role
+               a.name AS from_name, COALESCE(a.handle, a.role) AS from_role
         FROM messages m
         JOIN agents a ON a.id = m.from_agent_id
         LEFT JOIN deliveries d ON d.message_id = m.id AND d.agent_id = ?
         WHERE m.task_id = ?
           AND m.from_agent_id != ?
-          AND (m.to_role IS NULL OR m.to_role = ?)
+          AND (m.to_role IS NULL OR m.to_role = ? OR m.to_role = ?)
           AND ({unseen})
         ORDER BY m.id
         """,
-        (identity.agent_id, identity.task_id, identity.agent_id, identity.role),
+        (identity.agent_id, identity.task_id, identity.agent_id,
+         identity.role, identity.kind),
     ).fetchall()
 
     now = time.time()
@@ -504,7 +757,8 @@ def channel_history(conn, task_id: str, limit: int = 20) -> list[dict]:
     limit = max(1, min(limit, MAX_HISTORY))
     rows = conn.execute(
         """
-        SELECT m.id, m.type, m.body_json, m.created_at, m.to_role, a.name AS from_name, a.role AS from_role
+        SELECT m.id, m.type, m.body_json, m.created_at, m.to_role, a.name AS from_name,
+               COALESCE(a.handle, a.role) AS from_role
         FROM messages m
         JOIN agents a ON a.id = m.from_agent_id
         WHERE m.task_id = ?

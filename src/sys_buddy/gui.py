@@ -169,6 +169,28 @@ class GuiApi:
         except Exception as exc:
             return {"error": str(exc)}
 
+    def staging_url(self, task_id: str, todo: int = 0) -> dict:
+        """Read the deployment target in force for a task (or one deliverable)."""
+        try:
+            return onboarding.host_staging_url(task_id, todo or None)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def set_staging_url(
+        self, task_id: str, url: str = "", todo: int = 0, clear: bool = False
+    ) -> dict:
+        """Change the deployment target — the ONE URL agents may fetch. HOST ONLY.
+
+        Not a renegotiation: no contract, version or signature moves, because the target
+        is configuration resolved live on every read. That is what makes a rotated ngrok
+        URL a one-field fix rather than a re-signed shape, and it is also why no agent
+        tool exists beside this one — nothing an agent says can reach this value.
+        """
+        try:
+            return onboarding.host_set_staging_url(task_id, url, todo or None, clear)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def invite_link(self, task_id: str, role: str, base_url: str) -> str:
         """Mint the invite link a Buddy uses to pair into ``role`` on ``task_id``."""
         try:

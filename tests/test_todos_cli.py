@@ -88,7 +88,7 @@ def test_todo_list_shows_status_parties_and_the_blocking_party(tmp_path, capsys)
     assert "0/1 verified" in out
     assert "1 awaiting acceptance" in out
     # …and it tells the human exactly what to type, the same division as D11.
-    assert 'sys-buddy todo drop signin <id> --reason "..."' in out
+    assert 'sys-buddy todo drop signin <N> --reason "..."' in out
 
 
 def test_todo_list_on_a_task_with_no_todos(tmp_path, capsys):
@@ -111,11 +111,11 @@ def test_host_drop_posts_who_and_why_as_the_broker(tmp_path, capsys):
     todo = _propose(db, seats)
 
     assert cli.main(
-        ["--db", db, "todo", "drop", "signin", str(todo["id"]),
+        ["--db", db, "todo", "drop", "signin", str(todo["number"]),
          "--reason", "mobile's human is offline this week"]
     ) == 0
     out = capsys.readouterr().out
-    assert f"Dropped todo #{todo['id']} 'Payments API'" in out
+    assert f"Dropped todo #{todo['number']} 'Payments API'" in out
     assert "mobile's human is offline this week" in out
 
     # The explanation lands in the thread — and in the BROKER's voice, never in a
@@ -126,7 +126,7 @@ def test_host_drop_posts_who_and_why_as_the_broker(tmp_path, capsys):
     assert role == service.BROKER_ROLE
     assert "DROPPED by the host" in body
     assert "mobile's human is offline this week" in body
-    assert f"#{todo['id']}" in body
+    assert f"#{todo['number']}" in body
     # The synthetic broker seat is revoked at birth, so it never shows up as a
     # participant on the dashboard or counts toward the pre-flight gate.
     conn = connect(db)
@@ -141,7 +141,7 @@ def test_host_drop_marks_the_todo_dropped_by_host(tmp_path, capsys):
     db, seats = _seed(tmp_path)
     todo = _propose(db, seats)
     cli.cmd_todo_drop(
-        SimpleNamespace(db=db, task="signin", todo=str(todo["id"]), reason="descoped")
+        SimpleNamespace(db=db, task="signin", todo=str(todo["number"]), reason="descoped")
     )
     capsys.readouterr()
 
@@ -166,14 +166,14 @@ def test_host_drop_refused_on_a_verified_todo(tmp_path, capsys):
     try:
         conn.execute(
             "UPDATE todos SET state = 'verified', verified_at = ? WHERE id = ?",
-            (time.time(), todo["id"]),
+            (time.time(), todo["id"]),   # raw SQL: the internal key
         )
         conn.commit()
     finally:
         conn.close()
 
     assert cli.main(
-        ["--db", db, "todo", "drop", "signin", str(todo["id"]), "--reason", "changed my mind"]
+        ["--db", db, "todo", "drop", "signin", str(todo["number"]), "--reason", "changed my mind"]
     ) == 1
     assert "verified and cannot be dropped" in capsys.readouterr().err
     assert [m for m in _thread(db) if m[1] == "todo_dropped"] == []
@@ -182,7 +182,7 @@ def test_host_drop_refused_on_a_verified_todo(tmp_path, capsys):
 def test_host_drop_refused_twice(tmp_path, capsys):
     db, seats = _seed(tmp_path)
     todo = _propose(db, seats)
-    args = ["--db", db, "todo", "drop", "signin", str(todo["id"]), "--reason", "descoped"]
+    args = ["--db", db, "todo", "drop", "signin", str(todo["number"]), "--reason", "descoped"]
     assert cli.main(args) == 0
     capsys.readouterr()
     assert cli.main(args) == 1
@@ -197,7 +197,7 @@ def test_host_drop_unknown_task_and_unknown_todo_error_clearly(tmp_path, capsys)
     assert "unknown task 'ghost'" in capsys.readouterr().err
 
     assert cli.main(["--db", db, "todo", "drop", "signin", "99", "--reason", "x"]) == 1
-    assert "no todo 99 on task 'signin'" in capsys.readouterr().err
+    assert "no todo #99 on task 'signin'" in capsys.readouterr().err
 
 
 def test_host_drop_requires_a_reason(tmp_path):
@@ -206,7 +206,7 @@ def test_host_drop_requires_a_reason(tmp_path):
     db, seats = _seed(tmp_path)
     todo = _propose(db, seats)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["--db", db, "todo", "drop", "signin", str(todo["id"])])
+        cli.main(["--db", db, "todo", "drop", "signin", str(todo["number"])])
     assert exc.value.code == 2
 
 
@@ -216,7 +216,7 @@ def test_host_drop_updates_the_task_rollup(tmp_path, capsys):
     gone = _propose(db, seats, title="Payments API", parties=("backend", "mobile"))
 
     cli.cmd_todo_drop(
-        SimpleNamespace(db=db, task="signin", todo=str(gone["id"]), reason="offline")
+        SimpleNamespace(db=db, task="signin", todo=str(gone["number"]), reason="offline")
     )
     out = capsys.readouterr().out
     assert "0/1 verified" in out  # the dropped todo stopped counting
@@ -239,9 +239,89 @@ def test_todo_drop_is_audit_logged(tmp_path, caplog):
     db, seats = _seed(tmp_path)
     todo = _propose(db, seats)
     with caplog.at_level("INFO", logger="sys_buddy.audit"):
-        admin.host_drop_todo("signin", todo["id"], "offline")
+        admin.host_drop_todo("signin", todo["number"], "offline")
     lines = [r.getMessage() for r in caplog.records]
-    assert any(f"todo_dropped task=signin todo={todo['id']} by=host" == m for m in lines)
+    assert any(f"todo_dropped task=signin todo={todo['number']} by=host" == m for m in lines)
+
+
+# --------------------------------------------------------------------------- #
+# every host-facing string prints the per-task NUMBER, on a db where they DIVERGE
+# --------------------------------------------------------------------------- #
+def _decoy_task(db):
+    """Burn global id 1 on another task, so signin's first todo is id 2 / number 1.
+
+    Without this the CLI assertions above are self-confirming: on a one-task db every
+    todo's id EQUALS its number, so a printer that leaked the id would look correct.
+    """
+    admin.create_task("payments", title="Payments", roles=["backend", "frontend"])
+    conn = connect(db)
+    try:
+        cur = conn.execute(
+            "INSERT INTO agents (task_id, name, role, token_hash, created_at) "
+            "VALUES ('payments','decoy-be','backend',NULL,?)",
+            (time.time(),),
+        )
+        ident = Identity(
+            agent_id=cur.lastrowid, task_id="payments", name="decoy-be", role="backend"
+        )
+        conn.commit()
+        decoy = todos.propose_todo(conn, ident, "decoy", "scope", ["backend", "frontend"])
+    finally:
+        conn.close()
+    assert (decoy["id"], decoy["number"]) == (1, 1)
+
+
+def test_todo_list_prints_the_number_not_the_internal_id(tmp_path, capsys):
+    db, seats = _seed(tmp_path)
+    _decoy_task(db)
+    first = _propose(db, seats, title="Payments API", parties=("backend", "mobile"))
+    second = _propose(db, seats, title="Refunds", parties=("backend", "frontend"))
+    assert (first["id"], first["number"]) == (2, 1)
+    assert (second["id"], second["number"]) == (3, 2)
+
+    assert cli.cmd_todo_list(SimpleNamespace(db=db, task="signin")) == 0
+    out = capsys.readouterr().out
+    assert "#1" in out and "#2" in out
+    assert "#3" not in out
+
+
+def test_host_drop_prints_and_logs_the_number_not_the_internal_id(tmp_path, capsys, caplog):
+    """The confirmation line, the broker's thread message, and the audit line — the three
+    places the host reads a `#N` back — on a db where the id would be visibly different."""
+    db, seats = _seed(tmp_path)
+    _decoy_task(db)
+    _propose(db, seats, title="Payments API", parties=("backend", "mobile"))
+    gone = _propose(db, seats, title="Refunds", parties=("backend", "frontend"))
+    assert (gone["id"], gone["number"]) == (3, 2)
+
+    with caplog.at_level("INFO", logger="sys_buddy.audit"):
+        assert cli.main(
+            ["--db", db, "todo", "drop", "signin", str(gone["number"]),
+             "--reason", "descoped"]
+        ) == 0
+    out = capsys.readouterr().out
+    assert "Dropped todo #2 'Refunds'" in out
+    assert "#3" not in out
+
+    (body,) = [m[2] for m in _thread(db) if m[1] == "todo_dropped"]
+    assert "Todo #2 (Refunds)" in body
+    assert "#3" not in body
+
+    assert any(
+        "todo_dropped task=signin todo=2 by=host" == r.getMessage() for r in caplog.records
+    )
+
+
+def test_the_drop_argument_help_names_the_number(tmp_path):
+    """The host reads this help text to learn WHICH integer to type."""
+    parser = cli.build_parser()
+    (drop,) = [
+        a for a in parser._subparsers._group_actions[0].choices["todo"]
+        ._subparsers._group_actions[0].choices["drop"]._actions
+        if a.dest == "todo"
+    ]
+    assert "NUMBER" in drop.help
+    assert "#N per task" in drop.help
 
 
 def test_todo_surface_is_list_and_drop_only():

@@ -23,7 +23,6 @@ def _valid_spec() -> dict:
                 "response": [{"n": "token", "t": "string"}],
             }
         ],
-        "staging_url": "https://api-staging.example.com",
     }
 
 
@@ -44,10 +43,49 @@ def test_empty_endpoints_is_rejected():
     assert contracts.validate_spec(spec)
 
 
-def test_missing_staging_url_is_reported():
+def test_a_spec_may_not_carry_a_staging_url_at_all():
+    """The target is HOST-owned configuration, not part of the shape the parties sign.
+    Refused rather than dropped: a silently-accepted "test against evil.com" would leave
+    the agent believing the contract points there."""
     spec = _valid_spec()
-    del spec["staging_url"]
-    assert any("staging_url" in e for e in contracts.validate_spec(spec))
+    spec["staging_url"] = "https://api-staging.example.com"
+    errors = contracts.validate_spec(spec)
+    assert any("not yours to set" in e for e in errors)
+    # It names the owner and the door, so the agent's next move is a sentence to its
+    # human rather than another proposal.
+    assert any("host" in e and "get_contract" in e for e in errors)
+
+
+def test_a_non_http_kind_may_not_carry_one_either():
+    errors = contracts.validate_spec(
+        {"criteria": ["the import rejects a bad row"], "staging_url": "https://x.example.com"}
+    )
+    assert any("not yours to set" in e for e in errors)
+
+
+def test_the_refusal_reads_the_same_for_every_kind():
+    """It must NOT tell a ui/schema agent "there is no target for your kind" — that is
+    false (the host's target resolves for any kind, and a screens contract is verified by
+    opening the deployed app), and a refusal that misdescribes the rule teaches the wrong
+    thing at the one moment the agent is definitely reading."""
+    specs = [
+        {"endpoints": [{"method": "GET", "path": "/x"}]},
+        {"criteria": ["it works"]},
+        {"screens": [{"name": "S", "states": ["idle"]}]},
+        {"types": [{"name": "T", "fields": [{"name": "a", "type": "b"}]}]},
+    ]
+    refusals = {
+        next(e for e in contracts.validate_spec(dict(spec, staging_url="https://x.example.com"))
+             if "not yours to set" in e)
+        for spec in specs
+    }
+    assert len(refusals) == 1, refusals
+    assert "whatever kind of contract this is" in refusals.pop()
+
+
+def test_a_valid_spec_with_no_target_is_fine():
+    """A proposal is a SHAPE — it validates whether or not a target is configured."""
+    assert contracts.validate_spec(_valid_spec()) == []
 
 
 def test_invalid_http_verb_names_the_endpoint():
@@ -63,23 +101,20 @@ def test_empty_path_is_rejected():
     assert any("path" in e for e in contracts.validate_spec(spec))
 
 
+# The URL rules themselves are unchanged — only the DOOR moved. They are checked
+# where the HOST writes the value now, so they are exercised through the public
+# `validate_staging_url` rather than through a spec that may no longer carry one.
 def test_non_https_staging_url_is_rejected():
-    spec = _valid_spec()
-    spec["staging_url"] = "http://api-staging.example.com"
-    errors = contracts.validate_spec(spec)
+    errors = contracts.validate_staging_url("http://api-staging.example.com")
     assert any("https" in e for e in errors)
 
 
 def test_staging_url_without_host_is_rejected():
-    spec = _valid_spec()
-    spec["staging_url"] = "https://"
-    assert contracts.validate_spec(spec)
+    assert contracts.validate_staging_url("https://")
 
 
 def test_ftp_scheme_staging_url_is_rejected():
-    spec = _valid_spec()
-    spec["staging_url"] = "ftp://api-staging.example.com"
-    assert contracts.validate_spec(spec)
+    assert contracts.validate_staging_url("ftp://api-staging.example.com")
 
 
 def test_non_string_field_type_is_rejected():
@@ -117,9 +152,10 @@ def test_all_errors_collected_in_one_pass():
     spec = copy.deepcopy(_valid_spec())
     spec["endpoints"][0]["method"] = "NOPE"
     spec["endpoints"][0]["path"] = ""
-    spec["staging_url"] = "http://insecure"
+    spec["staging_url"] = "http://insecure"      # not yours to set — still collected
     errors = contracts.validate_spec(spec)
     assert len(errors) >= 3
+    assert any("not yours to set" in e for e in errors)
 
 
 # --- connectivity-keyed staging_url strictness ------------------------------
@@ -135,18 +171,14 @@ def test_all_errors_collected_in_one_pass():
 def test_same_machine_task_accepts_any_target(url):
     """One human, one box: localhost/http IS the real target and there is no
     cross-machine test-runner to point at internal infrastructure."""
-    spec = _valid_spec()
-    spec["staging_url"] = url
-    assert contracts.validate_spec(spec, is_remote=True, same_machine=True) == []
+    assert contracts.validate_staging_url(url, is_remote=True, same_machine=True) == []
 
 
 @pytest.mark.parametrize("url", ["", "   ", None, 42])
 def test_same_machine_still_requires_a_non_empty_string(url):
-    """Leniency is about the URL's *shape*, not about skipping the field."""
-    spec = _valid_spec()
-    spec["staging_url"] = url
-    assert any("staging_url" in e for e in contracts.validate_spec(
-        spec, is_remote=True, same_machine=True
+    """Leniency is about the URL's *shape*, not about skipping the value."""
+    assert any("staging_url" in e for e in contracts.validate_staging_url(
+        url, is_remote=True, same_machine=True
     ))
 
 
@@ -161,18 +193,14 @@ def test_same_machine_still_requires_a_non_empty_string(url):
 def test_remote_task_rejects_the_same_targets(url):
     """REGRESSION: with same_machine=False nothing is relaxed — the strict https +
     SSRF rules apply exactly as before."""
-    spec = _valid_spec()
-    spec["staging_url"] = url
-    assert any("staging_url" in e for e in contracts.validate_spec(
-        spec, is_remote=True, same_machine=False
+    assert any("staging_url" in e for e in contracts.validate_staging_url(
+        url, is_remote=True, same_machine=False
     ))
 
 
 def test_staging_url_strictness_defaults_to_strict():
     """A caller that passes neither flag gets the remote rules (fail safe)."""
-    spec = _valid_spec()
-    spec["staging_url"] = "http://localhost:3000"
-    assert contracts.validate_spec(spec)
+    assert contracts.validate_staging_url("http://localhost:3000")
 
 
 # --- same_machine_origin: positive evidence only ----------------------------

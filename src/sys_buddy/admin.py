@@ -20,7 +20,7 @@ import secrets
 import sqlite3
 import time
 
-from . import audit, service, todos
+from . import audit, seats, service, todos
 from .db import connect
 from .identity import new_invite_code, new_viewer_token, sha256_hex
 
@@ -69,7 +69,13 @@ def create_task(
     same_machine: bool = False,
     staging_url: str | None = None,
 ) -> dict:
-    """Create a task in the ``open`` state with the given fixed cast of roles.
+    """Create a task in the ``open`` state with the given cast.
+
+    ``roles`` is a CAST DECLARATION: each entry either a plain role type (``"frontend"``,
+    whose seat handle is derived — ``frontend``, then ``frontend-2`` on a repeat) or a
+    mapping ``{"role": "frontend", "handle": "sarah"}`` naming the seat explicitly. The
+    host is a seat like any other; listing ``frontend`` twice is now the ordinary way to
+    say "two frontend developers" rather than an error.
 
     ``mode`` selects the workflow: ``'contract'`` (the default) runs the full
     propose/lock/deploy state machine; ``'debug'`` is a lightweight mode where two
@@ -88,28 +94,31 @@ def create_task(
     """
     if mode not in ("contract", "debug"):
         raise ValueError(f"unknown mode {mode!r}; expected 'contract' or 'debug'")
-    # Normalise + validate the cast: trim, no blanks, no duplicates. The fixed-cast
-    # rule allows one live agent per role, so a duplicate role is nonsensical — reject
-    # it at creation rather than silently storing a role that can never be filled twice.
-    roles = [r.strip() for r in roles]
-    if not roles or any(not r for r in roles):
+    # Normalise the cast into (handles, {handle: role_type}). Repeating a role type is
+    # now MEANINGFUL — it is how you say "two frontend developers" — and the derivation
+    # gives the second one `frontend-2` with no thought from the host. What must still
+    # be unique is the HANDLE, because that is what quorum and provenance key on.
+    if not roles:
         raise ValueError("a task needs at least one non-empty role")
-    if len(roles) != len(set(roles)):
-        raise ValueError("task roles must be unique (no duplicates)")
+    handles, seat_roles = seats.normalise_cast(roles)
+    if not handles:
+        raise ValueError("a task needs at least one non-empty role")
     # `broker` is the broker's OWN voice: it authors pushes like contract_locked, and
     # both the agent envelope and the dashboard thread attribute them to that role. A
     # seat literally named 'broker' would be indistinguishable from the broker itself,
-    # so the name is reserved.
-    if any(r.lower() == service.BROKER_ROLE for r in roles):
+    # so the name is reserved — as a handle AND as a role type, since either would end
+    # up rendered beside the broker's own notifications.
+    if any(v.lower() == service.BROKER_ROLE for v in (*handles, *seat_roles.values())):
         raise ValueError(
             f"'{service.BROKER_ROLE}' is reserved for the broker's own notifications — "
             f"pick another role name"
         )
-    if mode == "contract" and len(roles) < 2:
+    if mode == "contract" and len(handles) < 2:
         # Model B: the producer is whoever proposes the contract (no hardcoded role).
-        # A contract still needs at least two roles — one to produce and one to build
-        # against it — else the workflow can never reach a check/verify. Debug tasks
-        # skip the state machine, so a single role is fine there.
+        # A contract still needs at least two SEATS — one to produce and one to build
+        # against it — else the workflow can never reach a check/verify. Two seats of
+        # the SAME role type satisfy this: they are two people. Debug tasks skip the
+        # state machine, so a single seat is fine there.
         raise ValueError("a contract task needs at least two roles (a producer and someone who builds against it)")
     conn = connect()
     try:
@@ -124,10 +133,10 @@ def create_task(
         now = time.time()
         staging_url = (staging_url or "").strip() or None
         conn.execute(
-            "INSERT INTO tasks (id, title, state, mode, roles_json, same_machine, staging_url, "
-            "created_at) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO tasks (id, title, state, mode, roles_json, seat_roles_json, "
+            "same_machine, staging_url, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (
-                id, title, "open", mode, json.dumps(list(roles)),
+                id, title, "open", mode, json.dumps(handles), json.dumps(seat_roles),
                 1 if same_machine else 0, staging_url, now,
             ),
         )
@@ -137,7 +146,11 @@ def create_task(
             "id": id,
             "state": "open",
             "title": title,
-            "roles": list(roles),
+            # `roles` is the list of SEAT HANDLES — same key, same shape, new meaning
+            # (see db.SCHEMA's note on tasks.roles_json). `seat_roles` carries the other
+            # half so a caller can render "backend ×2" without a second query.
+            "roles": list(handles),
+            "seat_roles": dict(seat_roles),
             "mode": mode,
             "same_machine": bool(same_machine),
             "staging_url": staging_url,
@@ -146,23 +159,63 @@ def create_task(
         conn.close()
 
 
-def mint_invite(task: str, role: str) -> tuple[str, str]:
-    """Generate a single-use invite code for ``role`` on ``task``.
+def _seat_for(conn: sqlite3.Connection, task: str, role: str) -> str:
+    """The one SEAT a host's token names, or a refusal naming the candidates."""
+    cast, seat_roles = seats.cast_of(conn, task)
+    return service.resolve_seat(
+        role, cast, seat_roles, seats.names_of(conn, task),
+        task_id=task, binding="An invite fills ONE seat",
+    )
 
-    Only the code's sha256 is stored; the raw code is returned to the caller once
-    and never persisted. Validates that the task exists and the role is one the task
-    actually declared — you cannot invite a role into a cast it has no seat for.
+
+def seat_for(task: str, role: str) -> str:
+    """Read-only DISPLAY token: which seat ``role`` names on ``task``, spelled the way
+    a human would type it, by exactly the rules :func:`mint_invite` mints against.
+
+    The host types a token, not a handle — a role type, a seat, that seat's
+    ``<type>-1`` address, or somebody's name — and the seat it lands on is often
+    spelled differently. Echoing back what they typed would name the wrong thing on
+    the one line that matters, so the CLI resolves through here.
+
+    It returns the seat's ADDRESS rather than its stored handle, for the same reason
+    the roster does: on a task that grew a second seat of a role type, the first seat's
+    handle is that bare type, and printing ``@frontend`` would hand the host back the
+    one token on the task that no longer names a single seat. The invite is still minted
+    against the handle — this is display only.
+    """
+    conn = connect()
+    try:
+        return seats.address_of(conn, task, _seat_for(conn, task, role))
+    finally:
+        conn.close()
+
+
+def mint_invite(task: str, role: str) -> tuple[str, str]:
+    """Generate a single-use invite code for ONE SEAT on ``task``.
+
+    Invites are per SEAT, not per role type: with two frontend seats, "an invite for
+    frontend" would not say which one the redeemer takes. ``role`` is resolved to a
+    single handle, and an input that names two seats is REFUSED with both named.
+
+    It resolves through the ordinary :func:`service.resolve_seat`, with no exception of
+    its own. There used to be one — an exact declared handle won here even when a role
+    type was spelled the same way — because the first seat of a duplicated role type was
+    handled ``frontend``, so refusing ``@frontend`` as ambiguous meant that seat could
+    never be invited at all, and the display name that would disambiguate it does not
+    exist until somebody redeems the invite you could not mint. That hole is closed
+    where it was made: a cast declaring two frontends now numbers BOTH seats
+    (``@frontend-1``, ``@frontend-2``), and a task that grew its second frontend later
+    reaches the first through the derived alias ``@frontend-1``. Every seat has a token
+    of its own, so "the role type always wins" needs no exception here.
+
+    Only the code's sha256 is stored; the raw code is returned to the caller once and
+    never persisted.
 
     Returns ``(raw_code, human_readable_expiry)``.
     """
     conn = connect()
     try:
-        row = conn.execute("SELECT roles_json FROM tasks WHERE id = ?", (task,)).fetchone()
-        if row is None:
-            raise ValueError(f"unknown task '{task}'")
-        roles = json.loads(row["roles_json"])
-        if role not in roles:
-            raise ValueError(f"role '{role}' is not one of task '{task}' roles: {', '.join(roles)}")
+        role = _seat_for(conn, task, role)
 
         code = new_invite_code(task)
         now = time.time()
@@ -174,6 +227,165 @@ def mint_invite(task: str, role: str) -> tuple[str, str]:
         )
         conn.commit()
         return code, _fmt_time(expires_at)
+    finally:
+        conn.close()
+
+
+def add_seat(task: str, role_type: str, handle: str | None = None) -> dict:
+    """Append a seat to a live task and mint its invite. Returns the seat + the code.
+
+    Declaring the cast up front must not mean the cast is FIXED for the life of the
+    task: a QA seat added on day three is ordinary, and forcing a new task instead
+    would split the history of one piece of work in two. Creation is simply "add these
+    N seats at once", so this shares its derivation rules with :func:`create_task` —
+    choosing ``frontend`` on a task that already has one yields ``@frontend-2``.
+
+    What is immutable is a seat that has already been USED: its handle is quoted in
+    message history and signatures, so it is never renamed or re-pointed. (Revoking an
+    agent frees its seat for RE-PAIRING, which already works — the live-seat index is
+    partial on ``revoked_at IS NULL`` precisely so the historical row survives.)
+
+    A new seat does NOT retroactively join existing todos: ``parties_json`` names who
+    agreed, and a person who was not there did not agree.
+    """
+    conn = connect()
+    try:
+        row = conn.execute("SELECT closed_at FROM tasks WHERE id = ?", (task,)).fetchone()
+        if row is None:
+            raise ValueError(f"unknown task '{task}'")
+        if row["closed_at"] is not None:
+            raise ValueError(f"task '{task}' is closed")
+        if (role_type or "").strip().lower() == service.BROKER_ROLE:
+            raise ValueError(
+                f"'{service.BROKER_ROLE}' is reserved for the broker's own notifications — "
+                f"pick another role name"
+            )
+        seat = seats.append_seat(conn, task, role_type, handle)
+        _write_event(conn, task, "task", {"text": f"Seat added: {seat} ({role_type})"})
+        conn.commit()
+    finally:
+        conn.close()
+    # Mint AFTER the seat is committed — mint_invite validates against the declared
+    # cast, so it has to be able to see the row we just wrote.
+    code, expires = mint_invite(task, seat)
+    audit.event("seat_added", task=task, role=seat)
+    return {"task": task, "seat": seat, "role": role_type, "code": code, "expires": expires}
+
+
+def set_staging_url(
+    task: str, url: str | None, todo: int | None = None
+) -> dict:
+    """Point a task (or ONE of its deliverables) at a deployment target. HOST ONLY.
+
+    The target is CONFIGURATION, not an agreement. Changing it is therefore an ordinary
+    host action with an event in the log — not a renegotiation, not a new consent flow,
+    and deliberately NOT a tool an agent can request: the whole security value of moving
+    the target out of the signed spec is that nothing an agent says can reach it. There
+    is no "propose a new staging_url" path and there must not be one.
+
+    It writes no contract and bumps no version. Every reader resolves the target live
+    (``state.resolve_staging_url``), so an ngrok URL that rotated on a tunnel restart is
+    fixed here, once, and every locked contract on the task points at the new one with
+    no signature disturbed. That is the defect this replaces: a locked contract carrying
+    a dead ``…ngrok-free.dev:3000`` was immutable inside a signed document, so the only
+    sanctioned fix was to re-sign an identical shape.
+
+    ``todo`` (the human's ``#N``) sets the PER-DELIVERABLE override; without it the
+    task-level value moves. Passing an empty/None ``url`` CLEARS the value — clearing a
+    todo's override makes it inherit the task's again, which is a real thing a host
+    wants and is why "unset" and "set to blank" are the same word here.
+
+    Returns ``{scope, task, todo, previous, staging_url, effective}`` — ``effective``
+    being what a reader on that deliverable now resolves, which may come from the task
+    when a todo override was just cleared.
+    """
+    from . import contracts, state
+
+    url = (url or "").strip() or None
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        if url:
+            # The SAME rules the broker has always applied to this value — https, and
+            # never a private/reserved/metadata address (SSRF). Checked HERE, where the
+            # human can fix it, because this is now the only door the value comes in by.
+            #
+            # Leniency comes from `state._task_is_same_machine`, not from the raw column:
+            # it ALSO refuses to trust a same_machine row while this process is reachable
+            # at a public origin, because a peer may then be off-box whatever the row
+            # says. Reading the column directly would quietly drop that second condition.
+            from .config import get_config
+
+            errors = contracts.validate_staging_url(
+                url,
+                is_remote=get_config().is_remote,
+                same_machine=state._task_is_same_machine(conn, task),
+            )
+            if errors:
+                raise ValueError("; ".join(errors))
+        todo_row = None
+        if todo is not None:
+            todo_row = todos.get_row(conn, task, todo)
+            previous = todo_row["staging_url"]
+            conn.execute("UPDATE todos SET staging_url = ? WHERE id = ?", (url, todo_row["id"]))
+            where = f"todo #{todo_row['number']} ({todo_row['title']})"
+        else:
+            previous = conn.execute(
+                "SELECT staging_url FROM tasks WHERE id = ?", (task,)
+            ).fetchone()["staging_url"]
+            conn.execute("UPDATE tasks SET staging_url = ? WHERE id = ?", (url, task))
+            where = "the task"
+        _write_event(
+            conn, task, "task",
+            {
+                "text": (
+                    f"Deployment target for {where}: "
+                    f"{url or 'cleared'}"
+                    + (f" (was {previous})" if previous else "")
+                ),
+                "staging_url": url,
+                "previous": previous,
+                "todo": todo_row["number"] if todo_row is not None else None,
+            },
+        )
+        conn.commit()
+        effective = state.resolve_staging_url(
+            conn, task, todo_row["id"] if todo_row is not None else None
+        )
+    finally:
+        conn.close()
+    audit.event("staging_url_set", task=task, todo=todo if todo is not None else "*")
+    return {
+        "scope": "todo" if todo is not None else "task",
+        "task": task,
+        "todo": todo_row["number"] if todo_row is not None else None,
+        "previous": previous,
+        "staging_url": url,
+        "effective": effective,
+    }
+
+
+def get_staging_url(task: str, todo: int | None = None) -> dict:
+    """Read-only: what a reader on this task/deliverable resolves right now, and why.
+
+    Returns the ``task`` value, the todo ``override`` and the ``effective`` result, so
+    a host can see WHICH of the two is in force rather than having to infer it.
+    """
+    from . import state
+
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        row = todos.get_row(conn, task, todo) if todo is not None else None
+        return {
+            "task": conn.execute(
+                "SELECT staging_url FROM tasks WHERE id = ?", (task,)
+            ).fetchone()["staging_url"],
+            "override": row["staging_url"] if row is not None else None,
+            "effective": state.resolve_staging_url(
+                conn, task, row["id"] if row is not None else None
+            ),
+        }
     finally:
         conn.close()
 
@@ -331,7 +543,7 @@ def host_drop_todo(task: str, todo: int, reason: str) -> tuple[dict, dict | None
         roll = todos.rollup(conn, task)
     finally:
         conn.close()
-    audit.event("todo_dropped", task=task, todo=result["id"], by=todos.HOST)
+    audit.event("todo_dropped", task=task, todo=result["number"], by=todos.HOST)
     return result, roll
 
 
@@ -347,12 +559,28 @@ def list_tasks() -> list[dict]:
             {
                 "id": r["id"],
                 "title": r["title"],
-                "state": r["state"],
                 "roles": json.loads(r["roles_json"]),
+                "seat_roles": seats.seat_roles_of(conn, r["id"]),
+                "state": r["state"],
                 "strikes": r["strikes"],
                 "closed": r["closed_at"] is not None,
             }
             for r in rows
         ]
+    finally:
+        conn.close()
+
+
+def roster(task: str) -> dict:
+    """The task's CAST for the host's CLI — the SAME rows the dashboard panel and the
+    agents' ``get_roster`` tool render, from ``seats.roster_summary``.
+
+    One roster, N renderers. The shorthand list was hand-typed twice in ``ui.html``
+    once and had already drifted (``pc [#N]`` vs ``pc #N``); this does not repeat it.
+    """
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        return seats.roster_summary(conn, task)
     finally:
         conn.close()

@@ -25,11 +25,16 @@ TODO_TOOLS = {
     "get_todos", "propose_todo", "accept_todo", "decline_todo", "repropose_todo",
     "drop_todo",
 }
-# The tools that gained the selector. `get_contract` is here too: a party has to be
-# able to READ the shape it is being asked to sign, per deliverable.
+# Every tool that takes the selector. `get_contract` is here too: a party has to be able
+# to READ the shape it is being asked to sign, per deliverable.
 SELECTOR_TOOLS = {
-    "propose_contract", "lock_contract", "get_contract", "reopen_negotiations",
-    "report_status",
+    "propose_contract", "lock_contract", "decline_contract", "get_contract",
+    "reopen_negotiations", "report_status",
+}
+# The ones that act on a CONTRACT, which is an agreement about ONE todo — so there is no
+# call they could serve without the deliverable, and the signature says so.
+REQUIRED_SELECTOR_TOOLS = {
+    "propose_contract", "lock_contract", "decline_contract", "reopen_negotiations",
 }
 
 
@@ -50,7 +55,6 @@ def _spec() -> dict:
     return {
         "version": 1,
         "endpoints": [{"method": "POST", "path": "/api/items"}],
-        "staging_url": "https://api-staging.example.com",
     }
 
 
@@ -68,13 +72,25 @@ def test_todo_tools_are_registered_on_both_surfaces(tmp_path, mode):
 
 
 @pytest.mark.parametrize("mode", ["local", "remote"])
-def test_the_todo_selector_is_optional_everywhere_it_appears(tmp_path, mode):
-    """Optional, and defaulted to "not given" — which is why every pre-todo caller
-    keeps working without knowing todos exist."""
+def test_every_contract_tool_declares_the_selector_required(tmp_path, mode):
+    """A contract is an agreement about ONE todo, so an agent must not be ABLE to omit
+    the deliverable — the schema stops it rather than a runtime error explaining it."""
     schemas = _schemas(mode, tmp_path)
-    for name in SELECTOR_TOOLS:
+    for name in REQUIRED_SELECTOR_TOOLS:
         props = schemas[name].parameters["properties"]
         assert "todo" in props, name
+        assert "default" not in props["todo"], name
+        assert "todo" in schemas[name].parameters.get("required", []), name
+
+
+@pytest.mark.parametrize("mode", ["local", "remote"])
+def test_the_two_selector_exceptions_stay_optional(tmp_path, mode):
+    """`get_contract` because READING is how an agent recovers a number it lost, and
+    `report_status` because bare `stuck` escalates the WHOLE task on purpose — a required
+    parameter would make a task-wide problem impossible to report."""
+    schemas = _schemas(mode, tmp_path)
+    for name in SELECTOR_TOOLS - REQUIRED_SELECTOR_TOOLS:
+        props = schemas[name].parameters["properties"]
         assert props["todo"]["default"] == 0, name
         assert "todo" not in schemas[name].parameters.get("required", []), name
 
@@ -132,63 +148,71 @@ def test_the_full_todo_flow_through_the_ops(conn):
         ag["backend"], "api123", "POST /items and its 400 shape", ["backend", "mobile"]
     )
     assert t["status"] == todos.PENDING
-    assert [d["id"] for d in tools._op_get_todos("signin")] == [t["id"]]
+    assert [d["number"] for d in tools._op_get_todos("signin")] == [t["number"]]
 
-    assert tools._op_accept_todo(ag["mobile"], t["id"])["status"] == todos.ACCEPTED
+    assert tools._op_accept_todo(ag["mobile"], t["number"])["status"] == todos.ACCEPTED
 
-    r = tools._op_propose(ag["backend"], _spec(), t["id"])
+    r = tools._op_propose(ag["backend"], _spec(), t["number"])
     assert r["signatories"] == ["backend", "mobile"]
-    assert tools._op_get_contract("signin", t["id"])["awaiting"] == ["backend", "mobile"]
+    assert tools._op_get_contract("signin", t["number"])["awaiting"] == ["backend", "mobile"]
 
-    tools._op_lock(ag["backend"], r["version"], t["id"])
-    assert tools._op_lock(ag["mobile"], r["version"], t["id"])["locked"] is True
+    tools._op_lock(ag["backend"], r["version"], t["number"])
+    assert tools._op_lock(ag["mobile"], r["version"], t["number"])["locked"] is True
 
-    tools._op_report_status(ag["backend"], "ready", "live on staging", t["id"])
-    tools._op_report_status(ag["mobile"], "checked", "works", t["id"])
-    done = tools._op_report_status(ag["mobile"], "verified", "done", t["id"])
+    tools._op_report_status(ag["backend"], "ready", "live on staging", t["number"])
+    tools._op_report_status(ag["mobile"], "checked", "works", t["number"])
+    done = tools._op_report_status(ag["mobile"], "verified", "done", t["number"])
     assert done["todo_state"] == state.VERIFIED and done["rollup"]["complete"] is True
 
 
 def test_decline_then_repropose_through_the_ops(conn):
     ag = _agents(conn)
     t = tools._op_propose_todo(ag["backend"], "api123", "too broad", ["backend", "mobile"])
-    assert tools._op_decline_todo(ag["mobile"], t["id"], "split it in two")["declined_by"] == [
+    assert tools._op_decline_todo(ag["mobile"], t["number"], "split it in two")["declined_by"] == [
         "mobile"
     ]
-    again = tools._op_repropose_todo(ag["backend"], t["id"], scope="just the POST")
+    again = tools._op_repropose_todo(ag["backend"], t["number"], scope="just the POST")
     assert again["version"] == 2 and again["accepted_by"] == ["backend"]
-    assert tools._op_accept_todo(ag["mobile"], t["id"])["status"] == todos.ACCEPTED
+    assert tools._op_accept_todo(ag["mobile"], t["number"])["status"] == todos.ACCEPTED
 
 
 def test_drop_through_the_ops_is_mutual(conn):
     ag = _agents(conn)
     t = tools._op_propose_todo(ag["backend"], "api123", "scope", ["backend", "mobile"])
-    tools._op_accept_todo(ag["mobile"], t["id"])
-    assert tools._op_drop_todo(ag["backend"], t["id"], "not needed")["status"] != todos.DROPPED
-    assert tools._op_drop_todo(ag["mobile"], t["id"], "agreed")["status"] == todos.DROPPED
+    tools._op_accept_todo(ag["mobile"], t["number"])
+    assert tools._op_drop_todo(ag["backend"], t["number"], "not needed")["status"] != todos.DROPPED
+    assert tools._op_drop_todo(ag["mobile"], t["number"], "agreed")["status"] == todos.DROPPED
 
 
-def test_omitting_the_selector_keeps_the_pre_todo_behaviour(conn):
-    """A no-todo task drives the whole flow through the ops with no selector at all."""
+def test_the_whole_flow_runs_through_the_ops_on_one_deliverable(conn):
+    """End to end at the tool layer: agree WHAT, agree HOW, then march it — every step
+    naming the same deliverable, because that is the only scope a contract has."""
     ag = _agents(conn, roles=("backend", "frontend"))
-    r = tools._op_propose(ag["backend"], _spec())
-    assert r == {"version": 1, "state": state.CONTRACT_PROPOSED}
-    tools._op_lock(ag["backend"], 1)
-    assert tools._op_lock(ag["frontend"], 1)["locked"] is True
-    assert tools._op_get_contract("signin")["locked"] is True
-    tools._op_report_status(ag["backend"], "ready", "live")
-    tools._op_report_status(ag["frontend"], "checked", "works")
-    assert tools._op_report_status(ag["frontend"], "verified", "done") == {
-        "status": state.STATUS_VERIFIED, "state": state.VERIFIED,
-    }
+    t = tools._op_propose_todo(ag["backend"], "api123", "scope", ["backend", "frontend"])
+    num = t["number"]
+    tools._op_accept_todo(ag["frontend"], num)
+
+    r = tools._op_propose(ag["backend"], _spec(), num)
+    assert r["version"] == 1 and r["todo"] == num
+    tools._op_lock(ag["backend"], 1, num)
+    assert tools._op_lock(ag["frontend"], 1, num)["locked"] is True
+    assert tools._op_get_contract("signin", num)["locked"] is True
+
+    tools._op_report_status(ag["backend"], "ready", "live", num)
+    tools._op_report_status(ag["frontend"], "checked", "works", num)
+    done = tools._op_report_status(ag["frontend"], "verified", "done", num)
+    assert done["status"] == state.STATUS_VERIFIED
+    assert done["todo_state"] == state.VERIFIED
+    # The last live todo verifying is what concludes the TASK — no agent set that.
+    assert done["state"] == state.VERIFIED
 
 
 def test_the_ops_surface_the_brokers_rejections_verbatim(conn):
     """The tool layer adds no rules of its own — it resolves an identity and asks."""
     ag = _agents(conn)
     t = tools._op_propose_todo(ag["backend"], "api123", "scope", ["backend", "mobile"])
-    tools._op_accept_todo(ag["mobile"], t["id"])
+    tools._op_accept_todo(ag["mobile"], t["number"])
     with pytest.raises(ValueError, match="not a party"):
-        tools._op_accept_todo(ag["frontend"], t["id"])
-    with pytest.raises(ValueError, match="runs on todos"):
+        tools._op_accept_todo(ag["frontend"], t["number"])
+    with pytest.raises(ValueError, match="must name the deliverable it shapes"):
         tools._op_propose(ag["backend"], _spec())
