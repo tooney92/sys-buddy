@@ -297,7 +297,7 @@ def _units_of(spec: dict) -> dict:
     }
 
 
-def _contract_for(conn, task_id: str, *, todo_id: int | None = None) -> dict:
+def _contract_for(conn, task_id: str, *, todo_id: int | None = None, is_host: bool = True) -> dict:
     """The contract block: versions, the default to show, and per-version data.
 
     ``default`` is the latest *locked* version (that's the one agents integrate
@@ -363,7 +363,17 @@ def _contract_for(conn, task_id: str, *, todo_id: int | None = None) -> dict:
             # configuration — not read out of the signed spec, which no longer carries
             # one. So the dashboard's "Connect to" line follows a restarted tunnel
             # without any version, signature or renegotiation moving.
-            "staging_url": state.resolve_staging_url(conn, task_id, todo_id, spec),
+            # WITHHELD until this version is locked, for anyone who is not the host.
+            # `get_contract` has always withheld it from agents — the incentive to read
+            # the shape before signing is that signing is what releases the target. The
+            # dashboard was handing it over anyway, and every buddy is issued a viewer
+            # token when they pair, so a party could simply open the page instead of
+            # signing. The host is exempt because the host CHOSE the value; hiding their
+            # own configuration from them protects nothing.
+            "staging_url": (
+                state.resolve_staging_url(conn, task_id, todo_id, spec)
+                if (locked or is_host) else None
+            ),
             # …and what was live when this version locked, so the panel can show that
             # the agreement predates the current target instead of quietly conflating
             # "where we point now" with "what we signed".
@@ -384,7 +394,7 @@ def _todo_staging_url(conn, todo_id: int) -> str | None:
     return (row["staging_url"] or None) if row is not None else None
 
 
-def _todos_for(conn, task_id: str) -> list[dict]:
+def _todos_for(conn, task_id: str, *, is_host: bool = True) -> list[dict]:
     """The todo panel: every todo on the task, each with its own contract block.
 
     The wire shape is ``todos.to_dict`` verbatim (so the dashboard and the agents'
@@ -406,7 +416,7 @@ def _todos_for(conn, task_id: str) -> list[dict]:
     for t in todos.get_todos(conn, task_id):
         d = dict(t)
         d["time"] = _hhmm(t["created_at"])
-        d["contract"] = _contract_for(conn, task_id, todo_id=t["id"])
+        d["contract"] = _contract_for(conn, task_id, todo_id=t["id"], is_host=is_host)
         d["next"] = state.next_step(conn, task_id, t["id"])
         # The host's per-deliverable target override and what this todo actually
         # resolves to. VIEW-ONLY and deliberately not on `todos.to_dict`: that shape is
@@ -660,7 +670,7 @@ def _activity_for(conn, task_id: str) -> list[dict]:
     ]
 
 
-def _task_detail(conn, task_id: str) -> dict | None:
+def _task_detail(conn, task_id: str, *, is_host: bool = True) -> dict | None:
     """Full per-task payload (SPEC §11 ``/api/task/{id}``), or ``None`` if absent.
 
     Composes the building blocks above. Callers must already have checked viewer
@@ -694,7 +704,7 @@ def _task_detail(conn, task_id: str) -> dict | None:
         # that CHANGES it is the host's (CLI / desktop app), never an agent tool.
         "staging_url": state._task_staging_url(conn, task_id),
         "times": _times_for(conn, task_id, t["created_at"]),
-        "contract": _contract_for(conn, task_id),
+        "contract": _contract_for(conn, task_id, is_host=is_host),
         "messages": _messages_for(conn, task_id),
         "events": _events_for(conn, task_id),
         "agents": _agents_for(conn, task_id),
@@ -705,7 +715,7 @@ def _task_detail(conn, task_id: str) -> dict | None:
         "roster": seats.roster_summary(conn, task_id),
         "readiness_preview": readiness.preview_questions(),
     }
-    todo_list = _todos_for(conn, task_id)
+    todo_list = _todos_for(conn, task_id, is_host=is_host)
     if todo_list:
         # `has_todos` is the stepper switch and is NOT `len(todos) > 0`: a task whose
         # todos were all DROPPED runs on its own state machine again (todos.has_todos),
@@ -1028,7 +1038,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             if not viewer_can_see(viewer, task_id):
                 return JSONResponse({"error": "forbidden"}, status_code=403)
-            detail = _task_detail(conn, task_id)
+            detail = _task_detail(conn, task_id, is_host=viewer.is_host)
             if detail is None:
                 return JSONResponse({"error": "not found"}, status_code=404)
             return JSONResponse(detail)

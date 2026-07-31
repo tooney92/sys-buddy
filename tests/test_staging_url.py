@@ -475,3 +475,40 @@ def test_the_contract_rebuild_would_refuse_to_drop_the_new_column():
     loss on exactly the databases the rebuild exists to save."""
     assert "staging_url_at_lock" in db._CONTRACT_COLUMNS
     assert "staging_url_at_lock" in db._CONTRACTS_REBUILD_DDL
+
+
+# --------------------------------------------------------------------------- #
+# the DASHBOARD withholds it too — the hole a UI review found
+# --------------------------------------------------------------------------- #
+def test_the_dashboard_withholds_the_target_from_a_buddy_until_it_locks(conn):
+    """`get_contract` withholding from agents is only half the rule.
+
+    Every buddy is issued a `viewer_token` when they pair (`pairing.py`), so a party who
+    did not want to read the shape could simply OPEN THE DASHBOARD and read the target
+    off an unsigned draft — the incentive to read before signing is that signing is what
+    releases it. `/api` was emitting `staging_url` on every version regardless of lock,
+    which handed that incentive away through the one surface nobody was checking.
+
+    The host is deliberately exempt: the host CHOSE the value, and hiding a person's own
+    configuration from them protects nothing.
+    """
+    ag = _agents(conn, roles=("backend", "frontend"))
+    _target(conn, "https://payments-stg.example.com")
+    state.propose_contract(conn, ag["backend"], _valid_spec(), 1)
+
+    todo_id = conn.execute(
+        "SELECT id FROM todos WHERE task_id = 'signin' AND number = 1"
+    ).fetchone()["id"]
+
+    def target_seen_by(*, is_host):
+        block = api._contract_for(conn, "signin", todo_id=todo_id, is_host=is_host)
+        (version,) = block["data"].values()
+        return version["locked"], version["staging_url"]
+
+    # Proposed, not signed: a buddy sees the shape but NOT where it runs.
+    assert target_seen_by(is_host=False) == (False, None)
+    assert target_seen_by(is_host=True) == (False, "https://payments-stg.example.com")
+
+    # Both parties sign — now it locks, and the buddy has earned the target.
+    _lock_all(conn, ag, version=1)
+    assert target_seen_by(is_host=False) == (True, "https://payments-stg.example.com")
