@@ -1,10 +1,26 @@
 # Session handoff — one kind of contract, any cast, contract kinds, host-owned targets (2026-07-31)
 
-Branch `feat/todos-are-the-story`, still on top of `1b1392c wip`. **Nothing is committed.**
-53 files dirty, 12 untracked. `uv run pytest -q` → **986 passed** (session started at 669).
+Branch `feat/todos-are-the-story`. **Committed** — working tree clean, three commits on top
+of `1b1392c wip`:
+
+```
+6083737 fix: four dashboard copy and affordance fixes from a UI review
+7a99127 docs: session handoffs for the todos and v2 work
+6b9be1f feat!: one kind of contract, any cast, contract kinds, host-owned targets
+```
+
+`uv run pytest -q` → **986 passed** (session started at 669). Not pushed. No Claude
+attribution in the commit messages, per the owner's standing preference that the public
+record read as their own work.
+
+**Why one feature commit and not seven.** The seven features were built ON TOP OF EACH OTHER
+in the same files — `state.py`, `db.py` and `ui.html` were each touched by nearly all of
+them. Splitting post-hoc would have needed `git add -p` surgery and produced commits that
+did not individually pass tests, which defeats the only real benefit of splitting
+(bisectability). Session notes went separately because they are genuinely independent.
 
 A broker is **still running on :9292** against `~/.sys-buddy-dev-pwr3/sys_buddy.db`, seeded
-with a three-seat session for a UI review that was interrupted — see "Where it stopped".
+with a three-seat session — see "Where it stopped".
 
 The owner's live db at `~/.sys-buddy/sys_buddy.db` was **never opened for write** by any
 agent. One deliberate manual write is documented under "The live unblock".
@@ -217,9 +233,32 @@ did not happen, and that false belief propagates into session summaries.
 
 ---
 
+## 8 · The UI review (owner-driven, on the seeded three-seat task)
+
+Four fixes, all in `6083737`. Each came from the owner looking at a real screen — worth
+noting because none of them would have been found by a test:
+
+- **The Drop panel repeated the NEXT card.** Almost verbatim: *"@qa has never joined —
+  nobody accepted that invite, so no agent is there to act."* appeared twice on one screen.
+  The NEXT card says what is blocking and what to do; the Drop panel now says only what
+  dropping DOES. A two-line situation was reading as a wall of text.
+- **The `…` on a party pill was not truncation** — it was the *awaiting* status glyph,
+  sitting immediately after a name that IS ellipsis-truncated. `[qa] · not joined …` was
+  unreadable: nothing distinguished "awaiting acceptance" from "text got cut". Now a hollow
+  ring `○`, which cannot be mistaken for truncation and pairs with the ✓/✕ beside it.
+- **The task switcher was a dropdown with one entry** — the task you were already on. Now
+  plain text below two tasks; the menu returns the moment a second exists.
+- **The tasks blurb was hand-typed twice**, said "One task" on a page that could show
+  thirty, and described a task as having "the contract" — pre-todo framing for the model
+  removed today. One `TASKS_BLURB` constant now. (Two hand-typed copies of one sentence is
+  exactly how the shortcode list drifted.)
+
+Also dropped the "Briefly, allies." closer from the debug section, at the owner's request.
+
 ## Where it stopped
 
-`pwr` for a **three-seat UI review**, interrupted before any screenshots.
+`pwr` for a **three-seat UI review** — four fixes landed (above), the remaining screens not
+yet walked. The seeded task is still live for whoever picks it up.
 
 - Broker **UP on :9292** against `~/.sys-buddy-dev-pwr3/sys_buddy.db`.
 - Seed script: `scratchpad/seed_three.py` — drives the REAL ops, not a fixture dump.
@@ -236,12 +275,12 @@ sys-buddy host-viewer --port 9292` if the old one is lost, then drive the dashbo
 
 ## Open for the owner
 
-1. **Nothing is committed.** 53 files on `1b1392c wip`. A proposed order:
-   per-todo numbering+versions → task-level contracts removed → participants/seats/roster →
-   join flow → contract kinds → pre-flight scoping → staging_url. Committing would also
-   unlock real worktree isolation for future parallel agents, which is the only reason they
-   had to be serialised.
-2. **Version.** `pyproject.toml` is still `1.4.0`. By the project's own CHANGELOG rule
+1. **Not pushed, and no PR.** Three commits sit on the branch. Worth noting for the next
+   session: now that the work is committed, future parallel agents CAN use real worktree
+   isolation — the uncommitted tree is the only reason they had to be serialised, and two
+   agents editing `ui.html` at once was a live hazard all session.
+2. **Version.** `pyproject.toml` is still `1.4.0` — deliberately not bumped, since the
+   number is the owner's call. By the project's own CHANGELOG rule
    (MAJOR = "incompatible changes to the tool/wire contract or agent-visible behavior") this
    is **2.0.0**, not 1.5.0: `todo=N` is now required on four tools, and a spec carrying
    `staging_url` is refused. `releases/v1.5.0.md` is a committed 07-28 draft that says "No
