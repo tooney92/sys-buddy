@@ -365,3 +365,36 @@ def test_next_is_absent_for_a_task_with_no_todos(conn):
     so there is no ``next`` to add anywhere."""
     _agents(conn)
     assert api._todos_for(conn, "signin") == []
+
+
+def test_the_panel_speaks_in_names_not_seat_handles(conn):
+    """`next_step` is called from ONE place — the dashboard — and never reaches an agent.
+
+    So its prose has no reason to speak in seat handles. A handle is the token you TYPE;
+    a name is who you are waiting for, and the human reading this panel wants the second.
+    The mismatch was visible on one screen: the header said "Sarah's agent (@frontend-1)"
+    while the sentence under it said "waiting on frontend-1 to sign".
+
+    Unjoined seats are the deliberate exception — nobody has paired into them, there is
+    no name to use, and the handle is exactly what the reader has to chase.
+    """
+    from tests.test_state import _agents, _valid_spec
+
+    ag = _agents(conn, roles=("backend", "frontend"))
+    conn.execute("UPDATE agents SET name = 'Sarah' WHERE handle = 'frontend'")
+    conn.execute("UPDATE agents SET name = 'Tony' WHERE handle = 'backend'")
+    conn.commit()
+
+    state.propose_contract(conn, ag["backend"], _valid_spec(), 1)
+    todo_id = conn.execute(
+        "SELECT id FROM todos WHERE task_id = 'signin' AND number = 1"
+    ).fetchone()["id"]
+
+    nxt = state.next_step(conn, "signin", todo_id)
+    # Both parties still owe a signature on a fresh proposal, so both are named.
+    assert nxt["who_label"] == "Tony or Sarah"
+    assert "Sarah" in nxt["text"] and "Tony" in nxt["text"]
+    assert "frontend" not in nxt["text"], nxt["text"]
+    assert "backend" not in nxt["text"], nxt["text"]
+    # `who` stays the HANDLE — structured data the UI keys on, never prose.
+    assert nxt["who"] == ["backend", "frontend"]

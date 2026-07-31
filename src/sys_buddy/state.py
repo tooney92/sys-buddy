@@ -36,6 +36,7 @@ are deliberately whole-collaboration words.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 
@@ -485,6 +486,47 @@ def _unjoined_note(unjoined: list[str]) -> str:
     )
 
 
+def _name_seats(conn, task_id: str, payload: dict) -> dict:
+    """Say "waiting on Sarah", not "waiting on frontend-1".
+
+    ``next_step`` is called from ONE place — the dashboard (`api.py`) — and never
+    reaches an agent, so there is no reason for its prose to speak in seat handles. A
+    handle is the token you TYPE; a name is who you are waiting for, and the human
+    reading this panel wants the second.
+
+    Substitution rather than rewriting every call site's f-string: ``who`` is an exact,
+    known list of handles, so this is a bounded replacement over a closed set — not a
+    regex over arbitrary prose. Longest handle first, because ``frontend`` is a prefix of
+    ``frontend-2`` and replacing the short one first would corrupt the long one.
+
+    UNJOINED seats keep their ``@handle`` on purpose: nobody has paired into them, so
+    there is no name to use, and the handle is exactly what the reader must chase.
+    """
+    joined = {
+        r["handle"]: r["name"]
+        for r in conn.execute(
+            "SELECT handle, name FROM agents WHERE task_id = ? AND revoked_at IS NULL "
+            "AND name IS NOT NULL AND name <> ''",
+            (task_id,),
+        ).fetchall()
+        if r["handle"] and r["handle"] not in (payload.get("unjoined") or [])
+    }
+    if not joined:
+        return payload
+
+    def humanise(s: str) -> str:
+        for handle in sorted(joined, key=len, reverse=True):
+            # Skip an `@handle` — that spelling is deliberate wherever it appears
+            # (unjoined seats, and anything the reader is meant to type back).
+            s = re.sub(rf"(?<!@)\b{re.escape(handle)}\b", joined[handle], s)
+        return s
+
+    payload["text"] = humanise(payload["text"])
+    if payload.get("who_label"):
+        payload["who_label"] = humanise(payload["who_label"])
+    return payload
+
+
 def _next(stage, who, cmd, text, *, alt=None, number=None, human=False, done=False,
           unjoined=None):
     """``number`` is the todo's HUMAN ``#N`` — it lands inside a command string a person
@@ -515,6 +557,16 @@ def _next(stage, who, cmd, text, *, alt=None, number=None, human=False, done=Fal
 
 
 def next_step(conn, task_id: str, todo_id: int) -> dict:
+    """The dashboard's "what happens next", with seats spoken as PEOPLE.
+
+    A thin wrapper so every branch of :func:`_next_step` is named without each one
+    having to remember to do it — a branch that forgot would silently print a handle
+    where its neighbours print a name, which is exactly the inconsistency this fixes.
+    """
+    return _name_seats(conn, task_id, _next_step(conn, task_id, todo_id))
+
+
+def _next_step(conn, task_id: str, todo_id: int) -> dict:
     """The one move that unblocks a todo: WHO owes it and WHAT they type.
 
     ``todo_id`` is the INTERNAL ``todos.id`` — this is called by the dashboard from a
@@ -648,7 +700,9 @@ def next_step(conn, task_id: str, todo_id: int) -> dict:
             "backend_live", consumers, f"ok #{num}",
             f"{_who_label(consumers)} builds against it and reports back — `ok #{num}` "
             f"if it works, `block #{num}` if it doesn't (that's a strike; {MAX_STRIKES} "
-            f"and the humans take over). The producer ({named}) may not check its "
+            # "their", not "its": this sentence now names a PERSON (see `_name_seats`),
+            # and "the producer (Sarah) may not check its own work" reads as a fault.
+            f"and the humans take over). The producer ({named}) may not check their "
             f"own work.",
             alt=f"block #{num}", number=num, unjoined=unjoined,
         )
