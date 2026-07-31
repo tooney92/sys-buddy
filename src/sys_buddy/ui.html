@@ -64,7 +64,11 @@ button{font-family:inherit}
 
 /* ---------- design maps (ported from the prototype Component) ---------- */
 var SK={open:'open',contract_proposed:'proposed',contract_locked:'locked',backend_live:'live',testing:'testing',verified:'verified',stuck:'stuck'};
-var SLAB={open:'open',contract_proposed:'planning',contract_locked:'contract locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
+/* The chip's LABEL. `contract_locked` reads just 'locked', matching SK above and the
+   `locked` node in STEPS/TODO_STEPS — it used to say 'contract locked' here alone, so the
+   same state was named two different things on one screen depending on which widget drew
+   it. There is only one kind of contract now, so the qualifier bought nothing. */
+var SLAB={open:'open',contract_proposed:'planning',contract_locked:'locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
 var ORDER={open:0,contract_proposed:1,contract_locked:2,backend_live:3,testing:4,verified:5};
 // `broker` is not an agent seat — it's the broker's own voice, used for the
 // notifications it authors (e.g. contract_locked). Neutral system colour so it never
@@ -87,8 +91,12 @@ var STEPS=[['open','open'],['preflight','pre-flight assessments'],['contract_pro
    `has_todos`/`todos`/`todo_rollup` keys entirely, so a pre-todo payload renders on
    exactly the code paths that shipped before. */
 var STEPS_TODO=[['open','open'],['preflight','pre-flight assessments'],['todos','todos']];
-/* The mini-stepper INSIDE a todo — the five dropped phases folded to four nodes, so
-   nobody learns a second idiom; it is the familiar widget one level down.
+/* The mini-stepper INSIDE a todo — the six march values folded to the five nodes below
+   (`open` and `contract_proposed` share `planning`), so nobody learns a second idiom; it
+   is the familiar widget one level down. No count of these is written down in prose
+   anywhere: the Workflows panel COUNTS TODO_STEPS/TODO_MARCH instead, because both this
+   comment and that sentence undercounted for as long as it took someone to notice
+   `testing` had been added as a node of its own.
 
    `testing` used to share the `ready` node, which hid the step that confuses people most:
    `verified` transitions from `testing` ONLY (state._report_verified), so a consumer must
@@ -111,6 +119,83 @@ var TODO_MARCH={open:0,contract_proposed:0,contract_locked:1,backend_live:2,test
 var TODO_STATUS={pending:'testing',accepted:'proposed',contracted:'locked',verified:'verified',dropped:'open'};
 var MAX_STRIKES=3;
 var MONO="'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace";
+
+/* ---------- the shorthand vocabulary: ONE source of truth ----------
+   Every short command a human types to THEIR OWN agent, written down once. BOTH
+   reference panels render from this array — the Commands cheatsheet (shortcodesHTML)
+   and the Workflows walkthrough (workflowsPanelBody, via SH()) — because they used to
+   be two hand-typed copies and had already drifted on notation. Same discipline as
+   ROLE_TAGS above, and the same reason: a hand-maintained second copy is how `upto`
+   went missing from the cheatsheet.
+
+   Fields:
+     id     lookup key for SH(); never rendered.
+     code   the LITERAL a human types. This is the string both panels print — prose must
+            never hand-type a command again, it asks for SH('id').
+     tools  the broker tool(s) the agent calls. [] means the agent composes the answer
+            locally and calls nothing. Every name here is registered in tools.py, and a
+            test pins that.
+     group  the cheatsheet heading it sits under. Order in this array IS render order,
+            and the heading is emitted whenever it changes, so grouping needs no second
+            structure. "Todo Contract" is one heading naming one concept — there is no
+            other kind of contract to distinguish it from, and the same words head the
+            long-form tool list (MCP_TOOLS) so the two panels read as one vocabulary.
+     modes  the task modes that show it: 'contract', 'debug', or both. A debug task has
+            no contract and never carries todos.
+     scope  how the todo number attaches — the notation rule, as DATA:
+              'required' — `#N` is mandatory. Every task is delivered by one or more
+                           todos and there is no task-wide form, so this is the norm:
+                           a single-deliverable task simply has one todo.
+              'optional' — `stuck` ONLY, the single exception in the whole vocabulary:
+                           `stuck #N` flags one deliverable and the others keep
+                           marching, a bare `stuck` escalates the whole task.
+              'none'     — not todo-scoped at all.
+   `stuck` also carries `bare` and `scoped` spellings, because prose has to name both
+   halves of its exception: SH('stuck','bare') / SH('stuck','scoped').
+   The role-tag row carries gen:'roleTags' — its code and description are BUILT from
+   ROLE_TAGS at render time, so the tag list cannot drift from the broker's resolver.
+
+   Kept strict-JSON on purpose (double quotes, no comments inside the literal) so a test
+   can parse it straight out of this file and hold the agent prompt to the same words. */
+var SHORTCODES=[
+  {"id":"wm","code":"wm","tools":["wait_for_message"],"group":"Messaging","modes":["contract","debug"],"scope":"none","desc":"wait for the next message (blocks)"},
+  {"id":"ch","code":"ch","tools":["check_messages"],"group":"Messaging","modes":["contract","debug"],"scope":"none","desc":"check for new messages now (read + mark seen), don't block"},
+  {"id":"sm","code":"sm","tools":["send_message"],"group":"Messaging","modes":["contract","debug"],"scope":"none","desc":"send a message to everyone on the task"},
+  {"id":"sm-role","code":"sm @role","tools":["send_message"],"group":"Messaging","modes":["contract","debug"],"scope":"none","desc":"send it privately to just that role"},
+  {"id":"upto","code":"upto","tools":["share_activity"],"group":"Messaging","modes":["contract","debug"],"scope":"none","desc":"share an ambient \"what we're up to\" note"},
+  {"id":"notify","code":"notify","tools":["notify_human"],"group":"Messaging","modes":["contract","debug"],"scope":"none","desc":"ping the humans on Slack — terminal events only"},
+  {"id":"role-tag","code":"@BE …","gen":"roleTags","tools":["send_message"],"group":"Messaging","modes":["contract","debug"],"scope":"none","desc":"tag a role instead of spelling it:"},
+  {"id":"pc","code":"pc #N","tools":["propose_contract"],"group":"Todo Contract","modes":["contract"],"scope":"required","desc":"propose the contract for todo N"},
+  {"id":"gc","code":"gc #N","tools":["get_contract"],"group":"Todo Contract","modes":["contract"],"scope":"required","desc":"show todo N’s contract"},
+  {"id":"sign","code":"sign #N","tools":["lock_contract"],"group":"Todo Contract","modes":["contract"],"scope":"required","desc":"sign / lock todo N’s contract"},
+  {"id":"ship","code":"ship #N","tools":["propose_contract","lock_contract"],"group":"Todo Contract","modes":["contract"],"scope":"required","desc":"propose the contract AND sign your own side in one move — the peer still signs, and it locks only when everyone has"},
+  {"id":"decline","code":"decline <why> #N","tools":["decline_contract"],"group":"Todo Contract","modes":["contract"],"scope":"required","desc":"push back on a proposal you have read — that version dies, someone proposes a new one"},
+  {"id":"reopen","code":"reopen <why> #N","tools":["reopen_negotiations"],"group":"Todo Contract","modes":["contract"],"scope":"required","desc":"reopen planning to re-sign a new version"},
+  {"id":"todos","code":"todos","tools":["get_todos"],"group":"Todos","modes":["contract"],"scope":"none","desc":"list the deliverables (todos) on this task"},
+  {"id":"todo","code":"todo <title>","tools":["propose_todo"],"group":"Todos","modes":["contract"],"scope":"none","desc":"propose a new todo"},
+  {"id":"yes","code":"yes #N","tools":["accept_todo"],"group":"Todos","modes":["contract"],"scope":"required","desc":"accept todo N"},
+  {"id":"no","code":"no #N <why>","tools":["decline_todo"],"group":"Todos","modes":["contract"],"scope":"required","desc":"decline todo N"},
+  {"id":"ready","code":"ready #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"required","desc":"producer: my side is ready to build on"},
+  {"id":"ok","code":"ok #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"required","desc":"consumer: it works against the producer’s side"},
+  {"id":"block","code":"block #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"required","desc":"consumer: it doesn’t work (a strike — 3 → stuck)"},
+  {"id":"done","code":"done #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"required","desc":"todo N is verified end to end"},
+  {"id":"stuck","code":"stuck [#N]","bare":"stuck","scoped":"stuck #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"optional","desc":"give up; ping the humans — the one command #N is optional on: with #N just that todo, bare escalates the whole task"},
+  {"id":"resolved","code":"resolved","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"none","desc":"the issue is fixed (debug tasks)"},
+  {"id":"stuck-debug","code":"stuck","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"none","desc":"give up; ping the humans"},
+  {"id":"pf","code":"pf","tools":["readiness_check","submit_readiness"],"group":"Meta","modes":["contract","debug"],"scope":"none","desc":"re-run pre-flight"},
+  {"id":"st","code":"st","tools":[],"group":"Meta","modes":["contract","debug"],"scope":"none","desc":"status recap (state, contract, unread)"},
+  {"id":"rules","code":"rules","tools":["rules"],"group":"Meta","modes":["contract","debug"],"scope":"none","desc":"re-read the charter"}
+];
+var SHORTCODE_BY_ID={};
+SHORTCODES.forEach(function(s){ SHORTCODE_BY_ID[s.id]=s; });
+/* The literal a human types, by id. Every sentence in the panels that names a command
+   goes through here, so there is exactly one place the notation can change. Falls back
+   to the id rather than throwing: a typo'd lookup must not blank the whole panel. */
+function SH(id,variant){
+  var e=SHORTCODE_BY_ID[id];
+  if(!e) return id;
+  return (variant && e[variant]) || e.code;
+}
 
 function av(role){ return RL[role] || {i:(role?String(role)[0].toUpperCase():'?'),c:'var(--role-system)',label:role||'system'}; }
 function stateChip(s){ var k=SK[s]||'open'; return {label:SLAB[s]||s, bg:'var(--st-'+k+'-bg)', fg:'var(--st-'+k+'-fg)', dot:'var(--st-'+k+'-dot)'}; }
@@ -195,6 +280,12 @@ var state = {
      only — neither panel has an input or a button that calls anything (DECISIONS D11).
      MUST appear in sig() below or opening/closing it would never re-render. */
   panel:null,
+  /* Workflows panel: which sections are expanded and which cast size the story tells.
+     `sec`/`sub` hold only what the human has TOUCHED — an untouched key falls through to
+     wfIsOpen()'s mode default, so a debug task can open with its own section already up
+     without that being a click nobody made. MUST appear in sig() or a toggle would never
+     repaint. */
+  wf:{sec:{}, sub:{}, cast:'2'},
   mobileTab:'thread', switcherOpen:false, isMobile: window.innerWidth<900,
   /* a desktop that is merely NARROW (>=900 so not gated, but under ~1150): the header
      is already dense, so the two reference buttons drop their text labels and the
@@ -408,8 +499,12 @@ function lockBadge(role, name){
   return '<span title="'+esc(LOCK_TIP)+'" style="position:absolute;bottom:-3px;right:-3px;width:13px;height:13px;border-radius:50%;background:var(--st-stuck-bg);color:var(--st-stuck-fg);border:1.5px solid var(--surface);display:flex;align-items:center;justify-content:center">'+
     '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg></span>';
 }
-function avatarChip(role, size, fs){
-  var a=av(role);
+/* `role` here is the SEAT (the handle) — that is what `agentFor`/`lockBadge` match on,
+   because the API's agent rows are keyed by seat. `colorRole` is the ROLE TYPE and is
+   what picks the letter and the colour; they are the same string on a task with one
+   seat per role type, so omitting it reproduces exactly the old behaviour. */
+function avatarChip(role, size, fs, colorRole){
+  var a=av(colorRole||role);
   var lock=lockBadge(role);
   return '<span title="'+esc(a.label)+'" style="position:relative;width:'+size+'px;height:'+size+'px;border-radius:7px;background:'+a.c+';color:#fff;font-size:'+fs+'px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+lock+'</span>';
 }
@@ -426,7 +521,8 @@ function preflightPills(d){
   var ags=(d&&d.agents)||[];
   if(!ags.length) return '';
   var pills=ags.map(function(ag){
-    var a=av(ag.role);
+    /* `ag.role` is the SEAT; the colour and letter come from the kind of work. */
+    var a=av(ag.role_type||ag.role);
     var s=preflightStatus(ag);
     var cfg = s==='passed' ? {bg:'var(--st-verified-bg)',fg:'var(--st-verified-fg)',lbl:'passed'}
            : s==='failed' ? {bg:'var(--st-stuck-bg)',fg:'var(--st-stuck-fg)',lbl:'failed'}
@@ -434,30 +530,156 @@ function preflightPills(d){
     var ic = s==='passed' ? '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="M20 6L9 17l-5-5"/></svg>'
            : s==='failed' ? '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="M18 6L6 18M6 6l12 12"/></svg>'
            : '<span style="width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.7"></span>';
-    return '<span title="'+esc(a.label)+' — '+cfg.lbl+'" style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:999px;font-size:9.5px;font-weight:700;background:'+cfg.bg+';color:'+cfg.fg+';max-width:100%">'+
+    return '<span title="'+esc(seatIdentity(ag.role, true)+' — '+cfg.lbl)+'" style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:999px;font-size:9.5px;font-weight:700;background:'+cfg.bg+';color:'+cfg.fg+';max-width:100%">'+
       '<span style="width:12px;height:12px;border-radius:4px;background:'+a.c+';color:#fff;font-size:8px;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+ic+'</span>';
   }).join('');
   return '<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;margin-top:6px;max-width:120px">'+pills+'</div>';
 }
 
-/* A labeled pre-flight row (used in the debug view, which has no stepper): each
-   agent with its role label and a passed/failed/pending pill. */
-function preflightRow(d){
-  var ags=(d&&d.agents)||[];
-  if(!ags.length) return '';
-  var chips=ags.map(function(ag){
-    var a=av(ag.role), s=preflightStatus(ag);
-    var cfg = s==='passed' ? {bg:'var(--st-verified-bg)',fg:'var(--st-verified-fg)',lbl:'passed'}
-           : s==='failed' ? {bg:'var(--st-stuck-bg)',fg:'var(--st-stuck-fg)',lbl:'failed'}
-           : {bg:'var(--st-open-bg)',fg:'var(--st-open-fg)',lbl:'pending'};
-    return '<div style="display:flex;align-items:center;gap:8px;padding:5px 10px;background:var(--bg);border:1px solid var(--border);border-radius:9px">'+
-      avatarChip(ag.role,20,9)+'<span style="font-size:12px;font-weight:600;color:var(--text)">'+esc(a.label)+'</span>'+
-      '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:'+cfg.bg+';color:'+cfg.fg+'">'+cfg.lbl+'</span>'+
-      listenPill(ag)+'</div>';
+/* ---------- naming a PERSON vs naming a SEAT ----------
+   Two different jobs, and one label was doing both badly.
+
+   IDENTITY — a party pill, a signature, "who is this?" — is the human's OWN name plus
+   the kind of work they do: `Tony's agent [backend]`. That is the question those pills
+   are actually answering, and a bare `frontend-2` answered it with a database key.
+
+   INSTRUCTION — anything a human is meant to TYPE — stays the HANDLE, because that is
+   the token the broker accepts and the one quoted in every message and signature. The
+   two are joined on FIRST MENTION in the NEXT card (`Priya's agent (@frontend-2) types
+   sign #1`), so a reader can connect the person to the word in the sentence.
+
+   NAME IS DISPLAY-ONLY AND NEVER A KEY. Two people called Sarah is legal, so when a
+   name is shared the handle is appended as the tiebreak — two identical pills would be
+   worse than a slightly longer one. Resolution is untouched and stays
+   handle → role type → tag → name.
+
+   All of it reads `d.roster`, the same source the Cast panel and the agents' `roster`
+   tool use. DEFENSIVE as everywhere else here: with no roster (an older API) every
+   helper falls back to the handle, i.e. exactly what shipped before. */
+function rosterRow(seat){
+  var rows = state.detail && state.detail.roster && state.detail.roster.rows;
+  if(!rows) return null;
+  for(var i=0;i<rows.length;i++){ if(rows[i].seat===seat) return rows[i]; }
+  return null;
+}
+/* A seat's ROLE TYPE — what picks its colour and its letter. */
+function seatRole(seat){ var r=rosterRow(seat); return r ? r.role : seat; }
+function avSeat(seat){ return av(seatRole(seat)); }
+/* The token a human should TYPE for a seat. Identical to the handle everywhere except
+   one row: a seat whose stored handle is a bare role type on a task that later grew a
+   second seat of that type. `@frontend` then means the TYPE, so rendering the handle
+   would print the one token on this task that resolves to two people — and a party list
+   pasted from it would be refused. The broker derives `address` for exactly that seat
+   (seats.roster); an older API sends no `address` and the handle fallback is then right,
+   because before a type could be shared the two were always the same string. */
+function seatAddress(seat){ var r=rosterRow(seat); return (r && r.address) || seat; }
+/* Does another seat display the same human name? Then the name alone is not an identity. */
+function nameIsShared(row){
+  var rows = state.detail && state.detail.roster && state.detail.roster.rows;
+  if(!rows || !row || !row.name) return false;
+  var n=0;
+  for(var i=0;i<rows.length;i++){ if(rows[i].name===row.name) n++; }
+  return n>1;
+}
+/* `Tony's agent [backend]` — or `[qa] · not joined` for a seat nobody has taken, which
+   is the row a host most needs to see and so is never dropped. `withHandle` appends
+   `@seat`, and a shared name forces it. */
+function seatIdentity(seat, withHandle){
+  var row=rosterRow(seat);
+  if(!row) return seat;
+  var role='['+row.role+']';
+  /* Nobody has taken this seat, so there is no "X's agent" to write — but the row is
+     the most useful one on the panel (it is how a host sees the invite nobody accepted),
+     so it renders rather than vanishing. With `withHandle` the HANDLE leads, because
+     for an unfilled seat that is the only identity there is. */
+  if(!row.name) return (withHandle ? '@'+seatAddress(seat)+' ' : '')+role+' · not joined';
+  var label=row.name+"’s agent "+role;
+  if(withHandle || nameIsShared(row)) label += ' @'+seatAddress(seat);
+  return label;
+}
+
+/* ---------- the CAST: seats, role types, and the count chips ----------
+   A seat is a PERSON (`@frontend-2`); a role type is a KIND OF WORK (`frontend`), and
+   several seats may share one. `t.roles` is the list of seat handles and `t.seat_roles`
+   maps each to its role type. DEFENSIVE, like every other payload read here: an older
+   API sends no `seat_roles`, and the identity fallback is then exactly right — before
+   the two were split, a seat and its role type were the same string. */
+function seatRoleOf(t, seat){ var m=(t&&t.seat_roles)||{}; return m[seat]||seat; }
+
+/* One coloured letter per ROLE TYPE with a multiplier: (B×2)(F×2)(Q), never
+   (B)(B)(F)(F)(Q). Repeating identical letters reads as a rendering bug and stops
+   scaling around six seats. Per-person initials were considered and rejected: an
+   unjoined seat has no initial, and the letters would stop meaning role type.
+   A role type held by ONE seat renders the chip that shipped before — same avatar,
+   same colour, same lock/presence badge — so a one-seat-per-role task is unchanged. */
+function castChips(t, size, fs){
+  var list=(t&&t.roles)||[];
+  if(!list.length) return '';
+  var order=[], counts={}, firstSeat={};
+  for(var i=0;i<list.length;i++){
+    var rt=seatRoleOf(t,list[i]);
+    if(counts[rt]===undefined){ counts[rt]=0; order.push(rt); firstSeat[rt]=list[i]; }
+    counts[rt]++;
+  }
+  return order.map(function(rt){
+    var n=counts[rt];
+    if(n===1) return avatarChip(firstSeat[rt], size, fs, rt);
+    var a=av(rt);
+    return '<span title="'+esc(n+' × '+a.label)+'" style="display:inline-flex;align-items:center;gap:2px;height:'+size+'px;padding:0 '+Math.round(size*0.22)+'px;border-radius:7px;background:'+a.c+';color:#fff;font-size:'+fs+'px;font-weight:700;flex:none;white-space:nowrap">'+
+      esc(a.i)+'<span style="font-size:'+(fs-1.5)+'px;opacity:.85;font-weight:600">×'+n+'</span></span>';
   }).join('');
-  return '<div style="margin-top:14px;padding-top:13px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
-    '<span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">Pre-flight</span>'+
-    '<div style="display:flex;gap:8px;flex-wrap:wrap">'+chips+'</div></div>';
+}
+
+/* ---------- the roster panel ("Cast") ----------
+   Grows out of the old `PRE-FLIGHT [backend ✓ passed]` strip rather than sitting beside
+   it: two overlapping lists of people is how they drift apart. Rendered from `d.roster`,
+   the SAME source the agents' `roster` tool reads — one roster, two renderers.
+
+   UNJOINED SEATS ARE LISTED. A roster built only from joined agents cannot answer "who
+   never accepted their invite?", which is precisely the state that silently stalls a
+   task — and "4 of 5 joined" is the headline for exactly that reason. */
+function rosterPresence(row){
+  if(!row.joined) return row.invite_pending ? 'invite sent' : 'not invited yet';
+  if(row.listening) return listenLabel(row);
+  return 'idle';
+}
+function rosterPanel(d){
+  var r=d&&d.roster;
+  if(!r||!r.rows||!r.rows.length) return '';   /* older API: render nothing, as before */
+  var allIn = r.joined===r.seats;
+  var head='<div style="display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--border)">'+
+    '<span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">Cast</span>'+
+    '<div style="flex:1"></div>'+
+    '<span style="font-size:11.5px;font-weight:700;padding:2px 9px;border-radius:999px;background:'+(allIn?'var(--st-verified-bg)':'var(--st-open-bg)')+';color:'+(allIn?'var(--st-verified-fg)':'var(--st-open-fg)')+'">'+
+      r.joined+' of '+r.seats+' joined</span></div>';
+  var cols='grid-template-columns:minmax(104px,auto) minmax(72px,auto) minmax(72px,1fr) auto auto';
+  var hdr='<div style="display:grid;'+cols+';gap:12px;padding:7px 16px;font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);border-bottom:1px solid var(--border)">'+
+    '<span>Seat</span><span>Role</span><span>Who</span><span>Pre-flight</span><span>Presence</span></div>';
+  var rows=r.rows.map(function(row){
+    var a=av(row.role);
+    var st = row.joined ? (row.readiness_status||'pending') : '';
+    var cfg = st==='passed' ? {bg:'var(--st-verified-bg)',fg:'var(--st-verified-fg)',lbl:'passed'}
+           : st==='failed' ? {bg:'var(--st-stuck-bg)',fg:'var(--st-stuck-fg)',lbl:'failed'}
+           : st ? {bg:'var(--st-open-bg)',fg:'var(--st-open-fg)',lbl:'pending'} : null;
+    /* the seat renders as a monospace @handle chip because it is the token a human
+       TYPES into a command — the same idiom as the shortcode chips. Which is exactly
+       why it prints `address` and not `seat`: on a task that grew a second seat of a
+       role type, the first seat's stored handle IS that type, so the chip would be
+       offering a token that names two people. */
+    var seat='<span style="font-family:'+MONO+';font-size:11.5px;font-weight:600;color:'+(row.joined?'var(--text)':'var(--text-3)')+';border:1px solid var(--border-strong);border-radius:999px;padding:1px 8px;white-space:nowrap">@'+esc(row.address||row.seat)+'</span>';
+    var pre = cfg ? '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:'+cfg.bg+';color:'+cfg.fg+';white-space:nowrap">'+cfg.lbl+'</span>'
+                  : '<span style="font-size:11.5px;color:var(--text-3)">—</span>';
+    var pres = row.joined && row.listening ? listenPill(row)
+      : '<span style="font-size:11.5px;color:var(--text-3);white-space:nowrap">'+esc(rosterPresence(row))+'</span>';
+    return '<div style="display:grid;'+cols+';gap:12px;padding:8px 16px;align-items:center;border-bottom:1px solid var(--border);opacity:'+(row.joined?'1':'.72')+'">'+
+      seat+
+      '<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2);white-space:nowrap">'+
+        '<span style="width:14px;height:14px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+esc(row.role)+'</span>'+
+      '<span style="font-size:12.5px;color:'+(row.name?'var(--text)':'var(--text-3)')+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(row.name||'—')+'</span>'+
+      pre+pres+'</div>';
+  }).join('');
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);margin-bottom:16px;overflow:hidden">'+
+    head+'<div style="overflow-x:auto">'+hdr+rows+'</div></div>';
 }
 
 /* ---------- pre-flight fail report (coaching panel) ---------- */
@@ -468,14 +690,14 @@ function readinessFailPanel(d){
   var ags=((d&&d.agents)||[]).filter(function(a){ return preflightStatus(a)==='failed' && a.readiness_report; });
   if(!ags.length) return '';
   var blocks=ags.map(function(ag){
-    var a=av(ag.role);
+    var a=av(ag.role_type||ag.role);
     var missed=(ag.readiness_report||[]).filter(function(r){ return !r.ok; });
     var items=missed.map(function(r){
       return '<li style="margin:0 0 6px"><span style="font-family:'+MONO+';font-size:10.5px;font-weight:700;color:var(--st-stuck-fg);background:var(--st-stuck-bg);padding:1px 6px;border-radius:5px">'+esc(r.id)+'</span> <span style="color:var(--text-2)">'+esc(r.hint||'')+'</span></li>';
     }).join('');
     return '<div style="margin:0 0 10px">'+
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">'+avatarChip(ag.role,20,9)+
-      '<span style="font-size:12.5px;font-weight:600;color:var(--text)">'+esc(a.label)+'</span>'+
+      '<span style="font-size:12.5px;font-weight:600;color:var(--text)">'+esc(seatIdentity(ag.role, true))+'</span>'+
       '<span style="font-size:11px;font-weight:600;color:var(--st-stuck-fg)">failed '+missed.length+' question'+(missed.length===1?'':'s')+'</span></div>'+
       '<ul style="margin:0;padding-left:2px;list-style:none;font-size:12px;line-height:1.45">'+items+'</ul></div>';
   }).join('');
@@ -585,9 +807,15 @@ function headerHTML(){
       '</div>'+
       '<span style="font-weight:700;font-size:16px;letter-spacing:-.02em;color:var(--text)">sys<span style="color:var(--text-3);font-weight:400">-</span>buddy</span>'+
     '</div>'+
+    /* With ONE task there is nothing to switch to, so the control renders as plain text:
+       a menu whose only entry is the thing you are already looking at is pure noise, and
+       a caret promises a choice that does not exist. The switcher returns the moment a
+       second task exists. */
     '<div style="position:relative;flex:none">'+
-      '<button data-switcher="1" style="display:flex;align-items:center;gap:8px;padding:6px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text);max-width:'+(m?'150px':'220px')+'">'+
-        '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(switcherLabel)+'</span>'+IC.caret+'</button>'+switcherMenu+
+      (state.tasks.length > 1
+        ? '<button data-switcher="1" style="display:flex;align-items:center;gap:8px;padding:6px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text);max-width:'+(m?'150px':'220px')+'">'+
+            '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(switcherLabel)+'</span>'+IC.caret+'</button>'+switcherMenu
+        : '<span style="display:flex;align-items:center;padding:6px 11px;font-size:13px;font-weight:500;color:var(--text);max-width:'+(m?'150px':'220px')+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(switcherLabel)+'</span>')+
     '</div>'+
     '<div style="flex:1"></div>'+
     newTaskBtn+
@@ -638,17 +866,24 @@ function messageScreen(icon,title,body){
 
 /* ---------- task list ---------- */
 function listHTML(){
+  /* ONE copy, referenced twice (empty-state and populated). It was hand-typed in both
+     places, which is how the shortcode list drifted, and it said "One task" on a page
+     that could be showing thirty. It also described a task as having "the contract" —
+     pre-todo framing for a model where a task is delivered by one or more todos, each
+     with its own. */
+  var TASKS_BLURB = 'Your agents, working. Watch them agree what to build, sign the '
+                  + 'shape of it, and ship — you’re just here to observe.';
   if(!state.tasks.length){
     return '<div style="max-width:1040px;margin:0 auto;padding:30px 20px 70px">'+
       '<h1 style="font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;color:var(--text)">Tasks</h1>'+
-      '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">One task, your agents on it. Watch them plan the contract, build, and ship — you’re just here to observe.</p>'+
+      '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">'+TASKS_BLURB+'</p>'+
       '<div style="text-align:center;padding:60px 20px;border:1px dashed var(--border-strong);border-radius:14px;color:var(--text-2)">'+
       '<p style="font-weight:600;font-size:15px;color:var(--text);margin:0 0 5px">No tasks yet</p>'+
       '<p style="font-size:13.5px;margin:0">Nothing to observe on this token right now.</p></div></div>';
   }
   var rows = state.tasks.map(function(t){
     var c=stateChip(t.state);
-    var avs = (t.roles||[]).map(function(r){ return avatarChip(r,22,10.5); }).join('');
+    var avs = castChips(t,22,10.5);
     var strike = t.strikes>0 ? '<span style="display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;background:var(--st-stuck-bg);color:var(--st-stuck-fg)"><span style="width:5px;height:5px;border-radius:50%;background:var(--st-stuck-dot)"></span>strike '+t.strikes+' of '+MAX_STRIKES+'</span>' : '';
     /* the rollup, so a host triages the list without opening anything. `todo_rollup` is
        absent on a row with no live todos, so those rows are exactly as they were. */
@@ -670,7 +905,7 @@ function listHTML(){
     '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">'+
       '<h1 style="font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;color:var(--text)">Tasks</h1>'+
       '<span style="font-size:13px;color:var(--text-2)">'+state.tasks.length+' in flight</span></div>'+
-    '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">One task, your agents on it. Watch them plan the contract, build, and ship — you’re just here to observe.</p>'+
+    '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">'+TASKS_BLURB+'</p>'+
     '<div style="display:flex;flex-direction:column;gap:10px">'+rows+'</div></div>';
 }
 
@@ -728,7 +963,7 @@ function threadItemHTML(it){
   }
   var pass = (m.type==='test_result') ? (m.strike==null) : false;
   var chip=typeChip(m.type,pass);
-  var a=av(m.role);
+  var a=avSeat(m.role);
   // directed message: a `→ role` chip tinted with the target role's color (broadcast/null = no chip)
   var toChip='';
   if(m.to_role){
@@ -774,7 +1009,7 @@ function threadHTML(d){
   } else {
     inner=items.map(threadItemHTML).join('');
   }
-  var avs=(d.roles||[]).map(function(r){ return avatarChip(r,22,10); }).join('');
+  var avs=castChips(d,22,10);
   // Spell the presence out next to the avatars — one pill per listening agent (none
   // when nobody is parked, or when the API predates the field).
   var lps=((d&&d.agents)||[]).filter(isListening).map(listenPill).join('');
@@ -816,43 +1051,12 @@ function threadLegendHTML(){
   '</div>';
 }
 
-/* ---------- contract panel ----------
-   `d` needs only `id` and `contract`. The per-todo panel passes a SYNTHETIC
-   {id:'<task>#<todo>', contract:<todo.contract>} so a todo's version selection and
-   expanded endpoints are keyed apart from the task-level chain while rendering through
-   this one renderer — the todo's contract is the same shape, one level down. */
-function contractHTML(d){
-  var c=d.contract||{exists:false};
-  var body;
-  if(!c.exists){
-    body='<div style="padding:14px 16px;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span style="font-weight:600;font-size:14px;color:var(--text)">API contract</span></div></div>'+
-      '<div style="text-align:center;padding:40px 22px">'+
-      '<div style="width:38px;height:38px;border-radius:11px;background:var(--surface-2);border:1px dashed var(--border-strong);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;color:var(--text-3)">'+IC.doc+'</div>'+
-      '<p style="font-weight:600;font-size:14px;color:var(--text);margin:0 0 4px">No contract yet</p>'+
-      '<p style="font-size:13px;color:var(--text-2);margin:0">Waiting on the first proposal from a buddy.</p></div>';
-    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+body+'</div>';
-  }
-  var selId = state.version[d.id] || c.default || (c.versions[0]&&c.versions[0].id);
-  var vbtns = c.versions.map(function(v){
-    /* data-vkey carries WHICH chain this button selects a version for — the task's, or
-       one todo's. bind() falls back to state.taskId, so the task card is unchanged. */
-    return '<button data-version="'+esc(v.id)+'" data-vkey="'+esc(d.id)+'" style="'+vBtnStyle(v.id===selId)+';cursor:pointer">'+(v.locked?IC.lockSmall:'')+esc(v.id)+'</button>';
-  }).join('');
-  var data = (c.data&&c.data[selId]) || {locked:false,signed:[],endpoints:[]};
-  var draft = !data.locked;
-  var statusBlock='';
-  if(draft){
-    statusBlock='<div style="margin-top:11px;display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px dashed var(--border-strong);border-radius:10px;font-size:12px;color:var(--text-2)"><span style="width:8px;height:8px;border-radius:50%;border:1.5px dashed var(--text-3)"></span>Draft — awaiting signatures</div>';
-  } else if((data.signed||[]).length){
-    var chips=(data.signed||[]).map(function(sg){
-      var a=av(sg.role);
-      return '<span style="display:inline-flex;align-items:center;gap:6px;background:var(--st-verified-bg);border-radius:999px;padding:3px 10px 3px 3px;font-size:11px;color:var(--st-verified-fg);font-weight:600">'+
-        '<span style="width:18px;height:18px;border-radius:6px;background:'+a.c+';color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center">'+esc(a.i)+'</span>'+esc(sg.role)+'<span style="font-family:'+MONO+';opacity:.75">'+esc(sg.time)+'</span></span>';
-    }).join('');
-    statusBlock='<div style="margin-top:11px"><div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="color:var(--st-verified-fg);display:flex">'+dividerIcon('lock')+'</span>Locked · signed by all parties</div><div style="display:flex;flex-wrap:wrap;gap:6px">'+chips+'</div></div>';
-  }
-
-  var eps=(data.endpoints||[]).map(function(e,i){
+/* http — the endpoint table, unchanged: a method chip, a path, and the request /
+   response / errors detail behind a caret. `data-ep` keys the expansion by
+   chain:version:index, so the same endpoint expanded on a todo panel and on the task
+   card stay independent. */
+function endpointUnitsHTML(d, selId, units){
+  return units.map(function(e,i){
     var key=d.id+':'+selId+':'+i;
     var expanded=!!state.expanded[key];
     var mc=methodChip(e.method);
@@ -879,16 +1083,157 @@ function contractHTML(d){
     }
     return '<div style="border:1px solid var(--border);border-radius:11px;margin:6px;overflow:hidden">'+head+detail+'</div>';
   }).join('');
+}
 
-  // The base URL the consumer connects to. Load-bearing (SPEC §9) and previously
-  // invisible on the dashboard — surface it so the human can see exactly where the
-  // frontend will point.
+/* ---------- contract KINDS (the view half) ----------
+   A contract is ≥1 NAMED UNIT with attributes — it is not always an API. What a unit
+   IS changes per kind; everything else (versions, signatures, lock, staging_url) does
+   not, which is why one panel renders all four.
+
+   The broker infers the kind from the spec's unit key (`endpoints` → http, `types` →
+   schema, `screens` → ui, `criteria` → none) and sends it as `data.kind` alongside
+   `data.units`. This page NEVER re-derives it: a second copy of that mapping in the
+   browser is a copy that drifts from the validator. All that lives here is the view —
+   a card title and a unit renderer. Adding a kind is a row here and a row in
+   contracts.KINDS.
+
+   `http` is the fallback for an unknown/absent kind because every contract written
+   before kinds existed is one — an older broker's payload still renders. */
+var CONTRACT_KINDS={
+  http:  {title:'API contract',        units:endpointUnitsHTML},
+  schema:{title:'Schema contract',     units:typeUnitsHTML},
+  ui:    {title:'UI contract',         units:screenUnitsHTML},
+  none:  {title:'Acceptance criteria', units:criteriaUnitsHTML}
+};
+function contractKind(data){ return CONTRACT_KINDS[data&&data.kind] || CONTRACT_KINDS.http; }
+/* The units to render. `units` is the kind-agnostic list the broker sends; `endpoints`
+   is the fallback for a payload from a broker that predates kinds, where http units
+   only ever arrived under that key. */
+function contractUnits(data){ return (data&&data.units) || (data&&data.endpoints) || []; }
+
+/* One bordered block, the shell every non-http unit shares. */
+function unitBlock(inner){
+  return '<div style="border:1px solid var(--border);border-radius:11px;margin:6px;overflow:hidden">'+inner+'</div>';
+}
+/* A unit's NAME. Naming is what makes a contract checkable ("does ForgotPassword exist,
+   with those states?"), so an unnamed unit says so rather than rendering a blank row. */
+function unitName(u){
+  var n=(u&&(u.name||u.n));
+  return '<span style="font-family:'+MONO+';font-size:12.5px;font-weight:600;color:var(--text)">'+
+    (n?esc(n):'<span style="color:var(--text-3);font-style:italic">unnamed</span>')+'</span>';
+}
+function unitCount(n,word){
+  return '<span style="font-size:11px;color:var(--text-3);margin-left:auto;flex:none">'+n+' '+esc(word)+(n===1?'':'s')+'</span>';
+}
+function unitHead(inner){
+  return '<div style="display:flex;align-items:center;gap:9px;padding:10px 11px">'+inner+'</div>';
+}
+
+/* schema — a named type and its fields. BOTH spellings of a field are read: the terse
+   `n`/`t` is the house wire format endpoint request/response rows have always used, and
+   the validator accepts either, so a renderer that read only one would silently drop
+   half the real contracts. */
+function typeUnitsHTML(d, selId, units){
+  return units.map(function(t){
+    var fields=(t&&t.fields)||[];
+    var rows=fields.map(function(f){
+      var star=(f&&(f.req||f.required))?'<span style="color:var(--accent)">*</span>':'';
+      return '<div style="display:flex;gap:10px;padding:7px 11px;align-items:baseline;border-top:1px solid var(--border)">'+
+        '<span style="font-family:'+MONO+';font-size:12px;color:var(--text);font-weight:500">'+esc((f&&(f.name||f.n))||'')+star+'</span>'+
+        '<span style="font-family:'+MONO+';font-size:10.5px;color:var(--role-backend)">'+esc((f&&(f.type||f.t))||'')+'</span>'+
+        '<span style="font-size:11px;color:var(--text-3);margin-left:auto;text-align:right">'+esc((f&&f.note)||'')+'</span></div>';
+    }).join('');
+    return unitBlock(unitHead(unitName(t)+unitCount(fields.length,'field'))+rows);
+  }).join('');
+}
+
+/* ui — a named screen/component and the states it can be in. The states are the
+   agreement; a screen with a name and nothing else is a wish. */
+function screenUnitsHTML(d, selId, units){
+  return units.map(function(s){
+    var states=((s&&s.states)||[]).map(function(st){
+      return '<span style="display:inline-flex;align-items:center;font-family:'+MONO+';font-size:11px;color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:2px 9px">'+esc(st)+'</span>';
+    }).join('');
+    var note=(s&&(s.note||s.summary))
+      ? '<p style="font-size:12px;color:var(--text-2);margin:0 11px 9px;line-height:1.5">'+esc(s.note||s.summary)+'</p>' : '';
+    return unitBlock(
+      unitHead(unitName(s)+unitCount(((s&&s.states)||[]).length,'state'))+note+
+      '<div style="display:flex;flex-wrap:wrap;gap:5px;padding:0 11px 11px">'+states+'</div>');
+  }).join('');
+}
+
+/* none — the kind with no interface to describe is NOT the kind with no contract: it is
+   a checklist, because "this is how we have built" has to stay checkable. Criteria are
+   plain strings; an object is tolerated so a hand-written spec still renders. */
+function criteriaUnitsHTML(d, selId, units){
+  return units.map(function(c){
+    var text=(typeof c==='string')?c:((c&&(c.text||c.name))||'');
+    return unitBlock('<div style="display:flex;gap:9px;padding:10px 11px;align-items:flex-start">'+
+      '<span style="flex:none;color:var(--text-3);margin-top:1px">'+IC.check+'</span>'+
+      '<span style="font-size:12.5px;color:var(--text);line-height:1.5;min-width:0">'+esc(text)+'</span></div>');
+  }).join('');
+}
+
+/* ---------- contract panel ----------
+   `d` needs only `id` and `contract`. The per-todo panel passes a SYNTHETIC
+   {id:'<task>#<todo>', contract:<todo.contract>} so a todo's version selection and
+   expanded endpoints are keyed apart from the task-level chain while rendering through
+   this one renderer — the todo's contract is the same shape, one level down. */
+function contractHTML(d){
+  var c=d.contract||{exists:false};
+  var body;
+  if(!c.exists){
+    /* No contract means no KIND yet — nobody has proposed, so nothing has said whether
+       this is endpoints, screens, types or criteria. "API contract" would be a guess,
+       and the wrong one for three of the four kinds; the header only names the kind
+       once a proposal has named it. */
+    body='<div style="padding:14px 16px;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span style="font-weight:600;font-size:14px;color:var(--text)">Contract</span></div></div>'+
+      '<div style="text-align:center;padding:40px 22px">'+
+      '<div style="width:38px;height:38px;border-radius:11px;background:var(--surface-2);border:1px dashed var(--border-strong);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;color:var(--text-3)">'+IC.doc+'</div>'+
+      '<p style="font-weight:600;font-size:14px;color:var(--text);margin:0 0 4px">No contract yet</p>'+
+      '<p style="font-size:13px;color:var(--text-2);margin:0">Waiting on the first proposal from a buddy.</p></div>';
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+body+'</div>';
+  }
+  var selId = state.version[d.id] || c.default || (c.versions[0]&&c.versions[0].id);
+  var vbtns = c.versions.map(function(v){
+    /* data-vkey carries WHICH chain this button selects a version for — the task's, or
+       one todo's. bind() falls back to state.taskId, so the task card is unchanged. */
+    return '<button data-version="'+esc(v.id)+'" data-vkey="'+esc(d.id)+'" style="'+vBtnStyle(v.id===selId)+';cursor:pointer">'+(v.locked?IC.lockSmall:'')+esc(v.id)+'</button>';
+  }).join('');
+  var data = (c.data&&c.data[selId]) || {locked:false,signed:[],units:[],endpoints:[]};
+  var kindView = contractKind(data);
+  var draft = !data.locked;
+  var statusBlock='';
+  if(draft){
+    statusBlock='<div style="margin-top:11px;display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px dashed var(--border-strong);border-radius:10px;font-size:12px;color:var(--text-2)"><span style="width:8px;height:8px;border-radius:50%;border:1.5px dashed var(--text-3)"></span>Draft — awaiting signatures</div>';
+  } else if((data.signed||[]).length){
+    var chips=(data.signed||[]).map(function(sg){
+      var a=avSeat(sg.role);
+      return '<span title="'+esc(seatIdentity(sg.role, true))+'" style="display:inline-flex;align-items:center;gap:6px;max-width:100%;background:var(--st-verified-bg);border-radius:999px;padding:3px 10px 3px 3px;font-size:11px;color:var(--st-verified-fg);font-weight:600">'+
+        '<span style="width:18px;height:18px;border-radius:6px;background:'+a.c+';color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+
+        '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(seatIdentity(sg.role))+'</span>'+
+        '<span style="font-family:'+MONO+';opacity:.75;flex:none">'+esc(sg.time)+'</span></span>';
+    }).join('');
+    statusBlock='<div style="margin-top:11px"><div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="color:var(--st-verified-fg);display:flex">'+dividerIcon('lock')+'</span>Locked · signed by all parties</div><div style="display:flex;flex-wrap:wrap;gap:6px">'+chips+'</div></div>';
+  }
+
+  var eps=kindView.units(d, selId, contractUnits(data));
+
+  // Where the consumer connects. Load-bearing (SPEC §9), and it is the HOST's value,
+  // not part of the signed shape — resolved live from the task (or this deliverable's
+  // override) on every poll, so re-pointing a tunnel updates this line and moves no
+  // contract, version or signature. A `staging_url_at_lock` that DIFFERS is shown
+  // beneath it: "we point here now, we signed against that" are two facts, and
+  // collapsing them into one string is how a stale target hides in plain sight.
+  var stale = data.staging_url_at_lock && data.staging_url_at_lock!==data.staging_url
+    ? '<div style="margin-top:6px;font-size:10.5px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(data.staging_url_at_lock)+'">signed against <span style="font-family:'+MONO+'">'+esc(data.staging_url_at_lock)+'</span> — the target moved, the contract did not</div>'
+    : '';
   var stagingBlock = data.staging_url
-    ? '<div style="margin-top:11px;display:flex;align-items:center;gap:9px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;min-width:0"><span style="display:flex;color:var(--text-3);flex:none">'+IC.link+'</span><span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);flex:none">Connect to</span><span style="font-family:'+MONO+';font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(data.staging_url)+'">'+esc(data.staging_url)+'</span></div>'
+    ? '<div style="margin-top:11px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;min-width:0"><div style="display:flex;align-items:center;gap:9px;min-width:0"><span style="display:flex;color:var(--text-3);flex:none">'+IC.link+'</span><span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);flex:none">Connect to</span><span style="font-family:'+MONO+';font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(data.staging_url)+'">'+esc(data.staging_url)+'</span></div>'+stale+'</div>'
     : '';
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
     '<div style="padding:14px 16px;border-bottom:1px solid var(--border)">'+
-      '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span style="font-weight:600;font-size:14px;color:var(--text)">API contract</span>'+
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span style="font-weight:600;font-size:14px;color:var(--text)">'+esc(kindView.title)+'</span>'+
       '<div style="display:flex;gap:3px;background:var(--surface-2);padding:3px;border-radius:9px">'+vbtns+'</div></div>'+statusBlock+stagingBlock+'</div>'+
     '<div style="padding:6px">'+eps+'</div></div>';
 }
@@ -904,6 +1249,13 @@ function todoById(d,id){
   return null;
 }
 function selectedTodo(d){ return d ? todoById(d, state.selectedTodo[d.id]) : null; }
+/* The number a HUMAN types: `todos.number`, per task, starting at 1 — NOT the row's
+   `id`, which is global and would print `#7` where the human types `#1`. Every `#` on
+   screen and every command string this page prints goes through here; `id` stays for
+   internal keying only (data- attributes, lookups, the contract card's version key).
+   Falls back to `id` so a payload from a broker that predates the field still renders a
+   number rather than `#undefined`. */
+function todoNo(t){ return t && t.number!=null ? t.number : (t ? t.id : ''); }
 
 /* The agreement stage as a chip — rendered ONLY when it says something the stepper
    cannot, which is the whole reason a todo carries two state fields.
@@ -971,7 +1323,7 @@ function todoChipHTML(id){
   if(!t) return '';
   var title=String(t.title||'');
   if(title.length>22) title=title.slice(0,21)+'…';
-  return '<button data-todo="'+t.id+'" title="'+esc('todo #'+t.id+' — '+t.title)+'" style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-family:'+MONO+';font-size:10px;font-weight:600;color:var(--accent-2);background:transparent;border:1px solid var(--accent);cursor:pointer">⟨#'+t.id+' '+esc(title)+'⟩</button>';
+  return '<button data-todo="'+t.id+'" title="'+esc('todo #'+todoNo(t)+' — '+t.title)+'" style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-family:'+MONO+';font-size:10px;font-weight:600;color:var(--accent-2);background:transparent;border:1px solid var(--accent);cursor:pointer">⟨#'+esc(todoNo(t))+' '+esc(title)+'⟩</button>';
 }
 
 /* The list: every todo on the task, PENDING first with a ⚠ (the API already sorts
@@ -981,12 +1333,21 @@ function todoListHTML(d){
   var rows=(d.todos||[]).map(function(t){
     var pending = t.status==='pending', dropped = t.status==='dropped';
     var parties=(t.parties||[]).map(function(p){
-      var a=av(p);
-      return '<span title="'+esc(a.label)+'" style="width:16px;height:16px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>';
+      var a=avSeat(p);
+      return '<span title="'+esc(seatIdentity(p, true))+'" style="width:16px;height:16px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>';
     }).join('');
+    /* "awaiting Priya" and "awaiting a seat nobody ever accepted" are different
+       problems with different fixes — nudge a colleague, or chase an invite — so they
+       must not render the same. `t.unjoined` is the seats no one ever paired into. */
+    var never=(t.unjoined||[]);
+    var awaitingLabel=(t.awaiting||[]).map(function(p){
+      var row=rosterRow(p);
+      var who=(row&&row.name)?row.name:('@'+seatAddress(p));
+      return never.indexOf(p)>=0 ? ('@'+seatAddress(p)+' — never joined') : who;
+    }).join(', ');
     var note = dropped ? ('dropped'+(t.drop_reason?' — '+t.drop_reason:''))
              : t.stuck ? (t.stuck_reason||'stuck — humans notified')
-             : pending ? ('awaiting '+((t.awaiting||[]).join(', ')||'acceptance'))
+             : pending ? ('awaiting '+(awaitingLabel||'acceptance'))
              : t.scope;
     var warn = pending ? '<span title="awaiting acceptance — this one is asking you for something" style="color:var(--st-testing-fg);font-size:13px;line-height:1;flex:none;padding-top:2px">⚠</span>' : '';
     return '<button data-todo="'+t.id+'" style="width:100%;display:flex;align-items:flex-start;gap:9px;padding:10px 13px;background:transparent;border:none;border-top:1px solid var(--border);cursor:pointer;text-align:left;font-family:inherit;opacity:'+(dropped?'.55':'1')+'">'+
@@ -994,7 +1355,7 @@ function todoListHTML(d){
       '<span style="flex:1;min-width:0">'+
         '<span style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">'+
           '<span style="font-size:12.5px;font-weight:600;color:var(--text)'+(dropped?';text-decoration:line-through':'')+'">'+esc(t.title)+'</span>'+
-          '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+t.id+'</span>'+
+          '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+esc(todoNo(t))+'</span>'+
           todoStatusChip(t)+
         '</span>'+
         '<span style="display:block;font-size:11.5px;color:var(--text-2);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(note)+'</span>'+
@@ -1059,9 +1420,26 @@ function nextStepHTML(t){
     if(!c) return '';
     return '<code title="'+esc(n.tool||'')+'" style="font-family:'+MONO+';font-size:11px;font-weight:700;color:var(--text);background:var(--surface);border:1px solid '+bd+';border-radius:6px;padding:1px 7px;white-space:nowrap">'+esc(c)+'</code>';
   }
-  var who = n.who_label
-    ? '<strong style="color:var(--text)">'+esc(n.who_label)+'</strong> '
-    : '';
+  /* The broker's own `who_label` is built from HANDLES, and it must stay that way —
+     the same sentence is served to the AGENT, which is addressed by handle. Here, where
+     a human is reading, name the PERSON and carry the handle alongside so the `sign #1`
+     in the sentence still has an owner they can point at. */
+  var who = '';
+  if(n.who && n.who.length){
+    /* A seat nobody ever joined is labelled as such rather than as a person who is
+       simply slow: the move is to chase the invite (or drop the todo), not to nudge. */
+    var never=(n.unjoined||[]);
+    var labels = n.who.map(function(h){
+      var row=rosterRow(h);
+      if(never.indexOf(h)>=0) return '@'+seatAddress(h)+' (never joined)';
+      return (row && row.name) ? row.name+"\u2019s agent (@"+seatAddress(h)+")" : '@'+seatAddress(h);
+    });
+    var joined = labels.length===1 ? labels[0]
+      : labels.slice(0,-1).join(', ')+' or '+labels[labels.length-1];
+    who = '<strong style="color:var(--text)">'+esc(joined)+'</strong> ';
+  } else if(n.who_label){
+    who = '<strong style="color:var(--text)">'+esc(n.who_label)+'</strong> ';
+  }
   var head = n.cmd
     ? who+'types '+chip(n.cmd)+(n.alt&&n.alt!==n.cmd?' <span style="color:var(--text-3)">or</span> '+chip(n.alt):'')
     : '';
@@ -1091,14 +1469,22 @@ function dropTodoHTML(d,t){
   if(t.status==='dropped'||t.status==='verified') return '';
   if(!(t.status==='pending'||t.stuck)) return '';
   if(!(state.viewer && state.viewer.mode!=='buddy')) return '';
-  var why = t.stuck ? 'This deliverable is stuck.'
-          : 'Nothing here moves until '+esc((t.awaiting||[]).join(' and ')||'every party')+' accepts.';
-  var cmd = 'sys-buddy todo drop '+d.id+' '+t.id+' --reason "…"';
+  /* Name the seats nobody ever joined outright: that is the case where waiting is
+     pointless and dropping is the honest move, and it is exactly why this panel is
+     here. No timeout does it for you — a silently expiring todo is worse. */
+  /* This panel says what DROPPING does. It does NOT re-explain why the todo is stuck —
+     the NEXT card directly above already names who is blocking and why, and repeating it
+     made a two-line situation read as a wall of text. One fact, one place. */
+  var why = 'Drops #'+todoNo(t)+' for everyone. Its scope, its contract and the whole '
+          + 'thread stay in the event log — dropping ends it, it does not erase it.';
+  /* A line the human TYPES, so it carries the per-task number — the CLI takes the same
+     `#N` the agents do, not the global row id. */
+  var cmd = 'sys-buddy todo drop '+d.id+' '+todoNo(t)+' --reason "…"';
   return '<div style="margin:12px 16px 0;padding:11px 13px;border:1px dashed var(--border-strong);border-radius:11px">'+
     '<div style="display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;color:var(--text-2)">'+
       '<span style="display:flex;color:var(--st-testing-fg)">'+IC.warn+'</span>Drop todo (host)</div>'+
     '<p style="margin:6px 0 8px;font-size:11.5px;color:var(--text-2);line-height:1.5">'+why+
-      ' If it isn’t worth waiting for, drop it from your own terminal — this dashboard only ever reads.</p>'+
+      ' Run it from your own terminal — this dashboard only ever reads.</p>'+
     '<div style="font-family:'+MONO+';font-size:11px;color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;overflow-x:auto;white-space:pre">'+esc(cmd)+'</div></div>';
 }
 
@@ -1106,18 +1492,32 @@ function dropTodoHTML(d,t){
    its own header + mini-stepper. Back returns to the list. */
 function todoDetailHTML(d,t){
   var parties=(t.parties||[]).map(function(p){
-    var a=av(p);
+    var a=avSeat(p), who=seatIdentity(p);
     var yes=(t.accepted_by||[]).indexOf(p)>=0, no=(t.declined_by||[]).indexOf(p)>=0;
+    /* The waiting mark is a hollow ring, NOT an ellipsis. `…` immediately after a name
+       that is itself ellipsis-truncated is unreadable — "[qa] · not joined …" looks like
+       cut-off text rather than "awaiting acceptance", and a reader cannot tell which. A
+       ring cannot be mistaken for truncation and pairs with the ✓/✕ it sits beside. */
     var mark = yes ? '<span style="color:var(--st-verified-fg);font-weight:700">✓</span>'
              : no  ? '<span style="color:var(--st-stuck-fg);font-weight:700">✕</span>'
-             : '<span style="color:var(--text-3);font-weight:700">…</span>';
-    var tip = a.label+' — '+(yes?'accepted':(no?('declined: '+((t.decline_reasons||{})[p]||'')):'awaiting acceptance'));
-    return '<span title="'+esc(tip)+'" style="display:inline-flex;align-items:center;gap:5px;padding:2px 9px 2px 2px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border);font-size:10.5px;font-weight:600;color:var(--text-2)">'+
-      '<span style="width:16px;height:16px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+esc(a.label)+mark+'</span>';
+             : '<span style="color:var(--text-3);font-weight:700">○</span>';
+    /* the tooltip carries the HANDLE too: the pill answers "who", the handle is what
+       you type at your agent, and a reader needs both without leaving the pill. */
+    var neverJoined=(t.unjoined||[]).indexOf(p)>=0;
+    var waitLbl = neverJoined ? 'awaiting acceptance — but nobody ever accepted this seat’s invite'
+                              : 'awaiting acceptance';
+    var tip = seatIdentity(p, true)+' — '+(yes?'accepted':(no?('declined: '+((t.decline_reasons||{})[p]||'')):waitLbl));
+    /* max-width + ellipsis on the NAME only: the decision mark (✓/✕/…) is the one part
+       that must never be the thing that gets cut, and the full identity — with the
+       handle — is always in the tooltip. */
+    return '<span title="'+esc(tip)+'" style="display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:2px 9px 2px 2px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border);font-size:10.5px;font-weight:600;color:var(--text-2)">'+
+      '<span style="width:16px;height:16px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+
+      '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(who)+'</span>'+
+      '<span style="flex:none">'+mark+'</span></span>';
   }).join('');
 
   var declines=Object.keys(t.decline_reasons||{}).map(function(r){
-    return '<div style="font-size:11.5px;color:var(--st-stuck-fg);line-height:1.5"><strong>'+esc(r)+'</strong> declined: '+esc(t.decline_reasons[r])+'</div>';
+    return '<div style="font-size:11.5px;color:var(--st-stuck-fg);line-height:1.5"><strong>'+esc(seatIdentity(r, true))+'</strong> declined: '+esc(t.decline_reasons[r])+'</div>';
   }).join('');
   if(declines) declines='<div style="margin:10px 16px 0;padding:8px 11px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:10px;display:flex;flex-direction:column;gap:4px">'+declines+'</div>';
 
@@ -1137,7 +1537,7 @@ function todoDetailHTML(d,t){
       '<div style="flex:1;min-width:0">'+
         '<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">'+
           '<span style="font-size:13.5px;font-weight:600;color:var(--text)">'+esc(t.title)+'</span>'+
-          '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+t.id+' v'+t.version+'</span>'+
+          '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+esc(todoNo(t))+' v'+esc(t.version)+'</span>'+
           todoStatusChip(t)+'</div>'+
         '<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-2);line-height:1.5">'+esc(t.scope)+'</p>'+
       '</div></div>'+
@@ -1198,13 +1598,12 @@ function debugChip(stateName){
 }
 function debugTaskHTML(d){
   var chip=debugChip(d.state);
-  var avs=(d.roles||[]).map(function(r){ return avatarChip(r,22,10); }).join('');
+  var avs=castChips(d,22,10);
   var statusHeader='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:15px 20px;margin-bottom:16px">'+
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
     '<span style="display:inline-flex;align-items:center;gap:7px;padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:7px;height:7px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
     '<span style="font-size:12.5px;color:var(--text-2)">Debug session — collaborate, then mark resolved.</span>'+
-    '<div style="flex:1"></div><div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;gap:4px">'+avs+'</div></div>'+
-    preflightRow(d)+'</div>';
+    '<div style="flex:1"></div><div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;gap:4px">'+avs+'</div></div></div>';
   return '<div style="max-width:1200px;margin:0 auto;padding:20px 20px 80px">'+
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px">'+
       '<button data-home="1" style="display:inline-flex;align-items:center;gap:6px;padding:6px 11px;background:var(--surface);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;color:var(--text-2)">'+IC.back+'Tasks</button>'+
@@ -1212,6 +1611,7 @@ function debugTaskHTML(d){
       '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
     '</div>'+
     statusHeader+
+    rosterPanel(d)+
     activityStripHTML(d)+
     readinessFailPanel(d)+
     threadHTML(d)+
@@ -1227,67 +1627,39 @@ function debugTaskHTML(d){
    codes that apply to each mode.
 
    This used to be an inline `<details>` at the bottom of the task page; it now renders
-   INSIDE the Commands slide-out (panelHTML below). The content is unchanged — it was
-   moved, not rewritten — and in particular the role-tag row is still generated FROM
-   ROLE_TAGS. Hard-coding that list is literally how `upto` went missing from the
-   cheatsheet; one source, never a hand-maintained copy. */
+   INSIDE the Commands slide-out (panelHTML below).
+
+   Every row, its grouping and its mode now come from SHORTCODES — this function only
+   decides how a row LOOKS. It used to hand-type all twenty-odd codes while
+   workflowsPanelBody hand-typed its own copy, and the two had drifted (`reopen` here vs
+   `reopen <why> #N` in the prompt; `stuck [#N]`'s optionality claimed for every command).
+   The role-tag row is still built FROM ROLE_TAGS: one source, never a copy. */
 function shortcodesHTML(d){
-  var contract = !(d && d.mode==='debug');
+  var mode = (d && d.mode==='debug') ? 'debug' : 'contract';
   /* esc() is NOT optional here: `todo <title>` and `no #N <why>` contain angle brackets,
      and an unescaped `<title>` is a real element the parser then reads TEXT into — it
      silently ate every row after it (and, in the panel, the whole Broker-tools section
      below). Placeholders are copy, not markup. */
   function code(c){ return '<span style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:6px;padding:1px 6px;white-space:nowrap">'+esc(c)+'</span>'; }
-  function grp(label){ return '<div style="color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:7px 0 1px">'+label+'</div>'; }
+  function grp(label){ return '<div style="color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:7px 0 1px">'+esc(label)+'</div>'; }
   function cmd(c, desc){ return '<div style="display:flex;gap:9px;align-items:baseline"><span style="flex:none;min-width:70px">'+code(c)+'</span><span>'+desc+'</span></div>'; }
-  var rows =
-    grp('Messaging')+
-    cmd('wm', 'wait for the next message (blocks)')+
-    cmd('ch', "check for new messages now (read + mark seen), don't block")+
-    cmd('sm', 'send a message to everyone on the task')+
-    cmd('sm @role', 'send it privately to just that role')+
-    cmd('upto', "share an ambient \"what we're up to\" note")+
-    cmd('notify', 'ping the humans on Slack — terminal events only')+
+  var group=null, rows='';
+  SHORTCODES.forEach(function(s){
+    if(s.modes.indexOf(mode)<0) return;
+    var c=s.code, desc=s.desc;
     /* Role tags: the same @role slot, addressed by tag instead of the full name. Listed
        under Messaging (not their own group) because they are an argument spelling, not a
        command — `sm @BE` IS `sm @role`. Rendered from ROLE_TAGS so this row and the
        broker's resolver can't drift apart. */
-    cmd('@' + Object.keys(ROLE_TAGS)[0].toUpperCase() + ' …',
-        'tag a role instead of spelling it: ' +
-        Object.keys(ROLE_TAGS).map(function(t){
-          return '<b>' + t.toUpperCase() + '</b> ' + ROLE_TAGS[t];
-        }).join(' · '));
-  if(contract){
-    rows +=
-      grp('Contract')+
-      cmd('pc [#N]', 'propose a contract — add #N to scope it to todo N')+
-      cmd('gc [#N]', 'show the contract (of todo N with #N)')+
-      cmd('sign [#N]', 'sign / lock the contract')+
-      cmd('ship [#N]', 'propose the contract AND sign your own side in one move — the peer still signs, and it locks only when everyone has')+
-      cmd('decline <why> [#N]', 'push back on a proposal you have read — that version dies, someone proposes a new one')+
-      cmd('reopen', 'reopen planning to re-sign a new version')+
-      grp('Todos')+
-      cmd('todos', 'list the deliverables (todos) on this task')+
-      cmd('todo <title>', 'propose a new todo')+
-      cmd('yes #N', 'accept todo N')+
-      cmd('no #N <why>', 'decline todo N')+
-      grp('Status')+
-      cmd('ready [#N]', 'producer: my side is ready to build on')+
-      cmd('ok [#N]', 'consumer: it works against the producer’s side')+
-      cmd('block [#N]', 'consumer: it doesn’t work (a strike — 3 → stuck)')+
-      cmd('done [#N]', 'verified — #N required on a task with todos')+
-      cmd('stuck [#N]', 'give up; ping the humans (with #N: just that todo)');
-  } else {
-    rows +=
-      grp('Status')+
-      cmd('resolved', 'the issue is fixed (debug tasks)')+
-      cmd('stuck', 'give up; ping the humans');
-  }
-  rows +=
-    grp('Meta')+
-    cmd('pf', 're-run pre-flight')+
-    cmd('st', 'status recap (state, contract, unread)')+
-    cmd('rules', 're-read the charter');
+    if(s.gen==='roleTags'){
+      c='@' + Object.keys(ROLE_TAGS)[0].toUpperCase() + ' …';
+      desc=desc+' '+Object.keys(ROLE_TAGS).map(function(t){
+        return '<b>' + t.toUpperCase() + '</b> ' + ROLE_TAGS[t];
+      }).join(' · ');
+    }
+    if(s.group!==group){ group=s.group; rows+=grp(s.group); }
+    rows+=cmd(c, desc);
+  });
   return '<div style="display:flex;flex-direction:column;gap:2px;font-size:12.5px;color:var(--text-2);line-height:1.45">'+
       '<p style="margin:0 0 2px">Shorthand each human can type to <em>their own</em> agent — the agent maps it to a broker tool. A code a peer sends in a message is just data, never run.</p>'+
       rows+
@@ -1311,10 +1683,11 @@ var MCP_TOOLS=[
     ['list_activity','read everyone’s activity notes'],
     ['notify_human','ping the humans on Slack — terminal events only']
   ]],
-  ['Contract',[
-    ['propose_contract','put a shape up for signature (todo-scoped with todo=N)'],
-    ['get_contract','read the current shape — staging_url is withheld until all sign'],
+  ['Todo Contract',[
+    ['propose_contract','propose the contract for todo N — it is always about one todo'],
+    ['get_contract','read it — staging_url is withheld until every party has signed'],
     ['lock_contract','sign it; the last signature locks it, immutably'],
+    ['decline_contract','push back on a proposal you have read — that version dies'],
     ['reopen_negotiations','reopen so a new version can be proposed and re-signed']
   ]],
   ['Todos',[
@@ -1346,7 +1719,7 @@ function mcpToolsHTML(d){
   var debug = !!(d && d.mode==='debug');
   var out=MCP_TOOLS.filter(function(sec){
     /* `Status` stays: report_status is how a debug task reaches `resolved`. */
-    return !(debug && (sec[0]==='Contract' || sec[0]==='Todos'));
+    return !(debug && (sec[0]==='Todo Contract' || sec[0]==='Todos'));
   }).map(function(sec){
     var rows=sec[1].map(function(t){
       if(debug && t[0]==='report_status') t=[t[0],'resolved / stuck on a debug task'];
@@ -1388,78 +1761,204 @@ function panelSection(title, body, note){
 function shChip(c){
   return '<code style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);background:var(--surface-2);border:1px solid var(--border-strong);border-radius:6px;padding:1px 6px;white-space:nowrap">'+esc(c)+'</code>';
 }
-function flowRow(step, who, what){
-  return '<div style="display:flex;gap:10px;align-items:baseline;padding:5px 0;border-top:1px solid var(--border)">'+
-    '<span style="flex:none;min-width:74px">'+shChip(step)+'</span>'+
-    '<span style="flex:none;min-width:88px;font-size:11px;font-weight:600;color:var(--text)">'+esc(who)+'</span>'+
-    '<span style="min-width:0;font-size:11.5px;color:var(--text-2);line-height:1.5">'+what+'</span></div>';
+
+/* ---------- Workflows panel ----------
+   Three collapsible sections, everything shut on open, so the first screen is three
+   lines rather than the wall of eight flat sections this replaced. The reference material
+   (gates, traps, disagreements) nests one level down: you meet it when you've hit it.
+
+   The prose says "contract", plainly, because that is what it is and it is a good word:
+   two parties write down what they are agreeing to and sign it. There is exactly ONE kind
+   — an agreement about one todo — so nothing here needs qualifying against a second, and
+   the tool names in the steps table (`propose_contract`, `lock_contract`) name the same
+   thing the sentences do. An earlier pass hid the word behind "the shape"; that made the
+   panel and the tools read as two different concepts and taught neither.
+
+   Tom 🐱 produces, Jerry 🐭 consumes, Spike 🐶 is on the task but not on this todo. Two
+   parties who famously do not get along is the honest illustration: the broker does not
+   ask them to trust each other, it just refuses to let either skip a step. Every emoji is
+   aria-hidden — the name beside it already carries the meaning. */
+
+/* The seven steps, in order, BY SHORTCODE ID — the literals and the tool names both come
+   from SHORTCODES, so the table cannot drift from the cheatsheet the way the hand-typed
+   stepper label list did. */
+var WF_STEPS=['todo','yes','pc','sign','ready','ok','done'];
+
+function wfStepsHTML(){
+  return WF_STEPS.map(function(id,i){
+    var e=SHORTCODE_BY_ID[id]||{};
+    return '<div style="display:flex;gap:9px;align-items:baseline;padding:4px 0;border-top:1px solid var(--border)">'+
+      '<span style="flex:none;width:12px;font-size:10.5px;color:var(--text-3);font-variant-numeric:tabular-nums">'+(i+1)+'</span>'+
+      '<span style="flex:none;min-width:116px">'+shChip(SH(id))+'</span>'+
+      '<span style="min-width:0;font-family:'+MONO+';font-size:10.5px;color:var(--text-2);word-break:break-word">'+esc((e.tools||[]).join(' + '))+'</span></div>';
+  }).join('');
+}
+/* One line of the story. The icons alternate down the column, which shows the
+   producer/consumer turn-taking faster than the sentences do. */
+function wfSay(icon,who,what){
+  return '<div style="display:flex;gap:8px;padding:3px 0;font-size:11.5px;color:var(--text-2);line-height:1.5">'+
+    '<span aria-hidden="true" style="flex:none">'+icon+'</span>'+
+    '<span style="min-width:0"><strong style="color:var(--text)">'+esc(who)+'</strong> '+what+'</span></div>';
+}
+function wfNote(icon,text,tone){
+  var b=tone==='warn'?'var(--st-testing-dot)':'var(--border)', bg=tone==='warn'?'var(--st-testing-bg)':'var(--surface-2)';
+  return '<div style="display:flex;gap:8px;margin:9px 0 0;padding:9px 11px;background:'+bg+';border:1px solid '+b+';border-radius:10px;font-size:11.5px;color:var(--text-2);line-height:1.55">'+
+    '<span aria-hidden="true" style="flex:none">'+icon+'</span><span style="min-width:0">'+text+'</span></div>';
+}
+function wfP(text){ return '<div style="font-size:11.5px;color:var(--text-2);line-height:1.6">'+text+'</div>'; }
+function wfSub(label){ return '<div style="margin:13px 0 3px;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3)">'+esc(label)+'</div>'; }
+
+/* A disclosure row. `attr` keys the click handler; the caret and the label are one button
+   so the whole row is the hit target. */
+function wfRow(attr,key,open,title,sub,body){
+  return '<div style="border-top:1px solid var(--border)">'+
+    '<button '+attr+'="'+esc(key)+'" aria-expanded="'+(open?'true':'false')+'" '+
+      'style="width:100%;display:flex;gap:9px;align-items:baseline;padding:10px 2px;background:none;border:0;cursor:pointer;text-align:left;color:var(--text);font:inherit">'+
+      '<span aria-hidden="true" style="flex:none;color:var(--text-3);font-size:10px">'+(open?'▾':'▸')+'</span>'+
+      '<span style="min-width:0;flex:1">'+
+        '<span style="display:block;font-size:12.5px;font-weight:700">'+esc(title)+'</span>'+
+        (sub?'<span style="display:block;margin-top:2px;font-size:11.5px;color:var(--text-2);font-weight:400">'+sub+'</span>':'')+
+      '</span></button>'+
+    (open?'<div style="padding:0 2px 16px 22px">'+body+'</div>':'')+
+    '</div>';
+}
+/* An explicit toggle wins; an UNTOUCHED key falls back to the mode default, so a debug
+   task opens on its own section without anyone having clicked. */
+function wfIsOpen(key,mode){
+  if(state.wf.sec[key]!==undefined) return !!state.wf.sec[key];
+  return mode==='debug' ? key==='debug' : false;
+}
+function wfCastToggle(){
+  function b(v,label){
+    var on=state.wf.cast===v;
+    return '<button data-wf-cast="'+v+'" style="padding:3px 10px;border-radius:999px;font:inherit;font-size:11px;font-weight:600;cursor:pointer;'+
+      'border:1px solid '+(on?'var(--accent)':'var(--border)')+';background:'+(on?'var(--surface-2)':'transparent')+';color:'+(on?'var(--text)':'var(--text-3)')+'">'+esc(label)+'</button>';
+  }
+  return '<div style="display:flex;gap:6px;align-items:center;margin:0 0 11px;flex-wrap:wrap">'+
+    '<span style="font-size:11px;color:var(--text-3)">Show me with:</span>'+b('2','2 agents')+b('3','3+ agents')+'</div>';
 }
 
 /* Every rule below is a SUMMARY of docs/todo-flow.md, deliberately not a second copy of
    it — two statements of the same rules drift, and the doc is the one that gets updated
    alongside todos.py/state.py. Anything needing detail links out instead. */
-function workflowsPanelBody(){
-  var fields='<div style="display:flex;flex-direction:column;gap:8px">'+
-    '<div style="padding:9px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px">'+
-      '<div style="font-size:11.5px;font-weight:700;color:var(--text)">'+shChip('status')+' — the agreement</div>'+
-      '<div style="margin-top:5px;font-size:11.5px;color:var(--text-2);line-height:1.5">“How much have we agreed?” pending → accepted → contracted → verified / dropped. Derived on every read, shown as the <strong>status chip</strong>.</div></div>'+
-    '<div style="padding:9px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px">'+
-      '<div style="font-size:11.5px;font-weight:700;color:var(--text)">'+shChip('state')+' — the march</div>'+
-      '<div style="margin-top:5px;font-size:11.5px;color:var(--text-2);line-height:1.5">“How far has it been built?” Shown as the <strong>mini-stepper</strong>, whose four labels fold six march values: planning · building · ready · verified. <strong>“building” means the contract is locked</strong>, not that anything is being built yet.</div></div>'+
-    '<div style="padding:9px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px">'+
-      '<div style="font-size:11.5px;font-weight:700;color:var(--text)">'+shChip('stuck')+' — a flag, not a state</div>'+
-      '<div style="margin-top:5px;font-size:11.5px;color:var(--text-2);line-height:1.5">A stuck deliverable stays exactly where it was on the march so it can’t brick the other five. It just carries a ⚠.</div></div>'+
-  '</div>';
+function workflowsPanelBody(d){
+  /* Every COMMAND below comes from SHORTCODES via SH() — this panel hand-typed its own
+     copy of the vocabulary and drifted from the cheatsheet's. The literal chips that
+     stay literal here are NOT commands: `status`/`state` are db columns,
+     `submit_readiness` is a tool name, `#N` is the token itself. */
+  /* Spelled-out numbers so the sentence below can COUNT the stepper rather than assert a
+     total: it named one fewer label than the stepper drew from the day `testing` got its
+     own node, and listed the labels by hand while it was at it. */
+  var NUM=['zero','one','two','three','four','five','six','seven','eight','nine','ten'];
+  function words(n){ return NUM[n]||String(n); }
+  var stepLabels=TODO_STEPS.map(function(s){ return s[1]; }).join(' → ');
+  var mode=(d && d.mode==='debug') ? 'debug' : 'contract';
+  var sub=state.wf.sub;
 
-  var walk=
-    flowRow('todo <title>','any party','propose a deliverable. Proposing <em>is</em> your own acceptance, and you must name yourself a party.')+
-    flowRow('yes #N','every other','accept it. Status turns <em>accepted</em> once all have. '+shChip('no #N <why>')+' records a reason and hands it back.')+
-    flowRow('pc #N','any party','propose the contract — and <strong>whoever proposes becomes the producer</strong> for that todo. Only after it is accepted.')+
-    flowRow('sign #N','every party','sign it. The last signature locks it, immutably, and releases the '+shChip('staging_url')+'.')+
-    flowRow('ready #N','producer only','“my side is live, build against it.”')+
-    flowRow('ok #N','consumers only','“it works.” '+shChip('block #N')+' instead is a <strong>strike</strong> — three and the broker pulls the cord on that one deliverable.')+
-    flowRow('done #N','any party','verified. The task concludes when the <strong>last</strong> todo verifies.');
+  /* ----- nested reference, all shut by default: you meet it when you've hit it ----- */
+  var nMarkers=wfP('Two things move, and they answer different questions.')+
+    wfSub('The chip — how much have we agreed?')+
+    wfP('pending → accepted → <strong>signed</strong> → verified')+
+    wfSub('The stepper — how far has it been built?')+
+    wfP(esc(stepLabels))+
+    wfNote('⚠','<strong>“building” means you have both signed the contract.</strong> Not that any code exists yet. '+
+      'The '+words(TODO_STEPS.length)+' stepper labels fold '+words(Object.keys(TODO_MARCH).length)+' stored values, which is why two of them share a node.','warn');
 
-  var traps='<div style="display:flex;flex-direction:column;gap:8px">'+
-    '<div style="padding:9px 11px;background:var(--st-testing-bg);border:1px solid var(--st-testing-dot);border-radius:10px;font-size:11.5px;color:var(--text);line-height:1.55">'+
-      '<strong>1 · '+shChip('sign')+' before anything is proposed does nothing.</strong> A signature needs a proposal to attach to. If you typed '+shChip('sign #N')+' and nothing moved, nobody has run '+shChip('pc #N')+' yet. An agent told to sign with nothing proposed should propose it under a stated assumption and sign, not come back asking — its peer still reviews and signs before anything locks. '+shChip('ship #N')+' does both in one move.</div>'+
-    '<div style="padding:9px 11px;background:var(--st-testing-bg);border:1px solid var(--st-testing-dot);border-radius:10px;font-size:11.5px;color:var(--text);line-height:1.55">'+
-      '<strong>2 · Nothing auto-advances.</strong> No timer, no daemon. Every arrow above is a person deciding and the broker allowing it. A todo parked at <em>building</em> forever isn’t a hung process — the producer just hasn’t typed '+shChip('ready #N')+'. The <strong>Next</strong> line on the todo card names who owes the move.</div>'+
-  '</div>';
+  var nDisagree=
+    wfP('<strong>'+shChip(SH('no'))+'</strong> hands the todo back, with your reason on it.')+
+    wfP('<strong>'+shChip(SH('decline'))+'</strong> rejects that version of the contract — it dies, and someone proposes a new one.')+
+    wfP('<strong>'+shChip(SH('reopen'))+'</strong> re-opens one that was already signed.')+
+    wfNote('🐱','Someone has to go first. Whoever proposes the contract becomes the <strong>producer</strong> — that is a rule, not a favour. Tom did not earn it.');
 
-  var gates='<div style="font-size:11.5px;color:var(--text-2);line-height:1.6">'+
-    'Refused unless: you are a <strong>named party</strong> on the todo · '+shChip('pc #N')+' needs it <em>accepted</em> · '+
-    shChip('ready #N')+' needs you to be the <strong>producer</strong> with a locked contract · '+shChip('ok #N')+' / '+shChip('block #N')+
-    ' needs you <strong>not</strong> to be the producer, after a ready · '+shChip('done #N')+' needs it in <em>testing</em>. '+
-    'Every refusal raises an error the agent can read.</div>';
+  var nBreaks=
+    wfP(shChip(SH('block'))+' is a <strong>strike</strong>. Three strikes and the broker pulls the cord on <em>that one deliverable</em> — not the task.')+
+    wfP(shChip(SH('stuck','scoped'))+' flags one deliverable. A bare '+shChip(SH('stuck','bare'))+
+      ' escalates the whole thing to the humans, and it is the only command that works without an ID.')+
+    wfNote('🐭','Finding the hole is Jerry’s whole job. Three holes and the broker ends the chase.');
 
-  var why='<div style="font-size:11.5px;color:var(--text-2);line-height:1.6">Once a task has todos, “backend is ready” is meaningless — ready on <em>which</em> deliverable? So '+
-    shChip('ready')+' / '+shChip('ok')+' / '+shChip('block')+' / '+shChip('done')+' are todo-scoped and '+shChip('#N')+' is <strong>required</strong>; the broker refuses the bare form and lists the live todos. '+
-    'The one exception is '+shChip('stuck')+': '+shChip('stuck #N')+' flags one deliverable, a bare '+shChip('stuck')+' escalates the whole collaboration.</div>';
+  var nStall=
+    wfP('<strong>1 · '+shChip(SH('sign'))+' with nothing proposed does nothing.</strong> A signature needs something to attach to. '+
+      'If nothing moved, nobody has run '+shChip(SH('pc'))+' yet. '+shChip(SH('ship'))+' does both in one move.')+
+    '<div style="height:9px"></div>'+
+    wfP('<strong>2 · Nothing auto-advances.</strong> No timer, no daemon. A todo parked at <em>building</em> is not a hung process — '+
+      'someone just has not typed '+shChip(SH('ready'))+'. The <strong>Next</strong> line on the card names who owes the move.');
 
-  var debug='<div style="font-size:11.5px;color:var(--text-2);line-height:1.6">A debug task has no contract and no stepper — its whole life is <strong>open → resolved</strong>. '+
-    'Collaborate in the thread, then either party types '+shChip('resolved')+', or '+shChip('stuck')+' to give up and ping the humans.</div>';
+  var nGates=wfP('You must be a <strong>named party</strong> on the todo · '+
+    shChip(SH('pc'))+' needs it <em>accepted</em> · '+
+    shChip(SH('ready'))+' needs you to be the <strong>producer</strong>, with the contract signed · '+
+    shChip(SH('ok'))+' / '+shChip(SH('block'))+' needs you <strong>not</strong> to be the producer, after a ready · '+
+    shChip(SH('done'))+' needs it in <em>testing</em>.')+
+    wfP('<span style="color:var(--text-3)">Every refusal comes back as an error your agent can read.</span>');
 
-  var pre='<div style="font-size:11.5px;color:var(--text-2);line-height:1.6">Before an agent may send a message or change any status, it answers the readiness questions via '+
-    shChip('submit_readiness')+'. Until it passes, its action tools stay locked and its avatar wears an amber lock badge; passing swaps that for a green ✓, and a pulsing green dot while it is parked waiting for mail. '+
-    'A human can coach a failure and the agent re-runs it with '+shChip('pf')+'. Pre-flight is per-seat, and it is the second node on the task stepper.</div>';
+  /* ----- the spine ----- */
+  var cast3=state.wf.cast==='3';
+  var story=
+    wfSay('🐱','Tom','proposes “sign-in endpoint.”')+
+    wfSay('🐭','Jerry','says yes. <span style="color:var(--text-3)">Now they agree on WHAT.</span>')+
+    wfSay('🐱','Tom','writes down the contract — the exact shape it will take.')+
+    wfSay('🐭','Jerry','reads it and agrees. Both sign — which locks it and releases the staging link. <span style="color:var(--text-3)">Now they agree on HOW.</span>')+
+    wfSay('🐱','Tom','builds it and says it is live.')+
+    wfSay('🐭','Jerry','tries it and says it works. <span style="color:var(--text-3)">Either one says done.</span>')+
+    (cast3
+      ? wfSay('🐶','Spike','is on this task, but not on this todo. So nobody waits for him and he cannot sign it. His own todo is '+shChip('#2')+', on its own clock.')+
+        wfNote('🐶','Spike does not chase anybody. He just has his own thing to build.')
+      : wfNote('🐱🐭','These two have never once gotten along. sys-buddy does not ask them to. It just makes sure neither can skip a step.'));
+
+  /* The TWO AGREEMENTS lead the section, and that placement is the point. This panel
+     already said it — "agrees twice, once to what, once to how" — but as an info note
+     BELOW the story and the steps table, and a real reader still came away thinking that
+     accepting a todo meant he had agreed how to build it. By the time the correction
+     arrived he had already built the wrong model, so it read as a detail rather than as
+     the frame. Same sentence shape for both gates, so they read as two of the same kind
+     of thing; and both name the refusal ("accept or deny", "or not") because a reader who
+     knows they can REFUSE understands it is a real gate — which is exactly what the
+     misreading missed. */
+  var todosBody=
+    wfP('A todo is <strong>what</strong> you want to build with your team. They can accept or deny what is being built.')+
+    wfP('A <strong>todo contract</strong> is what follows next: <strong>how</strong> you want to build it. A contract is proposed, and the parties may accept it or not.')+
+    wfP('<span style="color:var(--text-3)">So each todo is agreed twice — once on what, once on how.</span>')+
+    '<div style="height:11px"></div>'+
+    wfCastToggle()+
+    wfSub('The story')+story+
+    wfSub('The steps')+wfStepsHTML()+
+    wfNote('ⓘ','<strong>'+shChip('#1')+' is the todo’s ID.</strong> Every task numbers its own todos from 1, so the first thing you agree on any task is always '+shChip('#1')+
+      '. With several in flight the ID is the only thing telling your agent which one you mean — that is why all seven need it.')+
+    wfNote('ⓘ','<strong>You do not have to type the shorthand.</strong> “accept todo 1” works just as well — we train your agent on these seven tools, so it knows which one you mean. The shorthand just saves keystrokes.')+
+    /* Was a second statement of "agrees twice", which the section now opens with. Kept for
+       the part the intro does NOT carry: WHO the two agreements belong to. */
+    wfNote('ⓘ','Both agreements are made by <strong>everyone the todo names</strong> — nobody else is asked, and nobody else can block it.')+
+    '<div style="height:9px"></div>'+
+    wfRow('data-wf-sub','markers',!!sub.markers,'Reading the two progress markers','',nMarkers)+
+    wfRow('data-wf-sub','disagree',!!sub.disagree,'When someone disagrees','',nDisagree)+
+    wfRow('data-wf-sub','breaks',!!sub.breaks,'When something breaks','',nBreaks)+
+    wfRow('data-wf-sub','stall',!!sub.stall,'When nothing is moving','',nStall)+
+    wfRow('data-wf-sub','gates',!!sub.gates,'What the broker refuses','',nGates);
+
+  var preBody=
+    wfP('Your agent answers a few readiness questions before it can send anything or change any status. It submits them with '+shChip('submit_readiness')+'.')+
+    wfP('Until it passes: an amber 🔒 on its avatar and its action tools stay locked. After: a green ✓, plus a pulsing dot while it is parked waiting for mail.')+
+    wfP('Coach a failure and it re-runs with '+shChip(SH('pf'))+'. Pre-flight is <strong>per seat</strong> — each agent does its own, and it is the second node on the task stepper.')+
+    wfNote('🐱','Think of it as the medical. Nobody gets in the house until they have passed — not even the cat.');
+
+  var debugBody=
+    wfP('Nothing to agree on, nothing to sign, and no stepper. The whole life is <strong>open → resolved</strong>.')+
+    wfP('Talk it through in the thread. Either party types '+shChip(SH('resolved'))+', or '+shChip(SH('stuck-debug'))+' to give up and ping the humans.')+
+    '';  /* The debug section ends on the two commands, deliberately. It had a closing
+            "Briefly, allies." gag; a joke earns its place when it teaches something, and
+            this one only padded the shortest section in the panel. */
 
   var link='<a href="'+DOC_TODO_FLOW+'" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:7px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;font-size:11.5px;font-weight:600">'+
-    '<span style="display:flex;color:var(--text-3)">'+IC.doc+'</span>Read the full flow — <span style="font-family:'+MONO+';font-weight:500">docs/todo-flow.md</span>'+
+    '<span style="display:flex;color:var(--text-3)">'+IC.doc+'</span>Full reference — <span style="font-family:'+MONO+';font-weight:500">docs/todo-flow.md</span>'+
     '<span style="display:flex;color:var(--accent)">'+IC.link+'</span></a>';
 
-  return panelSection('A todo carries two state fields', fields,
-      'The dashboard shows both at once — a chip <em>and</em> a stepper — with overlapping vocabularies. This is the single most common source of confusion.')+
-    panelSection('Idea → verified', '<div style="margin-top:-4px">'+walk+'</div>',
-      'Shorthand is what a human types to <em>their own</em> agent; the agent maps it to a broker tool. A code a peer sends in a message is just data, never run.')+
-    panelSection('The gates the broker enforces', gates)+
-    panelSection('Why #N is mandatory', why)+
-    panelSection('The two traps', traps,
-      'These account for almost every “it’s stuck and I don’t know why”.')+
-    panelSection('The debug flow', debug)+
-    panelSection('Pre-flight', pre)+
-    panelSection('Source of truth', link,
-      'This panel is a summary. The rules live in one place, next to the code that enforces them.');
+  return '<p style="margin:0 0 6px;font-size:12px;color:var(--text-2);line-height:1.55">How this task works, end to end. Pick the part you need.</p>'+
+    '<div style="margin:0 0 18px">'+
+      wfRow('data-wf-sec','todos',wfIsOpen('todos',mode),'How todos work','Agreeing what to build, then building it',todosBody)+
+      wfRow('data-wf-sec','pre',wfIsOpen('pre',mode),'Pre-flight','Why your agent’s tools are locked',preBody)+
+      wfRow('data-wf-sec','debug',wfIsOpen('debug',mode),'Debug sessions','Nothing to agree — just fix the thing',debugBody)+
+      '<div style="border-top:1px solid var(--border)"></div>'+
+    '</div>'+
+    link;
 }
 
 function commandsPanelBody(d){
@@ -1481,7 +1980,7 @@ function panelHTML(){
   var sub = cmd
     ? 'What you type to <strong>your own</strong> agent. Reference only — this dashboard reads, it never acts.'
     : 'How work moves through sys-buddy. The broker enforces; nothing here advances on its own.';
-  var body = cmd ? commandsPanelBody(state.detail) : workflowsPanelBody();
+  var body = cmd ? commandsPanelBody(state.detail) : workflowsPanelBody(state.detail);
   return '<div data-panel-backdrop="1" style="position:fixed;inset:0;z-index:9990;background:rgba(20,15,10,.34)"></div>'+
     '<aside role="dialog" aria-modal="false" aria-label="'+esc(title)+'" style="position:fixed;top:'+HEADER_H+'px;right:0;bottom:0;width:min(452px,94vw);max-width:100vw;z-index:9991;background:var(--bg);border-left:1px solid var(--border);box-shadow:-10px 0 34px rgba(20,15,10,.18);display:flex;flex-direction:column">'+
       '<div style="flex:none;padding:15px 18px 13px;background:var(--surface);border-bottom:1px solid var(--border)">'+
@@ -1698,7 +2197,7 @@ function taskHTML(){
       '<h1 style="font-size:20px;font-weight:700;margin:0;color:var(--text);letter-spacing:-.02em">'+esc(d.title)+'</h1>'+
       '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
       '<div style="flex:1"></div>'+eventBtn+'</div>'+
-    stepper+activityStripHTML(d)+readinessFailPanel(d)+mobileTabs+
+    stepper+rosterPanel(d)+activityStripHTML(d)+readinessFailPanel(d)+mobileTabs+
     '<div style="'+rowStyle+'">'+
       '<div style="display:'+threadDisp+'">'+threadHTML(d)+'</div>'+
       /* the right column becomes the TODO LIST when the task has todos; selecting one
@@ -1720,7 +2219,7 @@ function sig(){
     view:state.view, taskId:state.taskId, error:state.error, theme:state.theme, isMobile:state.isMobile,
     viewer:state.viewer, tasks:tasksLite, detail:state.detail,
     expanded:state.expanded, version:state.version, selectedTodo:state.selectedTodo,
-    lightbox:state.lightbox, panel:state.panel, narrow:state.narrow,
+    lightbox:state.lightbox, panel:state.panel, narrow:state.narrow, wf:state.wf,
     eventFilter:state.eventFilter,
     eventLogOpen:state.eventLogOpen, mobileTab:state.mobileTab, switcherOpen:state.switcherOpen,
     loading:state.detail?0:state.loadingDetail
@@ -1793,6 +2292,18 @@ function bind(){
   }; });
   app.querySelectorAll('[data-panel-close]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.panel=null; render(); }; });
   var pbd=app.querySelector('[data-panel-backdrop]'); if(pbd) pbd.onclick=function(){ state.panel=null; render(); };
+  /* Workflows panel disclosure. Sections and nested entries toggle independently — an
+     accordion that shut its siblings would hide the thing you were comparing against. */
+  app.querySelectorAll('[data-wf-sec]').forEach(function(el){ el.onclick=function(){
+    var k=el.getAttribute('data-wf-sec'), d=state.detail;
+    state.wf.sec[k]=!wfIsOpen(k,(d&&d.mode==='debug')?'debug':'contract'); render();
+  }; });
+  app.querySelectorAll('[data-wf-sub]').forEach(function(el){ el.onclick=function(){
+    var k=el.getAttribute('data-wf-sub'); state.wf.sub[k]=!state.wf.sub[k]; render();
+  }; });
+  app.querySelectorAll('[data-wf-cast]').forEach(function(el){ el.onclick=function(){
+    state.wf.cast=el.getAttribute('data-wf-cast'); render();
+  }; });
   app.querySelectorAll('[data-lb-close]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.lightbox=null; render(); }; });
   app.querySelectorAll('[data-ep]').forEach(function(el){ el.onclick=function(){ var k=el.getAttribute('data-ep'); state.expanded[k]=!state.expanded[k]; render(); }; });
   app.querySelectorAll('[data-filter]').forEach(function(el){ el.onclick=function(){ state.eventFilter=el.getAttribute('data-filter'); render(); }; });

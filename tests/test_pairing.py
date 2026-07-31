@@ -73,7 +73,10 @@ def test_mint_invite_rejects_role_not_on_task(conn):
         admin.mint_invite("signin", "mobile")
         assert False
     except ValueError as e:
-        assert "role 'mobile'" in str(e)
+        # The refusal names the seats the task actually has, so the host can fix it
+        # without going to look them up.
+        assert "'mobile' is not a seat" in str(e)
+        assert "@backend" in str(e) and "@frontend" in str(e)
 
 
 # --- redeem_invite ----------------------------------------------------------
@@ -278,12 +281,29 @@ def test_list_tasks_returns_id_state_title(conn):
         assert "state" in r and "title" in r
 
 
-def test_create_task_rejects_duplicate_roles(conn):
+# Repeating a ROLE TYPE is now how you say "two backend developers" — and BOTH seats are
+# numbered, so no handle is spelled like the type they share. (`frontend`, declared once,
+# keeps the bare handle.) What must still be unique is the SEAT HANDLE, because that is
+# what quorum, party lists and provenance key on.
+def test_create_task_derives_a_second_seat_for_a_repeated_role(conn):
+    task = admin.create_task(
+        "dup-roles", title="Dup", roles=["backend", "backend", "frontend"]
+    )
+    assert task["roles"] == ["backend-1", "backend-2", "frontend"]
+    assert task["seat_roles"] == {
+        "backend-1": "backend", "backend-2": "backend", "frontend": "frontend"
+    }
+
+
+def test_create_task_rejects_a_duplicate_seat_handle(conn):
     try:
-        admin.create_task("dup-roles", title="Dup", roles=["backend", "backend", "frontend"])
-        assert False, "duplicate roles should be rejected"
+        admin.create_task(
+            "dup-seat", title="Dup",
+            roles=[{"role": "backend", "handle": "be"}, {"role": "frontend", "handle": "be"}],
+        )
+        assert False, "a duplicate handle should be rejected"
     except ValueError as e:
-        assert "unique" in str(e).lower()
+        assert "declared twice" in str(e)
 
 
 def test_create_task_rejects_blank_role(conn):

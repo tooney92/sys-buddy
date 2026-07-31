@@ -30,18 +30,18 @@ from tests.test_state import _agents, _to_backend_live, _task_state, _valid_spec
 
 # --- H1: verified only from 'testing' ---------------------------------------
 def test_verified_rejected_from_backend_live(conn):
-    ag = _agents(conn)
-    _to_backend_live(conn, ag)  # backend_live, zero tests run
-    with pytest.raises(ValueError, match="before tests have run"):
-        state.report_status(conn, ag["frontend"], state.STATUS_VERIFIED, "trust me")
+    ag = _agents(conn)  # seeds an accepted todo #1 — a contract is an agreement on one
+    _to_backend_live(conn, ag)  # backend_live, zero checks run
+    with pytest.raises(ValueError, match="before checks have run on it"):
+        state.report_status(conn, ag["frontend"], state.STATUS_VERIFIED, "trust me", 1)
     assert _task_state(conn) == state.BACKEND_LIVE  # no transition
 
 
 def test_verified_allowed_after_a_test_result(conn):
     ag = _agents(conn)
     _to_backend_live(conn, ag)
-    state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, "12/12")
-    r = state.report_status(conn, ag["frontend"], state.STATUS_VERIFIED, "green")
+    state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, "12/12", 1)
+    r = state.report_status(conn, ag["frontend"], state.STATUS_VERIFIED, "green", 1)
     assert r["state"] == state.VERIFIED
 
 
@@ -60,7 +60,7 @@ def test_oversized_status_detail_rejected(conn):
     ag = _agents(conn)
     _to_backend_live(conn, ag)
     with pytest.raises(ValueError, match="KB limit"):
-        state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, _too_big())
+        state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, _too_big(), 1)
 
 
 def test_oversized_contract_spec_rejected(conn):
@@ -68,7 +68,7 @@ def test_oversized_contract_spec_rejected(conn):
     spec = _valid_spec()
     spec["blob"] = _too_big()
     with pytest.raises(ValueError, match="KB limit"):
-        state.propose_contract(conn, ag["backend"], spec)
+        state.propose_contract(conn, ag["backend"], spec, 1)
 
 
 # --- send_message type allow-list -------------------------------------------
@@ -111,7 +111,7 @@ def test_contract_with_too_many_endpoints_rejected(conn):
     spec = _valid_spec()
     spec["endpoints"] = [{"method": "GET", "path": f"/e{i}"} for i in range(101)]
     with pytest.raises(ValueError, match="too many endpoints"):
-        state.propose_contract(conn, ag["backend"], spec)
+        state.propose_contract(conn, ag["backend"], spec, 1)
 
 
 # --- H2: closed task refuses pairing ----------------------------------------
@@ -180,14 +180,23 @@ def test_revoke_agent_scoped_to_one_task(conn):
     "https://db.local/x",
 ])
 def test_ssrf_internal_staging_url_rejected(url):
-    spec = {"endpoints": [{"method": "GET", "path": "/x"}], "staging_url": url}
-    assert any("staging_url" in e for e in contracts.validate_spec(spec))
+    # Checked where the HOST writes the value now — the target never reaches a spec.
+    assert any("staging_url" in e for e in contracts.validate_staging_url(url))
 
 
 @pytest.mark.parametrize("url", ["https://api-staging.example.com", "https://8.8.8.8/x"])
 def test_ssrf_public_staging_url_allowed(url):
-    spec = {"endpoints": [{"method": "GET", "path": "/x"}], "staging_url": url}
-    assert contracts.validate_spec(spec) == []
+    assert contracts.validate_staging_url(url) == []
+
+
+def test_no_agent_can_write_the_fetchable_url_at_all():
+    """The strongest form of the SSRF guard: the field an injection would aim at does
+    not exist. A spec carrying a target is refused before any URL rule is even asked."""
+    for url in ("https://api-staging.example.com", "https://169.254.169.254/"):
+        errors = contracts.validate_spec(
+            {"endpoints": [{"method": "GET", "path": "/x"}], "staging_url": url}
+        )
+        assert any("not yours to set" in e for e in errors)
 
 
 # --- Tier 1 #4: auth-failure rate limiter -----------------------------------
@@ -497,9 +506,10 @@ def test_join_client_surfaces_charter_and_expiry(monkeypatch):
 ])
 def test_leniency_requires_positive_same_machine_evidence(base_url, public_url):
     assert contracts.same_machine_origin(base_url, public_url) is False
-    spec = {"endpoints": [{"method": "GET", "path": "/x"}], "staging_url": "http://localhost:1"}
-    assert contracts.validate_spec(
-        spec, is_remote=True, same_machine=contracts.same_machine_origin(base_url, public_url)
+    assert contracts.validate_staging_url(
+        "http://localhost:1",
+        is_remote=True,
+        same_machine=contracts.same_machine_origin(base_url, public_url),
     )
 
 
@@ -515,27 +525,31 @@ def test_leniency_requires_positive_same_machine_evidence(base_url, public_url):
     "http://api-staging.example.com",
 ])
 def test_ssrf_guard_unchanged_on_a_remote_task(conn, url):
-    """A task with a real origin keeps every check it had before, end to end
-    through propose_contract."""
+    """A task with a real origin keeps every check it had before, end to end through
+    the surface that now WRITES the target."""
     set_config(Config(mode="remote", db_path=get_config().db_path))
-    ag = _agents(conn)
-    for ident in ag.values():
-        conn.execute("UPDATE agents SET ready = 1 WHERE id = ?", (ident.agent_id,))
-    conn.commit()
+    _agents(conn)
     with pytest.raises(ValueError, match="staging_url"):
-        state.propose_contract(conn, ag["backend"], _valid_spec(url=url))
+        admin.set_staging_url("signin", url)
 
 
 def test_agent_cannot_self_declare_same_machine_in_the_spec(conn):
     """The connectivity signal is a host-set task fact, never agent input: a
-    ``same_machine`` key smuggled into the proposal changes nothing."""
+    ``same_machine`` key smuggled into the proposal changes nothing. Neither does a
+    target — there is no longer a spec key for one."""
     set_config(Config(mode="remote", db_path=get_config().db_path))
     ag = _agents(conn)
     for ident in ag.values():
         conn.execute("UPDATE agents SET ready = 1 WHERE id = ?", (ident.agent_id,))
     conn.commit()
-    spec = _valid_spec(url="https://169.254.169.254/latest/meta-data/")
+    spec = _valid_spec()
+    spec["staging_url"] = "https://169.254.169.254/latest/meta-data/"
     spec["same_machine"] = True
     spec["is_remote"] = False
-    with pytest.raises(ValueError, match="staging_url"):
-        state.propose_contract(conn, ag["backend"], spec)
+    with pytest.raises(ValueError, match="not yours to set"):
+        state.propose_contract(conn, ag["backend"], spec, 1)
+    # The smuggled flags did not reach the row either — nothing was written at all.
+    assert conn.execute("SELECT COUNT(*) AS n FROM contracts").fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT same_machine FROM tasks WHERE id = 'signin'"
+    ).fetchone()["same_machine"] == 0

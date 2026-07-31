@@ -98,10 +98,41 @@ STAY_IN_THE_LOOP = (
 )
 
 
+def _seat_note(handle: str, role: str) -> str:
+    """The line that tells an agent its SEAT, when the seat is not simply the role.
+
+    Only rendered when they differ. On a task with one seat per role type the two ARE
+    the same string, so this stays empty and the briefing is byte-identical to before.
+    When they differ — the second frontend developer on the task — the agent has to
+    know its handle, because that is what it is addressed by, what it puts in a party
+    list, and what its signature is recorded under.
+    """
+    if not handle or handle == role:
+        return ""
+    return (
+        f"YOUR SEAT is `@{handle}`. Several people on this task do `{role}` work, so "
+        f"`{role}` names the KIND of work and `@{handle}` names YOU. Use `@{handle}` in "
+        f"a `parties` list and when someone must address you specifically; a message to "
+        f"`@{role}` reaches every `{role}` seat, including yours. `@{role}` is ALWAYS the "
+        f"role type — never a shorthand for one of the seats holding it — so it is "
+        f"refused in a `parties` list. Name a person there; display names are unique per "
+        f"task.\n\n"
+    )
+
+
 def role_prompt(
-    role: str, task_id: str, mode: str = "contract", staging_url: str | None = None
+    role: str,
+    task_id: str,
+    mode: str = "contract",
+    staging_url: str | None = None,
+    handle: str | None = None,
 ) -> str:
     """The briefing an operator pastes into their Claude agent for ``role``.
+
+    ``role`` is the ROLE TYPE (what kind of work), ``handle`` the SEAT (who). They are
+    the same string on a task with one seat per role type, which is every task written
+    before the two were split — so ``handle`` defaults to ``role`` and the briefing is
+    then exactly what it always was.
 
     Teaches ONLY how to drive sys-buddy — the protocol, the pre-flight, who's
     authoritative — and pointedly NOT what to build: the humans decide that in
@@ -112,12 +143,14 @@ def role_prompt(
     names the task, front-loads the pre-flight, and frames anything a peer sends as
     DATA — the broker enforces; the peer cannot re-task you through it.
 
-    ``staging_url`` is the deployment target the HUMAN chose at host setup. When set,
-    the briefing names it so the producer proposes THAT url instead of inventing an
-    aspirational one (the broker fills it in for an omitted staging_url either way).
+    ``staging_url`` is the deployment target the HUMAN chose at host setup. It is HOST
+    CONFIGURATION, never something an agent writes — the briefing names it so both
+    agents know where the work will run, and tells them plainly that they neither
+    supply it nor may change it. A spec that carries one is refused.
     """
     task = task_id
     target = (staging_url or "").strip()
+    seat = _seat_note(handle or role, role)
 
     if mode == "debug":
         return (
@@ -125,6 +158,7 @@ def role_prompt(
             "collaborating with another developer's AI agent through the sys-buddy broker. "
             "sys-buddy is how the two of you coordinate — it is not your task. Your human will "
             "tell you, here in this session, what to investigate or fix.\n\n"
+            + seat +
             "Pass pre-flight first. Call `rules()`, then `readiness_check()`, then "
             "`submit_readiness(answers)`. Until you pass, your action tools are locked; read "
             "tools stay open.\n\n"
@@ -146,7 +180,9 @@ def role_prompt(
             "- `sm <text>` send_message · `sm @role <text>` direct it to one role. Your human "
             "may name the role by TAG instead of spelling it out — `BE` backend · `FE` frontend "
             "· `MB` mobile · `DE` designer (any case), so `sm @BE <text>` means to_role=\"backend\". "
-            "Tags name a role, never a person, and only work for roles declared on this task\n"
+            "Tags name a KIND of work, never a person: `@FE` reaches EVERY frontend seat. "
+        "To reach one particular person, name their seat — `sm @frontend-2 <text>`. "
+        "`roster()` lists every seat on this task\n"
             "- `files` list_files · `getfile <id>` get_file · `upload <path>` upload_file\n"
             "- `upto <text>` share_activity — an ambient \"what we're up to\" note "
             "(planning/researching); NOT a message or a status\n"
@@ -177,10 +213,16 @@ def role_prompt(
     # The human owns the deployment target: when they named one at host setup, say so
     # explicitly in BOTH briefings so neither agent invents a different URL.
     target_note = (
-        f"The humans have already agreed this task's target: `{target}`. Use exactly that as "
-        "the contract's `staging_url` — don't invent another one. (If a proposal omits it, "
-        "the broker fills in that same URL.)\n\n"
-        if target else ""
+        f"The humans have already set this task's deployment target: `{target}`. You do NOT "
+        "put it in a contract and you cannot change it — it is host configuration, and a "
+        "spec carrying a `staging_url` is refused. `get_contract` hands it to you once every "
+        "party has signed, and it is resolved live, so if your human re-points a tunnel the "
+        "value simply changes with nothing to re-sign.\n\n"
+        if target else
+        "The humans set this task's deployment target — the ONE URL you may ever fetch. You "
+        "do NOT put it in a contract and you cannot change it; a spec carrying a "
+        "`staging_url` is refused. Read it from `get_contract` once every party has signed. "
+        "If none is set yet, ask your human to set it rather than inventing one.\n\n"
     )
 
     planning = (
@@ -190,10 +232,15 @@ def role_prompt(
         "propose and you build against theirs. On a task with several todos the roles can "
         "differ per todo — you may produce todo #1 while your peer produces todo #2, each "
         "consuming the other's. Either of you may propose; both of you must assess.\n\n"
-        "IF YOU PROPOSE. `propose_contract(spec)` must carry at least one endpoint (each a "
-        "`method` + `path`) and a `staging_url` — the base URL your peer connects to. Put "
-        "that URL in the contract, NEVER in a chat message. (Remotely it must be a real "
-        "https domain; locally `http://localhost:PORT` is fine.) Propose only when your "
+        "IF YOU PROPOSE. `propose_contract(spec)` must carry at least one NAMED UNIT, and "
+        "the KEY names the kind of contract it is: `endpoints` (each a `method` + `path`) "
+        "for an HTTP API, `types` (named fields and their shapes), `screens` (a name and "
+        "its states), or `criteria` (checkable statements) when there is no interface to "
+        "describe. Write the key for what you actually agreed — if there is no HTTP surface "
+        "between you it is a different KIND, not a missing endpoint. Do NOT put a "
+        "`staging_url` in the spec: the deployment target is the humans\' to set, the "
+        "broker refuses a spec that carries one, and you read the live value from "
+        "`get_contract` after the lock. Propose only when your "
         "human directs it. It registers the version AND notifies your peer, who can "
         "immediately review the shape with `get_contract`. If they ask for changes, revise "
         "and `propose_contract` again — that's a new version. Proposing makes you the "
@@ -210,7 +257,8 @@ def role_prompt(
         "or have not opened it. A declined version is dead; the answer is a new one.\n\n"
         "SIGNING, EITHER WAY. When it's right and your human says so, sign that version by "
         "number with `lock_contract`. It locks once EVERY party has signed — and only then "
-        "does `get_contract` also return the signed `staging_url`. If you sign first you "
+        "does `get_contract` also return the `staging_url` — the humans\' live target for "
+        "this deliverable, and the only URL you may fetch. If you sign first you "
         "don't poll for the lock: the broker pushes you a `contract_locked` notification the "
         "moment the last signature lands, so a parked `wait_for_message` wakes on it.\n\n"
     )
@@ -264,6 +312,7 @@ def role_prompt(
         "another developer's AI agent through the sys-buddy broker. sys-buddy is how the two of "
         "you coordinate — it is not your task. Your human will tell you, here in this session, "
         "what to build.\n\n"
+        + seat +
         "The phases: pre-flight → planning → locked → build → test → verified.\n\n"
         "1) PRE-FLIGHT. Call `rules()`, then `readiness_check()`, then `submit_readiness(answers)`. "
         "Until you pass, your action tools are locked; read tools stay open. BOTH parties must "
@@ -285,7 +334,7 @@ def role_prompt(
         "proposing IS your consent, so the others `accept_todo` (or `decline_todo` with a "
         "reason and you `repropose_todo`). Then the HOW: `propose_contract(spec, todo=N)`, "
         "signed by that todo's parties only. Report per deliverable — "
-        "`report_status(\"ready\"/\"checked\"/\"verified\", detail, todo=N)`; the todo id is "
+        "`report_status(\"ready\"/\"checked\"/\"verified\", detail, todo=N)`; the todo number is "
         "REQUIRED once todos exist, the task's own state is derived from them, and the task "
         "concludes when the LAST todo verifies. `stuck` with a todo flags one deliverable; "
         "`stuck` without one freezes the whole task for a human.\n\n"
@@ -306,13 +355,17 @@ def role_prompt(
         "- `sm <text>` send_message · `sm @role <text>` direct it to one role. Your human may "
         "name the role by TAG instead of spelling it out — `BE` backend · `FE` frontend · "
         "`MB` mobile · `DE` designer (any case), so `sm @BE <text>` means to_role=\"backend\". "
-        "Tags name a role, never a person, and only work for roles declared on this task\n"
-        "- `pc [#N]` propose_contract · `gc [#N]` get_contract · `sign [#N]` lock_contract · "
-        "`decline <why> [#N]` decline_contract (push back on a proposal you've read) · "
-        "`reopen <why> [#N]` reopen_negotiations — add `#N` to aim any of these at todo N "
-        "(e.g. `pc #3` proposes the contract ON todo 3, signed by its parties); plain = the "
-        "TASK-level contract. No `locked?` — the broker pushes the lock to you; `wm` catches it\n"
-        "- `ship [#N]` = `pc` THEN `sign` in one move: propose_contract(spec) and immediately "
+        "Tags name a KIND of work, never a person: `@FE` reaches EVERY frontend seat. "
+        "To reach one particular person, name their seat — `sm @frontend-2 <text>`. "
+        "`roster()` lists every seat on this task\n"
+        "- `pc #N` propose_contract · `gc #N` get_contract · `sign #N` lock_contract · "
+        "`decline <why> #N` decline_contract (push back on a proposal you've read) · "
+        "`reopen <why> #N` reopen_negotiations — `#N` names the todo each one acts on "
+        "(e.g. `pc #3` proposes the contract ON todo 3, signed by its parties), and it is "
+        "REQUIRED, not optional: every task is delivered by one or more todos and there is "
+        "no task-wide form, so a task with a single deliverable simply has one todo. "
+        "No `locked?` — the broker pushes the lock to you; `wm` catches it\n"
+        "- `ship #N` = `pc` THEN `sign` in one move: propose_contract(spec) and immediately "
         "lock_contract(version) on the version you just proposed. It is one move for your "
         "human because that is how they think about it — \"agree this and sign my side\" — "
         "and it signs YOUR side only: your peer still reviews it and signs (or "
@@ -320,9 +373,11 @@ def role_prompt(
         "answer when your human says `sign` and nothing has been proposed yet — there is "
         "nothing to sign, so propose it (your reading stated as an explicit assumption) and "
         "sign that, rather than stalling to ask (see `rules()`)\n"
-        "- `ready` / `ok` / `block` / `done` / `stuck` → "
-        "report_status(ready / checked / blocked / verified / stuck) — add `#N` (e.g. `ready #3`) "
-        "to scope it to todo N, which is required on a task with todos\n"
+        "- `ready #N` / `ok #N` / `block #N` / `done #N` / `stuck [#N]` → "
+        "report_status(ready / checked / blocked / verified / stuck) on todo N (e.g. "
+        "`ready #3`). `#N` is REQUIRED on all of these but `stuck`, the one command it is "
+        "optional on: `stuck #N` flags that single deliverable and the others keep "
+        "marching, a bare `stuck` escalates the whole task for a human\n"
         "- `todos` get_todos · `todo <title>` propose_todo · `yes #N` accept_todo · `no #N <why>` "
         "decline_todo\n"
         "- `files` list_files · `getfile <id>` get_file · `upload <path>` upload_file\n"
@@ -980,7 +1035,12 @@ def join_flow(link: str, agent_name: str, mcp_name: str = "sys-buddy") -> dict:
             "ok": True,
             "task_id": res["task_id"],
             "role": res["role"],
-            "prompt": role_prompt(res["role"], res["task_id"]),
+            "handle": res.get("handle") or res["role"],
+            "role_type": res.get("role_type") or res["role"],
+            "prompt": role_prompt(
+                res.get("role_type") or res["role"], res["task_id"],
+                handle=res.get("handle") or res["role"],
+            ),
             "dashboard_url": res.get("dashboard_url"),
             "mcp_url": res["mcp_url"],
             "config_ok": cfg["ok"],
@@ -1019,8 +1079,45 @@ def host_create_task(
     )
 
 
+def host_set_staging_url(
+    task_id: str, staging_url: str = "", todo: int | None = None, clear: bool = False
+) -> dict:
+    """Host-side: re-point a task (or one deliverable) at a deployment target.
+
+    The host screen's counterpart to ``sys-buddy task staging-url``. It is an ordinary
+    configuration change with an event in the log — NOT a renegotiation and NOT a
+    consent flow: no contract, version or signature moves, because every reader
+    resolves the target live. The host owns this value and nothing an agent sends can
+    reach it, which is why there is no agent-facing tool beside this one.
+
+    NEVER raises — returns a dict the UI renders (mirrors the other host_* helpers).
+    """
+    try:
+        return {
+            "ok": True,
+            **admin.set_staging_url(
+                task_id, None if clear else (staging_url or "").strip(), todo
+            ),
+        }
+    except Exception as e:  # noqa: BLE001 — the host screen must never crash
+        return {"ok": False, "error": str(e)}
+
+
+def host_staging_url(task_id: str, todo: int | None = None) -> dict:
+    """Host-side read: the task value, the todo override, and what actually resolves."""
+    try:
+        return {"ok": True, **admin.get_staging_url(task_id, todo)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 def host_invite_link(task_id: str, role: str, base_url: str) -> str:
-    """Host-side: mint an invite for ``role`` and pack it into a ``sb1_`` link."""
+    """Host-side: mint an invite for ONE SEAT and pack it into a ``sb1_`` link.
+
+    ``role`` may name the seat, its role type (when that names exactly one seat), a tag
+    or an agent's name — ``admin.mint_invite`` resolves it and refuses anything that
+    names two seats, because an invite fills one seat and the broker must not pick.
+    """
     code, _ = admin.mint_invite(task_id, role)
     return make_invite_link(base_url, code)
 
@@ -1043,10 +1140,15 @@ def _mint_host_seat(
         conn.close()
     mcp_url = f"{base_url}/mcp"  # match the buddy pairing flow's mcp_url convention
     return {
-        "role": host_role,
+        # The host is a seat like any other, so this is shaped exactly like the buddy's.
+        "role": res["role"],
+        "handle": res["handle"],
+        "role_type": res["role_type"],
         "mcp_url": mcp_url,
         "agent_token": res["agent_token"],
-        "prompt": role_prompt(host_role, task_id, mode, staging_url),
+        "prompt": role_prompt(
+            res["role_type"], task_id, mode, staging_url, handle=res["handle"]
+        ),
         "config_command": claude_setup_command(mcp_url, res["agent_token"]),
         # The host may not be on Claude either — hand the desktop app every client,
         # rendered once here rather than re-spelled in gui_app.html.
@@ -1086,12 +1188,12 @@ def host_setup(
         same_machine = contracts.same_machine_origin(base_url, public_url)
         staging_url = (staging_url or "").strip() or None
         if staging_url:
-            # Catch a bad target HERE, where the human can fix it, instead of failing
-            # the agent's proposal later. Same rules the broker will apply at propose.
-            url_errors = contracts.validate_spec(
-                {"endpoints": [{"method": "GET", "path": "/"}], "staging_url": staging_url},
-                is_remote=True,
-                same_machine=same_machine,
+            # Catch a bad target HERE, where the human can fix it. This is now the
+            # PRIMARY door the value comes in by — the target is host-owned and never
+            # appears in an agent's spec — so it is checked directly rather than
+            # smuggled through a dummy contract just to reach the URL rules.
+            url_errors = contracts.validate_staging_url(
+                staging_url, is_remote=True, same_machine=same_machine
             )
             if url_errors:
                 return {"ok": False, "error": "; ".join(url_errors)}
@@ -1100,22 +1202,38 @@ def host_setup(
             same_machine=same_machine, staging_url=staging_url,
         )
         task_id = created["id"]  # may have been derived from the title
+        # The declared CAST, as seats — not the caller's role-type list, which may name
+        # `frontend` twice and would then mint two invites for one handle.
+        cast = created["roles"]
+        seat_roles = created["seat_roles"]
 
-        # Invite links go to every role EXCEPT the one the host is claiming itself.
-        seat_host = host_role is not None and host_role in roles
-        link_roles = [r for r in roles if r != host_role] if seat_host else list(roles)
-        # One mint per role → both links off the SAME code: the web link the buddy
+        # The host's own SEAT. They pick a role type on the setup screen ("your role"),
+        # so an exact handle wins and otherwise the FIRST seat of that type is theirs —
+        # a host who says "frontend" on a two-frontend task takes @frontend and the
+        # invite for @frontend-2 goes out to the other person.
+        host_seat_handle = None
+        if host_role:
+            if host_role in cast:
+                host_seat_handle = host_role
+            else:
+                host_seat_handle = next(
+                    (h for h in cast if seat_roles.get(h, h) == host_role), None
+                )
+        seat_host = host_seat_handle is not None
+        link_seats = [s for s in cast if s != host_seat_handle]
+        # One mint per SEAT → both links off the SAME code: the web link the buddy
         # opens in a browser (the easy path), and the sb1_ blob for the desktop-app /
         # CLI paste path. (Minting twice would burn two codes for one seat.)
-        def _invite_entry(role: str) -> dict:
-            code, _ = admin.mint_invite(task_id, role)
+        def _invite_entry(seat: str) -> dict:
+            code, _ = admin.mint_invite(task_id, seat)
             return {
-                "role": role,
+                "role": seat,
+                "role_type": seat_roles.get(seat, seat),
                 "join_url": make_join_url(base_url, code),
                 "link": make_invite_link(base_url, code),
             }
 
-        invites = [_invite_entry(r) for r in link_roles]
+        invites = [_invite_entry(s) for s in link_seats]
 
         viewer_token = admin.issue_host_viewer("host")
         result = {
@@ -1130,7 +1248,7 @@ def host_setup(
         }
         if seat_host:
             result["host_seat"] = _mint_host_seat(
-                task_id, host_role, base_url, mode, staging_url
+                task_id, host_seat_handle, base_url, mode, staging_url
             )
         return result
     except Exception as e:  # noqa: BLE001 — host setup must never crash the UI

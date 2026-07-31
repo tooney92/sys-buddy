@@ -63,12 +63,21 @@ def test_task_with_no_todos_serialises_exactly_as_before(conn):
     An older ``ui.html`` reading this must see nothing new at all, and a NEWER one must
     be able to tell "this task has no todos" from "this broker predates todos" — it
     can't, and doesn't need to: both mean "render today's seven-node stepper".
+
+    ``seat_roles``, ``roster`` and ``staging_url`` are the keys that are NOT
+    conditional. They are unconditional on purpose: the cast is a property of every
+    task, an unjoined seat has to be visible on a task with no todos at all (that is
+    precisely the task that never got started), and the deployment target is host
+    CONFIGURATION on the task rather than something a contract carries. An older page
+    simply ignores keys it does not read, which is the same tolerance the todo keys
+    already rely on in the other direction.
     """
     seed_task(conn, "signin", roles=("backend", "frontend"))
     detail = api._task_detail(conn, "signin")
     assert set(detail) == {
-        "id", "title", "state", "mode", "roles", "strikes", "times", "contract",
-        "messages", "events", "agents", "readiness_preview",
+        "id", "title", "state", "mode", "roles", "seat_roles", "strikes", "times",
+        "contract", "messages", "events", "agents", "roster", "readiness_preview",
+        "staging_url",
     }
     assert "todos" not in detail
     assert "todo_rollup" not in detail
@@ -80,7 +89,9 @@ def test_task_list_row_has_no_todo_key_without_todos(conn):
     seed_viewer(conn, "host", "sbv_host", task_id=None)
     viewer = resolve_viewer_token(conn, "sbv_host")
     (row,) = api._list_tasks_for(conn, viewer)
-    assert set(row) == {"id", "title", "state", "mode", "roles", "last", "strikes"}
+    assert set(row) == {
+        "id", "title", "state", "mode", "roles", "seat_roles", "last", "strikes"
+    }
 
 
 def test_task_level_contract_ignores_todo_contracts(conn):
@@ -130,7 +141,7 @@ def test_api_exposes_parties_statuses_and_acceptances(conn):
     assert t["drop_reason"] is None
     assert t["time"]  # HH:MM, same mono format as the rest of the dashboard
 
-    todos.accept_todo(conn, seats["mobile"], t["id"])
+    todos.accept_todo(conn, seats["mobile"], t["number"])
     (t,) = api._task_detail(conn, "signin")["todos"]
     assert t["status"] == "accepted"
     assert t["accepted_by"] == ["backend", "mobile"]
@@ -142,7 +153,7 @@ def test_api_exposes_declines_with_reasons(conn):
     todo = todos.propose_todo(
         conn, seats["backend"], "Payments API", "POST /pay", ["backend", "mobile"]
     )
-    todos.decline_todo(conn, seats["mobile"], todo["id"], "needs idempotency keys")
+    todos.decline_todo(conn, seats["mobile"], todo["number"], "needs idempotency keys")
 
     (t,) = api._task_detail(conn, "signin")["todos"]
     assert t["status"] == "pending"
@@ -166,7 +177,7 @@ def test_rollup_counts_on_task_view_and_list_row(conn):
         )
     # #0, #1 verified · #2 accepted · #3 left pending (frontend hasn't answered).
     for t in made[:3]:
-        todos.accept_todo(conn, seats["frontend"], t["id"])
+        todos.accept_todo(conn, seats["frontend"], t["number"])
     for t in made[:2]:
         conn.execute(
             "UPDATE todos SET state = 'verified', verified_at = ? WHERE id = ?",
@@ -211,11 +222,11 @@ def test_pending_todos_sort_first(conn):
     first = todos.propose_todo(
         conn, seats["backend"], "Accepted one", "scope", ["backend", "frontend"]
     )
-    todos.accept_todo(conn, seats["frontend"], first["id"])
+    todos.accept_todo(conn, seats["frontend"], first["number"])
     second = todos.propose_todo(
         conn, seats["backend"], "Verified one", "scope", ["backend", "frontend"]
     )
-    todos.accept_todo(conn, seats["frontend"], second["id"])
+    todos.accept_todo(conn, seats["frontend"], second["number"])
     conn.execute("UPDATE todos SET state = 'verified' WHERE id = ?", (second["id"],))
     conn.commit()
     # Proposed LAST and still awaiting frontend.
@@ -225,7 +236,7 @@ def test_pending_todos_sort_first(conn):
     dropped = todos.propose_todo(
         conn, seats["backend"], "Dropped one", "scope", ["backend", "frontend"]
     )
-    todos.host_drop_todo(conn, "signin", dropped["id"], "not needed after all")
+    todos.host_drop_todo(conn, "signin", dropped["number"], "not needed after all")
 
     ordered = api._task_detail(conn, "signin")["todos"]
     assert [t["status"] for t in ordered] == ["pending", "accepted", "verified", "dropped"]
@@ -241,7 +252,7 @@ def test_todo_carries_its_own_contract_block(conn):
     todo = todos.propose_todo(
         conn, seats["backend"], "Payments API", "POST /pay", ["backend", "frontend"]
     )
-    spec = {"endpoints": [{"method": "POST", "path": "/pay"}], "staging_url": "https://s.example"}
+    spec = {"endpoints": [{"method": "POST", "path": "/pay"}]}
     cid = _todo_contract(conn, "signin", todo["id"], 1, spec, status="locked")
     conn.execute(
         "INSERT INTO contract_signatures (contract_id, agent_id, signed_at) VALUES (?,?,?)",
@@ -267,7 +278,7 @@ def test_all_todos_dropped_keeps_them_visible_but_drops_the_rollup(conn):
     todo = todos.propose_todo(
         conn, seats["backend"], "Payments API", "POST /pay", ["backend", "frontend"]
     )
-    todos.host_drop_todo(conn, "signin", todo["id"], "descoped")
+    todos.host_drop_todo(conn, "signin", todo["number"], "descoped")
 
     detail = api._task_detail(conn, "signin")
     assert detail["has_todos"] is False
@@ -288,7 +299,7 @@ def test_messages_carry_the_todo_they_belong_to(conn):
     b = todos.propose_todo(
         conn, seats["backend"], "Refunds", "POST /refund", ["backend", "frontend"]
     )
-    todos.accept_todo(conn, seats["frontend"], b["id"])
+    todos.accept_todo(conn, seats["frontend"], b["number"])
     service.post_message(conn, seats["frontend"], "question", "unrelated chatter")
 
     msgs = api._messages_for(conn, "signin")
@@ -333,7 +344,8 @@ def test_chip_comes_from_the_column_not_the_body_text(conn):
         todo_id=todo["id"],
     )
     (m,) = [m for m in api._messages_for(conn, "signin") if m["type"] == "status_update"]
-    assert m["todo"] == todo["id"]
+    assert m["todo"] == todo["id"]              # internal key, for the UI's selection
+    assert m["todo_number"] == todo["number"]   # what the chip PRINTS
 
 
 def test_chip_falls_back_to_the_body_for_pre_column_rows(conn):
@@ -362,7 +374,7 @@ def test_todo_events_render_and_filter(conn):
     todo = todos.propose_todo(
         conn, seats["backend"], "Payments API", "POST /pay", ["backend", "frontend"]
     )
-    todos.host_drop_todo(conn, "signin", todo["id"], "mobile's human went offline")
+    todos.host_drop_todo(conn, "signin", todo["number"], "mobile's human went offline")
 
     rendered = api._events_for(conn, "signin", "todo")
     assert [e[1] for e in rendered] == ["todo", "todo"]
@@ -395,9 +407,9 @@ def test_change_tokens_move_on_todo_activity(conn, act):
     list_before, tasks_before = api._change_tokens(conn, viewer)
 
     if act == "accept":
-        todos.accept_todo(conn, seats["frontend"], todo["id"])
+        todos.accept_todo(conn, seats["frontend"], todo["number"])
     elif act == "drop":
-        todos.host_drop_todo(conn, "signin", todo["id"], "descoped")
+        todos.host_drop_todo(conn, "signin", todo["number"], "descoped")
     else:
         conn.execute(
             "UPDATE todos SET stuck_at = ?, stuck_reason = 'staging down' WHERE id = ?",

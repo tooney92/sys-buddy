@@ -39,11 +39,36 @@ def _message(conn, task_id, agent_id, mtype, body, at=None):
     conn.commit()
 
 
-def _contract(conn, task_id, version, spec, status="draft", locked_at=None):
+def _todo(conn, task_id, number=1, title="Sign-in", parties=("backend", "frontend")):
+    """A todo row, reused if that ``#N`` already exists. Returns its internal id.
+
+    Raw INSERT rather than the real ops because these specs seed tasks and agents raw
+    too — there are no ``Identity`` objects here to propose/accept with, and what is
+    under test is the shape the dashboard renders, not the flow that produced it.
+    """
+    row = conn.execute(
+        "SELECT id FROM todos WHERE task_id = ? AND number = ?", (task_id, number)
+    ).fetchone()
+    if row is not None:
+        return row["id"]
     cur = conn.execute(
-        "INSERT INTO contracts (task_id, version, spec_json, status, locked_at, created_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (task_id, version, json.dumps(spec), status, locked_at, time.time()),
+        "INSERT INTO todos (task_id, number, title, scope, parties_json, proposed_role, "
+        "created_at) VALUES (?,?,?,?,?,?,?)",
+        (task_id, number, title, f"scope of {title}", json.dumps(list(parties)),
+         list(parties)[0], time.time()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def _contract(conn, task_id, version, spec, status="draft", locked_at=None, todo_id=None):
+    """A contract row. ``todo_id`` defaults to todo #1 on the task, created on demand:
+    a contract is an agreement about ONE deliverable, and the column is NOT NULL."""
+    cur = conn.execute(
+        "INSERT INTO contracts (task_id, version, spec_json, status, todo_id, locked_at, "
+        "created_at) VALUES (?,?,?,?,?,?,?)",
+        (task_id, version, json.dumps(spec), status,
+         todo_id if todo_id is not None else _todo(conn, task_id), locked_at, time.time()),
     )
     conn.commit()
     return cur.lastrowid
@@ -179,10 +204,10 @@ def test_lock_notification_renders_once_and_as_the_broker(conn):
     from sys_buddy import state
     from tests.test_state import _agents, _valid_spec
 
-    ag = _agents(conn, roles=("backend", "frontend"))
-    state.propose_contract(conn, ag["backend"], _valid_spec())
-    state.lock_contract(conn, ag["frontend"], 1)
-    state.lock_contract(conn, ag["backend"], 1)  # locks
+    ag = _agents(conn, roles=("backend", "frontend"))  # seeds an accepted todo #1
+    state.propose_contract(conn, ag["backend"], _valid_spec(), 1)
+    state.lock_contract(conn, ag["frontend"], 1, 1)
+    state.lock_contract(conn, ag["backend"], 1, 1)  # locks
 
     detail = api._task_detail(conn, "signin")
 
@@ -214,18 +239,21 @@ def test_times_derived_from_transition_events(conn):
 # contract block
 # --------------------------------------------------------------------------- #
 def test_contract_block_versions_and_default(conn):
+    # A chain belongs to a deliverable, so the block is read per todo — the shape the
+    # todo panel renders, and the only one there is.
     seed_task(conn, "signin", roles=("backend", "frontend"))
     be = seed_agent(conn, "signin", "backend", "al-backend", "sbk_be")
     fe = seed_agent(conn, "signin", "frontend", "dave-frontend", "sbk_fe")
+    tid = _todo(conn, "signin")
 
-    spec1 = {"endpoints": [{"method": "POST", "path": "/login"}], "staging_url": "https://s.example.com"}
-    spec2 = {"endpoints": [{"method": "GET", "path": "/me"}], "staging_url": "https://s.example.com"}
+    spec1 = {"endpoints": [{"method": "POST", "path": "/login"}]}
+    spec2 = {"endpoints": [{"method": "GET", "path": "/me"}]}
     c1 = _contract(conn, "signin", 1, spec1, status="locked", locked_at=time.time())
     _contract(conn, "signin", 2, spec2, status="draft")
     _sign(conn, c1, be)
     _sign(conn, c1, fe)
 
-    block = api._contract_for(conn, "signin")
+    block = api._contract_for(conn, "signin", todo_id=tid)
     assert block["exists"] is True
     assert block["versions"] == [{"id": "v1", "locked": True}, {"id": "v2", "locked": False}]
     # default = latest *locked* version, not merely the latest.
@@ -237,10 +265,23 @@ def test_contract_block_versions_and_default(conn):
 
 def test_contract_default_is_latest_when_none_locked(conn):
     seed_task(conn, "signin")
+    tid = _todo(conn, "signin")
     _contract(conn, "signin", 1, {"endpoints": []}, status="draft")
     _contract(conn, "signin", 2, {"endpoints": []}, status="draft")
-    block = api._contract_for(conn, "signin")
+    block = api._contract_for(conn, "signin", todo_id=tid)
     assert block["default"] == "v2"
+
+
+def test_the_task_level_block_is_empty_because_contracts_belong_to_todos(conn):
+    """A contract is an agreement about ONE deliverable, so nothing hangs off the task
+    itself any more. The card that reads this only renders on a task with no todos —
+    which has nothing to contract — so "no contract yet" is the honest answer."""
+    seed_task(conn, "signin")
+    _todo(conn, "signin")
+    _contract(conn, "signin", 1, {"endpoints": []}, status="locked", locked_at=time.time())
+    assert api._contract_for(conn, "signin") == {
+        "exists": False, "versions": [], "default": None, "data": {},
+    }
 
 
 # --------------------------------------------------------------------------- #

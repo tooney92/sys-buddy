@@ -18,21 +18,29 @@ States (SPEC §5):
                                                        └── retry ─────┘ (or → stuck)
 ``verified`` and ``stuck`` are terminal: reopening requires a human.
 
-TODOS (v2) fork this in exactly one place, and only for tasks that have them: a task
-running on todos does not own its state — the state is a ROLLUP of its todos
-(``todos.apply_rollup``), each of which marches through the SAME six states with its
-own contract chain. So the functions below come in pairs: the task-level path, byte
-for byte what it always was, and a ``_..._todo`` path that drives one deliverable and
-then re-derives the parent. A task with no todos never touches the second half.
+TODOS (v2) fork this in exactly one place: a task running on todos does not own its
+state — the state is a ROLLUP of its todos (``todos.apply_rollup``), each of which
+marches through the SAME six states with its own contract chain. The ``_..._todo``
+functions drive one deliverable and then re-derive the parent.
+
+CONTRACTS are todo-scoped, full stop. There is exactly ONE kind: an agreement about one
+todo, whose signatory set is that todo's party list. There used to be a second,
+task-level kind, so every contract operation existed twice and the second copy stayed
+reachable in ways nobody intended — a bare ``decline_contract`` could kill a proposal on
+a deliverable the caller never named. ``contracts.todo_id`` is now NOT NULL, and the
+selector is required on every operation that acts on a contract. The task-level
+``report_status`` paths below survive only for ``stuck``/``waiting``/``resolved``, which
+are deliberately whole-collaboration words.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 
-from . import config, contracts, notify, service, todos
+from . import config, contracts, notify, seats, service, todos
 from .identity import Identity
 
 # --- states -----------------------------------------------------------------
@@ -74,7 +82,7 @@ _STATUS_ALIASES = {
 
 # The statuses that are meaningless at the task level once there are N deliverables:
 # "backend is ready" — ready on WHICH todo? So on a task WITH todos these REQUIRE a
-# todo id (v2 design, settled). ``stuck`` is deliberately absent: it is valid at both
+# todo NUMBER (v2 design, settled). ``stuck`` is deliberately absent: it is valid at both
 # levels — with a todo it flags that deliverable, without one it escalates the whole
 # collaboration ("my token expired") — and ``resolved`` is debug-only, where todos
 # cannot exist at all.
@@ -136,7 +144,7 @@ def _task_is_same_machine(conn, task_id: str) -> bool:
 
 
 def _task_staging_url(conn, task_id: str) -> str | None:
-    """The host-chosen deployment target for this task, if they set one at setup."""
+    """The host-chosen deployment target for this task, if they set one."""
     try:
         row = conn.execute("SELECT staging_url FROM tasks WHERE id = ?", (task_id,)).fetchone()
     except sqlite3.OperationalError:
@@ -144,6 +152,83 @@ def _task_staging_url(conn, task_id: str) -> str | None:
     if row is None or not row["staging_url"]:
         return None
     return str(row["staging_url"]).strip() or None
+
+
+def _todo_staging_url(conn, todo_id: int | None) -> str | None:
+    """The HOST's per-deliverable override, if they set one on this todo."""
+    if todo_id is None:
+        return None
+    try:
+        row = conn.execute("SELECT staging_url FROM todos WHERE id = ?", (todo_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None  # pre-migration db → no overrides exist
+    if row is None or not row["staging_url"]:
+        return None
+    return str(row["staging_url"]).strip() or None
+
+
+def _legacy_spec_staging_url(spec: object) -> str | None:
+    """The target a pre-existing contract carries INSIDE its signed spec.
+
+    Back-compat only. Contracts written before the target became host-owned hold it in
+    ``spec_json``, and those documents are never rewritten — so a task whose host has
+    not set a target still resolves to what its own contract said, rather than to
+    nothing. New proposals cannot produce this: ``contracts.validate_spec`` refuses a
+    spec that carries a ``staging_url`` at all.
+    """
+    if not isinstance(spec, dict):
+        return None
+    url = spec.get("staging_url")
+    return str(url).strip() or None if isinstance(url, str) and url.strip() else None
+
+
+def _spec_of(conn, contract_id: int) -> dict | None:
+    """One contract's stored spec, for the legacy leg of :func:`resolve_staging_url`."""
+    row = conn.execute(
+        "SELECT spec_json FROM contracts WHERE id = ?", (contract_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        spec = json.loads(row["spec_json"])
+    except (TypeError, ValueError):
+        return None
+    return spec if isinstance(spec, dict) else None
+
+
+def resolve_staging_url(
+    conn, task_id: str, todo_id: int | None = None, spec: object = None
+) -> str | None:
+    """The deployment target in force RIGHT NOW: todo override, else task, else legacy.
+
+    Read LIVE, on every read, and that is the whole point. The target used to live
+    inside the signed spec, so an ngrok free URL rotating on a tunnel restart staled a
+    locked contract and the only fix in the rules was a full renegotiation — a new
+    version identical to the last but for one string. Making people re-sign on
+    non-events teaches them to sign without reading, which quietly costs every
+    signature that WOULD have caught something. Resolving here means a tunnel bounce
+    touches no contract, no version and no signature.
+
+    It is also the stronger security posture, not a relaxation: the host owns every
+    input to this function, no agent tool writes any of them, so an injected "test
+    against evil.com" has nothing left to aim at. It used to be an agent-authored
+    field defended only by a reviewer noticing.
+
+    Order:
+
+    1. ``todos.staging_url`` — the host's override for THIS deliverable. Most specific
+       wins, because a real task deploys its pieces to different places.
+    2. ``tasks.staging_url`` — the host's target for the whole task.
+    3. the contract's own spec, for a contract signed before any of this existed. Last,
+       so a host who sets a target overrides a stale one baked into an old document —
+       which is exactly the situation that prompted the change (a locked contract
+       carrying an ngrok URL with a port that could never connect).
+    """
+    return (
+        _todo_staging_url(conn, todo_id)
+        or _task_staging_url(conn, task_id)
+        or _legacy_spec_staging_url(spec)
+    )
 
 
 def _event(conn, task_id: str, kind: str, detail: object) -> None:
@@ -209,38 +294,51 @@ def _assert_live(conn, task_id: str) -> str:
 
 
 def _live_todo_list(conn, task_id: str) -> str:
-    """``#1 (title), #2 (title)`` — for error messages that must be ACTIONABLE."""
+    """``#1 (title), #2 (title)`` — for error messages that must be ACTIONABLE.
+
+    Prints ``todos.number``, never ``todos.id``: an error that lists a number the agent
+    cannot pass back to ``todo=`` is worse than listing nothing.
+    """
     rows = todos.live_todos(conn, task_id)
-    return ", ".join(f"#{r['id']} ({r['title']})" for r in rows) or "(none)"
-
-
-def _roles(conn, task_id: str) -> list[str]:
-    row = conn.execute("SELECT roles_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    return json.loads(row["roles_json"])
+    return ", ".join(f"#{r['number']} ({r['title']})" for r in rows) or "(none)"
 
 
 def _todo_clause(todo_id: int | None) -> str:
     """``AND todo_id = ?`` when a deliverable is named.
 
-    ``None`` means NO FILTER, deliberately not ``todo_id IS NULL``: the task-level
-    callers below predate todos and must keep seeing the whole task's chain, whichever
-    deliverable each version belongs to.
+    ``None`` means NO FILTER, deliberately not ``todo_id IS NULL`` — which would now match
+    nothing, since a contract always belongs to a deliverable. It is what the task-wide
+    readers ask for: "the newest contract on this task, whichever todo it is about", which
+    is how ``get_contract`` answers a caller that did not name one and how the dashboard
+    reads a task at a glance.
+
+    Which is exactly why the queries that use this order by ``id`` and not by ``version``.
+    Versions are per-chain, so with no filter "the highest version" compares numbers from
+    unrelated chains; "the most recent row" is the only reading that survives it. And a
+    lookup that names ONE version — ``lock_contract`` — cannot use this at all: it has to
+    be chain-scoped, with ``todo_id IS ?``, because ``(task_id, version)`` names one row
+    per deliverable.
     """
     return " AND todo_id = ?" if todo_id is not None else ""
 
 
 def _current_locked(conn, task_id: str, todo_id: int | None = None) -> dict | None:
-    """The highest-version locked contract for the task, or None.
+    """The newest locked contract for the task, or None.
 
     'Current' is the *newest* locked version: a v2 replanning supersedes v1
     the moment v2 locks, even though v1's row stays 'locked' for the audit trail.
-    ``todo_id`` narrows it to one deliverable's chain — whose versions are a
-    non-contiguous slice of the task's single MAX+1 sequence (v1, v4, v7).
+    ``todo_id`` narrows it to one deliverable's chain, whose versions run 1, 2, 3…
+
+    ``ORDER BY id DESC``, not ``version DESC``: versions are numbered PER CHAIN now, so
+    across chains the highest version is meaningless — todo #1 on its third revision
+    would outrank todo #6's live v1. Within a chain the two orders are identical (a
+    proposal is always MAX+1 and ids only grow), so this is strictly more correct and
+    never less.
     """
     row = conn.execute(
         "SELECT id, version, spec_json, todo_id, locked_at FROM contracts "
         f"WHERE task_id = ? AND status = 'locked'{_todo_clause(todo_id)} "
-        "ORDER BY version DESC LIMIT 1",
+        "ORDER BY id DESC LIMIT 1",
         (task_id, todo_id) if todo_id is not None else (task_id,),
     ).fetchone()
     if row is None:
@@ -255,14 +353,18 @@ def _current_locked(conn, task_id: str, todo_id: int | None = None) -> dict | No
 
 
 def _newest_contract(conn, task_id: str, todo_id: int | None = None) -> dict | None:
-    """The highest-version contract row for the task regardless of status (draft or
+    """The newest contract row for the task regardless of status (draft or
     locked) — the one an agent is currently meant to act on. A freshly proposed v1
     (still 'draft') or a v2 replan-in-progress is returned here even though it hasn't
     locked; ``get_contract`` uses this so a proposal is REVIEWABLE before signing.
-    ``todo_id`` narrows it to one deliverable's chain."""
+    ``todo_id`` narrows it to one deliverable's chain.
+
+    ``ORDER BY id DESC`` for the reason spelled out in ``_current_locked``: per-chain
+    versions make "highest version" the wrong question once more than one chain is in
+    scope, and inside a chain it is the same answer."""
     row = conn.execute(
-        "SELECT id, version, spec_json, status, todo_id, locked_at FROM contracts "
-        f"WHERE task_id = ?{_todo_clause(todo_id)} ORDER BY version DESC LIMIT 1",
+        "SELECT id, version, spec_json, status, todo_id, locked_at, staging_url_at_lock "
+        f"FROM contracts WHERE task_id = ?{_todo_clause(todo_id)} ORDER BY id DESC LIMIT 1",
         (task_id, todo_id) if todo_id is not None else (task_id,),
     ).fetchone()
     if row is None:
@@ -274,15 +376,24 @@ def _newest_contract(conn, task_id: str, todo_id: int | None = None) -> dict | N
         "status": row["status"],
         "todo_id": row["todo_id"],
         "locked_at": row["locked_at"],
+        # The target that was live when this locked — the historical record, kept
+        # apart from the value `resolve_staging_url` reads today.
+        "staging_url_at_lock": row["staging_url_at_lock"],
     }
 
 
 def _signatures_for(conn, contract_id: int) -> list[str]:
-    """Roles that have signed a given contract row."""
+    """SEATS that have signed a given contract row.
+
+    Handles, not role types — a signature is a person's, and with two frontend seats
+    both must sign for themselves. The quorum check downstream is unchanged
+    (``[r for r in required if r not in signed_set]``); it simply compares handles to
+    the handles in ``parties_json`` now.
+    """
     return [
         r["role"]
         for r in conn.execute(
-            "SELECT a.role FROM contract_signatures s "
+            "SELECT COALESCE(a.handle, a.role) AS role FROM contract_signatures s "
             "JOIN agents a ON a.id = s.agent_id WHERE s.contract_id = ?",
             (contract_id,),
         ).fetchall()
@@ -298,12 +409,15 @@ def _producer_role(conn, task_id: str, todo_id: int | None = None) -> str | None
     ``todo_id`` scopes it to one deliverable, which is what makes the producer a
     PER-TODO fact: backend produces todo #1 while mobile produces todo #2, and each
     is the consumer of the other's — a single task-wide producer could not express it.
+
+    ``ORDER BY c.id DESC`` for the reason in ``_current_locked`` — per-chain versions.
     """
     row = conn.execute(
-        "SELECT a.role AS role FROM contracts c JOIN agents a ON a.id = c.proposed_by "
+        "SELECT COALESCE(a.handle, a.role) AS role FROM contracts c "
+        "JOIN agents a ON a.id = c.proposed_by "
         "WHERE c.task_id = ? AND c.status = 'locked'"
         + (" AND c.todo_id = ?" if todo_id is not None else "")
-        + " ORDER BY c.version DESC LIMIT 1",
+        + " ORDER BY c.id DESC LIMIT 1",
         (task_id, todo_id) if todo_id is not None else (task_id,),
     ).fetchone()
     return row["role"] if row else None
@@ -330,15 +444,17 @@ def _producer_role(conn, task_id: str, todo_id: int | None = None) -> str | None
 
 # The verb each shorthand maps to, for the tooltip/aria text. Kept beside the codes so
 # the two cannot drift.
+# ``{n}`` is the todo's per-task NUMBER, never its internal id — these strings are
+# literal tool calls a human/agent is meant to make, so only the typeable handle fits.
 _NEXT_TOOLS = {
-    "yes": "accept_todo({id})",
-    "no": "decline_todo({id}, reason)",
-    "pc": "propose_contract(spec, todo={id})",
-    "sign": "lock_contract(version, todo={id})",
-    "ready": "report_status('ready', detail, todo={id})",
-    "ok": "report_status('checked', detail, todo={id})",
-    "block": "report_status('blocked', detail, todo={id})",
-    "done": "report_status('verified', detail, todo={id})",
+    "yes": "accept_todo({n})",
+    "no": "decline_todo({n}, reason)",
+    "pc": "propose_contract(spec, todo={n})",
+    "sign": "lock_contract(version, todo={n})",
+    "ready": "report_status('ready', detail, todo={n})",
+    "ok": "report_status('checked', detail, todo={n})",
+    "block": "report_status('blocked', detail, todo={n})",
+    "done": "report_status('verified', detail, todo={n})",
 }
 
 
@@ -351,26 +467,112 @@ def _who_label(roles: list[str]) -> str:
     return ", ".join(roles[:-1]) + " or " + roles[-1]
 
 
-def _next(stage, who, cmd, text, *, alt=None, todo_id=None, human=False, done=False):
+def _unjoined_note(unjoined: list[str]) -> str:
+    """The sentence that separates "waiting on Priya" from "waiting on a seat nobody
+    ever accepted". Without it those two read identically and need different actions:
+    nudge a colleague, or chase an invite.
+
+    Deliberately no deadline. Any timeout would be an arbitrary number, and a todo that
+    silently expires is worse than one that visibly waits — ``host_drop_todo`` is
+    already the escape hatch, and it is named here so the reader has a move.
+    """
+    if not unjoined:
+        return ""
+    seats = ", ".join(f"@{h}" for h in unjoined)
+    is_are = "has" if len(unjoined) == 1 else "have"
+    return (
+        f" {seats} {is_are} NEVER JOINED — nobody accepted that invite, so no agent is "
+        f"there to act. Chase the invite, or the host drops the todo."
+    )
+
+
+def _name_seats(conn, task_id: str, payload: dict) -> dict:
+    """Say "waiting on Sarah", not "waiting on frontend-1".
+
+    ``next_step`` is called from ONE place — the dashboard (`api.py`) — and never
+    reaches an agent, so there is no reason for its prose to speak in seat handles. A
+    handle is the token you TYPE; a name is who you are waiting for, and the human
+    reading this panel wants the second.
+
+    Substitution rather than rewriting every call site's f-string: ``who`` is an exact,
+    known list of handles, so this is a bounded replacement over a closed set — not a
+    regex over arbitrary prose. Longest handle first, because ``frontend`` is a prefix of
+    ``frontend-2`` and replacing the short one first would corrupt the long one.
+
+    UNJOINED seats keep their ``@handle`` on purpose: nobody has paired into them, so
+    there is no name to use, and the handle is exactly what the reader must chase.
+    """
+    joined = {
+        r["handle"]: r["name"]
+        for r in conn.execute(
+            "SELECT handle, name FROM agents WHERE task_id = ? AND revoked_at IS NULL "
+            "AND name IS NOT NULL AND name <> ''",
+            (task_id,),
+        ).fetchall()
+        if r["handle"] and r["handle"] not in (payload.get("unjoined") or [])
+    }
+    if not joined:
+        return payload
+
+    def humanise(s: str) -> str:
+        for handle in sorted(joined, key=len, reverse=True):
+            # Skip an `@handle` — that spelling is deliberate wherever it appears
+            # (unjoined seats, and anything the reader is meant to type back).
+            s = re.sub(rf"(?<!@)\b{re.escape(handle)}\b", joined[handle], s)
+        return s
+
+    payload["text"] = humanise(payload["text"])
+    if payload.get("who_label"):
+        payload["who_label"] = humanise(payload["who_label"])
+    return payload
+
+
+def _next(stage, who, cmd, text, *, alt=None, number=None, human=False, done=False,
+          unjoined=None):
+    """``number`` is the todo's HUMAN ``#N`` — it lands inside a command string a person
+    is meant to type, so it can never be the internal ``todos.id``.
+
+    ``unjoined`` is the subset of ``who`` that no one has ever paired into. It rides on
+    the payload as its own field (so the dashboard can badge it) AND is spelled out in
+    ``text`` (so the agent reading the sentence gets it too).
+    """
+    who = list(who or [])
+    unjoined = [h for h in (unjoined or []) if h in who]
     return {
         "stage": stage,
-        "who": list(who or []),
-        "who_label": _who_label(list(who or [])) if who else None,
+        "who": who,
+        "who_label": _who_label(who) if who else None,
+        "unjoined": unjoined,
         "cmd": cmd,
         "alt": alt,
         "tool": (
-            _NEXT_TOOLS[cmd.split()[0]].format(id=todo_id)
+            _NEXT_TOOLS[cmd.split()[0]].format(n=number)
             if cmd and cmd.split()[0] in _NEXT_TOOLS
             else None
         ),
-        "text": text,
+        "text": text + _unjoined_note(unjoined),
         "human": human,
         "done": done,
     }
 
 
 def next_step(conn, task_id: str, todo_id: int) -> dict:
-    """The one move that unblocks todo ``todo_id``: WHO owes it and WHAT they type.
+    """The dashboard's "what happens next", with seats spoken as PEOPLE.
+
+    A thin wrapper so every branch of :func:`_next_step` is named without each one
+    having to remember to do it — a branch that forgot would silently print a handle
+    where its neighbours print a name, which is exactly the inconsistency this fixes.
+    """
+    return _name_seats(conn, task_id, _next_step(conn, task_id, todo_id))
+
+
+def _next_step(conn, task_id: str, todo_id: int) -> dict:
+    """The one move that unblocks a todo: WHO owes it and WHAT they type.
+
+    ``todo_id`` is the INTERNAL ``todos.id`` — this is called by the dashboard from a
+    row it already has, never from something a human typed. The shorthand it emits
+    (``ready #N``) uses the todo's ``number``, because that is what the broker will
+    accept back.
 
     The branch order deliberately mirrors the guard order the writes enforce, so the
     answer can never promise a move the broker would refuse:
@@ -389,23 +591,28 @@ def next_step(conn, task_id: str, todo_id: int) -> dict:
     * live — the CONSUMERS (every party but the producer) check it;
     * testing — any party may call it verified, once a check has actually run.
     """
-    row = todos.get_row(conn, task_id, todo_id)
-    tid = row["id"]
+    row = todos.row_by_id(conn, task_id, todo_id)
+    tid = row["id"]        # internal — for the contract/decision lookups below
+    num = row["number"]    # human — for every string a person is told to type
     parties = todos.parties_of(row)
     status = todos.status_of(conn, row)
+    # Which of this todo's seats nobody ever accepted an invite for. `_next` keeps only
+    # the ones that are actually being waited on, so a never-joined seat that owes
+    # nothing right now stays quiet.
+    unjoined = todos.unjoined_parties(conn, task_id, parties)
 
     if status == todos.DROPPED:
         return _next(
             "dropped", [], None,
             "Dropped — it no longer counts toward this task. Nothing is owed.",
-            todo_id=tid, done=True,
+            number=num, done=True,
         )
     if row["state"] == VERIFIED:
         return _next(
             "verified", [], None,
             "Done — this deliverable is verified end to end. Nothing left to do; "
             "follow-up work is a NEW todo.",
-            todo_id=tid, done=True,
+            number=num, done=True,
         )
 
     # The three-strike cord (SPEC §8) is enforced off the DB count, and once it is
@@ -415,7 +622,7 @@ def next_step(conn, task_id: str, todo_id: int) -> dict:
             "cord_pulled", [], None,
             f"{MAX_STRIKES} fix cycles reached — the broker pulled the cord and the "
             f"humans own this one. Drop it from your terminal, or agree a fresh todo.",
-            todo_id=tid, human=True,
+            number=num, human=True,
         )
 
     # --- agree on WHAT ------------------------------------------------------
@@ -423,52 +630,52 @@ def next_step(conn, task_id: str, todo_id: int) -> dict:
         d = todos.decisions(conn, tid, row["version"])
         awaiting = [p for p in parties if d.get(p, {}).get("decision") != todos.ACCEPT]
         return _next(
-            "pending", awaiting, f"yes #{tid}",
+            "pending", awaiting, f"yes #{num}",
             f"{_who_label(awaiting)} still has to agree to the SCOPE — their agent types "
-            f"`yes #{tid}` (or `no #{tid} <why>` to send it back for a reshape). "
+            f"`yes #{num}` (or `no #{num} <why>` to send it back for a reshape). "
             f"Nothing here moves until then.",
-            alt=f"no #{tid} <why>", todo_id=tid,
+            alt=f"no #{num} <why>", number=num, unjoined=unjoined,
         )
 
     # --- agree on HOW -------------------------------------------------------
     newest = _newest_contract(conn, task_id, todo_id=tid)
     if newest is None:
         return _next(
-            "accepted", parties, f"pc #{tid}",
+            "accepted", parties, f"pc #{num}",
             f"Everyone agreed on WHAT. Next is HOW: one of you proposes the contract — "
-            f"`pc #{tid}`. Whoever proposes it becomes the PRODUCER for this "
+            f"`pc #{num}`. Whoever proposes it becomes the PRODUCER for this "
             f"deliverable, so there is no producer yet.",
-            todo_id=tid,
+            number=num, unjoined=unjoined,
         )
 
     if newest["status"] == "declined":
         # The whole point of decline: "waiting on X to sign" would be a lie here — X has
         # looked and objected. The move is a NEW version, not a signature.
         row = conn.execute(
-            "SELECT a.role AS role, c.decline_reason AS reason FROM contracts c "
+            "SELECT COALESCE(a.handle, a.role) AS role, c.decline_reason AS reason FROM contracts c "
             "LEFT JOIN agents a ON a.id = c.declined_by WHERE c.id = ?",
             (newest["id"],),
         ).fetchone()
         who = row["role"] if row and row["role"] else None
         why = f" — \u201c{row['reason']}\u201d" if row and row["reason"] else ""
         return _next(
-            "contract_declined", parties, f"pc #{tid}",
+            "contract_declined", parties, f"pc #{num}",
             f"{(who or 'A party')} declined contract v{newest['version']}{why}. That "
             f"version is dead and cannot be signed. Someone proposes a new one that "
-            f"addresses it — `pc #{tid}`.",
-            todo_id=tid,
+            f"addresses it — `pc #{num}`.",
+            number=num, unjoined=unjoined,
         )
 
     if newest["status"] != "locked":
         signed = set(_signatures_for(conn, newest["id"]))
         awaiting = [p for p in parties if p not in signed]
         return _next(
-            "contract_proposed", awaiting, f"sign #{tid}",
+            "contract_proposed", awaiting, f"sign #{num}",
             f"Contract v{newest['version']} is proposed and waiting on "
-            f"{_who_label(awaiting)} to sign — `sign #{tid}`. The staging URL stays "
+            f"{_who_label(awaiting)} to sign — `sign #{num}`. The staging URL stays "
             f"hidden until every party has signed, and nobody can report ready until "
             f"it locks.",
-            todo_id=tid,
+            number=num, unjoined=unjoined,
         )
 
     # A lock exists on this todo, so its proposer exists too — but never interpolate a
@@ -480,31 +687,33 @@ def next_step(conn, task_id: str, todo_id: int) -> dict:
 
     if row["state"] not in (BACKEND_LIVE, TESTING):
         return _next(
-            "contract_locked", owner, f"ready #{tid}",
+            "contract_locked", owner, f"ready #{num}",
             f"The contract is locked and nothing is building yet — {named} proposed "
             f"it, so {named} is the producer and owes the build. When their side is "
-            f"live to build against, their agent types `ready #{tid}`. Only they can: "
+            f"live to build against, their agent types `ready #{num}`. Only they can: "
             f"the broker refuses `ready` from anyone else.",
-            todo_id=tid,
+            number=num,
         )
 
     if row["state"] == BACKEND_LIVE:
         return _next(
-            "backend_live", consumers, f"ok #{tid}",
-            f"{_who_label(consumers)} builds against it and reports back — `ok #{tid}` "
-            f"if it works, `block #{tid}` if it doesn't (that's a strike; {MAX_STRIKES} "
-            f"and the humans take over). The producer ({named}) may not check its "
+            "backend_live", consumers, f"ok #{num}",
+            f"{_who_label(consumers)} builds against it and reports back — `ok #{num}` "
+            f"if it works, `block #{num}` if it doesn't (that's a strike; {MAX_STRIKES} "
+            # "their", not "its": this sentence now names a PERSON (see `_name_seats`),
+            # and "the producer (Sarah) may not check its own work" reads as a fault.
+            f"and the humans take over). The producer ({named}) may not check their "
             f"own work.",
-            alt=f"block #{tid}", todo_id=tid,
+            alt=f"block #{num}", number=num, unjoined=unjoined,
         )
 
     # testing — checks have run, so `done` is finally allowed.
     return _next(
-        "testing", parties, f"done #{tid}",
+        "testing", parties, f"done #{num}",
         f"Checks have run. When it's confirmed end to end, any party calls it: "
-        f"`done #{tid}`. `block #{tid}` instead if a check failed. The task itself "
+        f"`done #{num}`. `block #{num}` instead if a check failed. The task itself "
         f"concludes when the LAST todo is done.",
-        alt=f"block #{tid}", todo_id=tid,
+        alt=f"block #{num}", number=num, unjoined=unjoined,
     )
 
 
@@ -539,45 +748,87 @@ def _clear_todo_stuck(conn, todo_id: int) -> None:
 def _todo_label(row) -> str:
     """``[todo #3 payments]`` — prefixed onto the typed message a report posts.
 
-    ``messages`` has no ``todo_id`` column, so this text prefix is what tells the peer
-    (and the human thread) WHICH deliverable a deploy/test/verified belongs to.
+    The prefix is what tells the peer (and the human thread) WHICH deliverable a
+    deploy/test/verified belongs to, so it prints the per-task ``number`` the peer would
+    type back — not the global ``todos.id`` the row is keyed on.
     """
-    return f"[todo #{row['id']} {row['title']}]"
+    return f"[todo #{row['number']} {row['title']}]"
 
 
 # --------------------------------------------------------------------------- #
 # contract lifecycle
 # --------------------------------------------------------------------------- #
-def _resolve_contract_todo(conn, identity: Identity, todo_id: int | None):
-    """Resolve the deliverable a contract belongs to, or ``None`` for a task-level one.
+def _require_contract_todo(conn, task_id: str, number: int | None, call: str):
+    """Resolve the chain a contract operation names. Never ``None``.
 
-    Once a task runs on todos the selector is REQUIRED. A task-level contract there
-    would silently ask the WHOLE cast to sign work that binds two of them (the
-    signatory set is the party list — see ``lock_contract``), and nothing could ever
-    be reported against it, because ``report_status`` is todo-scoped on such a task
-    too. So the ambiguity is removed by construction rather than by convention.
+    The counterpart of ``_resolve_contract_todo`` for the ops that act on an EXISTING
+    contract. Both exist because proposing additionally validates the todo's stage — you
+    cannot shape work nobody has accepted — while this one only needs to know which chain
+    the caller meant.
+
+    ``lock_contract`` uses it because it names ONE version, and ``(task_id, version)``
+    names one row per deliverable, so an unscoped lookup fetches a sibling todo's contract
+    and then reports *its* status. ``decline_contract`` and ``reopen_negotiations`` raise
+    their own equivalent once the task has todos (they act on "the newest proposal", not a
+    named version); ``get_contract`` deliberately stays unscoped, because the dashboard
+    reads it to show a task's current contract whichever deliverable it belongs to.
+    """
+    if number is None:
+        if todos.has_todos(conn, task_id):
+            raise ValueError(
+                f"name the deliverable: {call}. Live todos: "
+                f"{_live_todo_list(conn, task_id)} — call get_todos() for their scopes."
+            )
+        raise ValueError(
+            f"task '{task_id}' has no todos, so it has no contracts — a contract is an "
+            f"agreement about one deliverable. Start with propose_todo(title, scope, parties)."
+        )
+    return todos.get_row(conn, task_id, number)
+
+
+def _resolve_contract_todo(conn, identity: Identity, number: int | None):
+    """Resolve the deliverable a contract belongs to. Never ``None``.
+
+    ``number`` is the agent-supplied ``#N`` (``todos.number``, per task), resolved
+    through ``todos.get_row``; the row's internal ``id`` is what gets written to
+    ``contracts.todo_id``.
+
+    The selector is ALWAYS required, because there is exactly one kind of contract: an
+    agreement about ONE todo. There used to be a second, task-level kind, which meant
+    every contract operation had two code paths and the task-level one stayed reachable
+    in ways nobody intended — a bare ``decline_contract`` could kill a proposal on a
+    deliverable the caller never named. It also asked the WHOLE cast to sign work that
+    binds two of them (the signatory set is the party list — see ``lock_contract``) and
+    could never be reported against, since ``report_status`` is todo-scoped.
 
     Stage matters: agree on WHAT before HOW. A contract on a todo that not every party
     has accepted yet is a shape for work nobody signed up to.
     """
-    if todo_id is None:
+    if number is None:
         if todos.has_todos(conn, identity.task_id):
             raise ValueError(
-                f"task '{identity.task_id}' runs on todos, so a contract must name the "
-                f"deliverable it shapes: propose_contract(spec, todo=<id>). Live todos: "
+                f"a contract must name the deliverable it shapes: "
+                f"propose_contract(spec, todo=<N>). Live todos: "
                 f"{_live_todo_list(conn, identity.task_id)} — call get_todos() for their "
                 f"scopes and party lists."
             )
-        return None
+        raise ValueError(
+            f"task '{identity.task_id}' has no todos yet, and a contract is an agreement "
+            f"about one deliverable — so there is nothing to contract. Propose the todo "
+            f"first: propose_todo(title, scope, parties), have every party accept it with "
+            f"accept_todo(<N>), then propose_contract(spec, todo=<N>)."
+        )
 
-    row = todos.get_row(conn, identity.task_id, todo_id)
+    row = todos.get_row(conn, identity.task_id, number)
     todos.assert_party(row, identity.role, "propose a contract on")
     status = todos.status_of(conn, row)
     if status == todos.DROPPED:
-        raise ValueError(f"todo {row['id']} was dropped; there is nothing left to contract")
+        raise ValueError(
+            f"todo #{row['number']} was dropped; there is nothing left to contract"
+        )
     if status == todos.VERIFIED:
         raise ValueError(
-            f"todo {row['id']} is already verified — propose a NEW todo for follow-up "
+            f"todo #{row['number']} is already verified — propose a NEW todo for follow-up "
             f"work rather than re-contracting finished work"
         )
     if status == todos.PENDING:
@@ -586,13 +837,13 @@ def _resolve_contract_todo(conn, identity: Identity, todo_id: int | None):
             p for p in todos.parties_of(row) if d.get(p, {}).get("decision") != todos.ACCEPT
         ]
         raise ValueError(
-            f"todo {row['id']} '{row['title']}' is not accepted yet — agree on WHAT before "
-            f"HOW. Waiting on {', '.join(awaiting)} to accept_todo({row['id']})."
+            f"todo #{row['number']} '{row['title']}' is not accepted yet — agree on WHAT "
+            f"before HOW. Waiting on {', '.join(awaiting)} to accept_todo({row['number']})."
         )
     return row
 
 
-def propose_contract(conn, identity: Identity, spec: dict, todo_id: int | None = None) -> dict:
+def propose_contract(conn, identity: Identity, spec: dict, number: int | None = None) -> dict:
     """Validate and record a contract proposal, (re)opening planning.
 
     A proposal is valid from ``open`` or any later non-terminal state — a v2+
@@ -600,26 +851,27 @@ def propose_contract(conn, identity: Identity, spec: dict, todo_id: int | None =
     back to ``contract_proposed`` (SPEC §5 rule 1). Terminal tasks cannot be
     reopened without a human.
 
-    ``todo_id`` scopes the contract to ONE deliverable (v2): the row records it, and
-    the contract's signatory set becomes that todo's party list instead of the task's
-    full cast. It is optional only for a task with no todos, and required for one that
-    has them (see ``_resolve_contract_todo``). Version numbering is untouched — a
-    single MAX+1 sequence per TASK — so one todo's chain reads v1, v4, v7.
-    """
-    todo = _resolve_contract_todo(conn, identity, todo_id)
-    # The host may have nominated the deployment target at setup — the human owns it,
-    # and the producer agent INHERITS it rather than inventing a URL that was never
-    # deployed. Only fills a gap: an explicit staging_url in the proposal still wins.
-    task_url = _task_staging_url(conn, identity.task_id)
-    if task_url and not (isinstance(spec, dict) and str(spec.get("staging_url") or "").strip()):
-        spec = {**spec, "staging_url": task_url} if isinstance(spec, dict) else spec
+    ``number`` (the agent's ``todo=N``) names the ONE deliverable this contract is about.
+    It is always required — there is no other kind of contract — and the signatory set is
+    that todo's party list, not the task's full cast (see ``_resolve_contract_todo``).
 
-    # staging_url strictness is CONNECTIVITY-aware, not auth-mode-aware: a peer on
-    # another machine needs a real https domain + the SSRF guard, while a task the
-    # host declared same-machine (loopback origin, no public URL) is one person on one
-    # box, where http://localhost:PORT is the correct target. The GUI always runs the
-    # broker in remote mode for token auth, so is_remote alone cannot tell them apart.
-    # See contracts._validate_staging_url.
+    Versions are numbered PER CHAIN: MAX(version)+1 among *this todo's* contracts, so
+    every deliverable's first proposal is v1 and its chain reads 1, 2, 3… A declined v1
+    keeps its number (nothing is reused); the replacement is v2.
+    """
+    todo = _resolve_contract_todo(conn, identity, number)
+    # NOTHING is injected into the spec any more. The deployment target is host-owned
+    # configuration on the task/todo (see `resolve_staging_url`) and never part of the
+    # document the parties sign — so there is no gap to fill here, and a spec that
+    # carries a `staging_url` is REFUSED by the validator below rather than quietly
+    # accepted into spec_json.
+    #
+    # `is_remote`/`same_machine` are still threaded through: they are the CONNECTIVITY
+    # facts the host-target validator keys on (a peer on another machine needs a real
+    # https domain + the SSRF guard; a task the host declared same-machine is one
+    # person on one box, where http://localhost:PORT is correct), and the GUI always
+    # runs the broker in remote mode for token auth so is_remote alone cannot tell them
+    # apart. See contracts.validate_staging_url.
     errors = contracts.validate_spec(
         spec,
         is_remote=config.get_config().is_remote,
@@ -631,34 +883,48 @@ def propose_contract(conn, identity: Identity, spec: dict, todo_id: int | None =
 
     _assert_live(conn, identity.task_id)
 
-    # Both parties must clear pre-flight before ANYONE can propose (owner rule): a
-    # contract agreed with an agent that never proved it understands the protocol
-    # is worthless. Remote-only — local self-declared identities don't run pre-flight
-    # (the middleware readiness gate is remote-only too), so gating there would brick
-    # the whole local contract flow.
+    # Every PARTY TO THIS TODO must clear pre-flight before anyone can propose (owner
+    # rule): a contract agreed with an agent that never proved it understands the
+    # protocol is worthless.
+    #
+    # Scoped to the todo's party list, NOT the task's cast. Pre-flight gates the
+    # INTERACTION, not the task — the same rule `parties_json` already encodes: a seat
+    # this todo does not name may read it, is not bound by it, is not in its quorum
+    # (see `lock_contract`), and therefore does not block it. Asking it for readiness
+    # first was a task-wide `WHERE ready = 0` that froze two ready people over a third
+    # seat that was party to neither of their deliverables.
+    #
+    # Remote-only — local self-declared identities don't run pre-flight (the middleware
+    # readiness gate is remote-only too), so gating there would brick the local flow.
     if config.get_config().is_remote:
-        not_ready = conn.execute(
-            "SELECT role FROM agents WHERE task_id = ? AND revoked_at IS NULL AND ready = 0 "
-            "ORDER BY role",
-            (identity.task_id,),
-        ).fetchall()
+        not_ready = seats.unready(conn, identity.task_id, todos.parties_of(todo))
         if not_ready:
-            waiting = ", ".join(r["role"] for r in not_ready)
+            waiting = ", ".join(r["seat"] for r in not_ready)
             raise ValueError(
-                "all parties must pass pre-flight before a contract can be proposed; "
-                f"waiting on: {waiting}"
+                f"every party to todo #{todo['number']} must pass pre-flight before a "
+                f"contract can be proposed on it; waiting on: {waiting}. Each of them "
+                f"calls readiness_check() then submit_readiness(answers) — tell them "
+                f"with send_message. Seats that are not parties to this todo do not "
+                f"block it."
             )
 
     spec_json = json.dumps(spec)
     service.assert_content_size(spec_json, "contract spec")
 
-    # Version is MAX+1; two concurrent proposals can compute the same value and
-    # collide on UNIQUE(task_id, version). Retry on that collision (re-reading MAX)
-    # so a racing proposer gets a clean higher version instead of an uncaught 500.
+    # Version is MAX+1 SCOPED TO THIS CHAIN — this todo's own contracts — read in the SAME
+    # transaction as the INSERT that consumes it, exactly like `todos.next_number`. That is
+    # what makes a deliverable's first proposal read as v1 instead of "v9 on a six-todo
+    # task". `_resolve_contract_todo` never returns None, so this is a plain `= ?`.
+    #
+    # Two concurrent proposals can read the same MAX and collide on the chain's unique
+    # index; retry re-reads it, so a racing proposer gets a clean higher version instead of
+    # an uncaught 500.
+    chain_id = todo["id"]
     for _attempt in range(6):
         row = conn.execute(
-            "SELECT COALESCE(MAX(version), 0) AS v FROM contracts WHERE task_id = ?",
-            (identity.task_id,),
+            "SELECT COALESCE(MAX(version), 0) AS v FROM contracts "
+            "WHERE task_id = ? AND todo_id = ?",
+            (identity.task_id, chain_id),
         ).fetchone()
         version = row["v"] + 1
         try:
@@ -666,128 +932,206 @@ def propose_contract(conn, identity: Identity, spec: dict, todo_id: int | None =
                 "INSERT INTO contracts (task_id, version, spec_json, status, proposed_by, "
                 "todo_id, created_at) VALUES (?,?,?,?,?,?,?)",
                 (identity.task_id, version, spec_json, "draft", identity.agent_id,
-                 (todo["id"] if todo is not None else None), _now()),
+                 chain_id, _now()),
             )
             break
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as exc:
+            # ONLY a version collision is retryable. Catching every IntegrityError meant a
+            # NOT NULL / FK violation burned all six attempts and then surfaced as "could
+            # not allocate a contract version — please retry", advice that could never work.
+            if "todo_id" in str(exc) or "NOT NULL" in str(exc).upper():
+                conn.rollback()
+                raise
             conn.rollback()
     else:
         raise ValueError("could not allocate a contract version — please retry")
 
-    if todo is None:
-        state = _transition(conn, identity.task_id, CONTRACT_PROPOSED)
-    else:
-        # Rule 1 one level down: a v2 proposal on a todo that is already built reopens
-        # THAT deliverable's planning, and only that one — the other five keep marching.
-        _todo_march(conn, identity.task_id, todo["id"], todo["state"], CONTRACT_PROPOSED)
-        state = todos.apply_rollup(conn, identity.task_id)
+    # Rule 1 one level down: a v2 proposal on a todo that is already built reopens
+    # THAT deliverable's planning, and only that one — the other five keep marching.
+    _todo_march(conn, identity.task_id, todo["id"], todo["state"], CONTRACT_PROPOSED)
+    state = todos.apply_rollup(conn, identity.task_id)
     conn.commit()
     # Tell the peer directly — a transition event alone is dashboard-only and would
     # never reach the other agent's wait_for_message queue. This is what makes
     # planning actually flow: the peer hears "there's a proposal to assess."
     n_endpoints = len(spec.get("endpoints", []))
-    scope_note = "" if todo is None else f" on todo #{todo['id']} ({todo['title']})"
-    signers = (
-        "every role" if todo is None
-        else f"the parties on this todo ({', '.join(todos.parties_of(todo))})"
-    )
+    scope_note = f" on todo #{todo['number']} ({todo['title']})"
+    signers = f"the parties on this todo ({', '.join(todos.parties_of(todo))})"
+    # Versions are per-deliverable, so the signature call must carry the deliverable too —
+    # `lock_contract(1)` is genuinely ambiguous on a task where five todos each have a v1.
+    sign_call = f"lock_contract({version}, todo={todo['number']})"
     service.post_message(
         conn,
         identity,
         "contract_proposal",
         f"Proposed contract v{version}{scope_note} ({n_endpoints} endpoint"
         f"{'' if n_endpoints == 1 else 's'}). Review the shape with get_contract (it now "
-        f"shows the proposed contract, not only locked ones), then lock_contract({version}) "
+        f"shows the proposed contract, not only locked ones), then {sign_call} "
         f"to sign — or message me to request changes first. The staging_url appears in "
-        f"get_contract once {signers} {'has' if todo is None else 'have'} signed.",
-        todo_id=todo["id"] if todo else None,
+        f"get_contract once {signers} have signed.",
+        todo_id=todo["id"],
     )
-    if todo is None:
-        return {"version": version, "state": state}
     return {
         "version": version,
         "state": state,
-        "todo_id": todo["id"],
+        # ONE selector, on purpose: `todo` is the per-task `#N` the agent passes back on
+        # its next call. The internal `todos.id` is NOT returned to an agent — handing an
+        # LLM two integers where only one resolves is how a report lands on the wrong
+        # deliverable. The dashboard reads the id from `/api`, which joins it itself.
+        "todo": todo["number"],
         "todo_state": CONTRACT_PROPOSED,
         "signatories": todos.parties_of(todo),
     }
 
 
-def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = None) -> dict:
+def _chain_versions(conn, task_id: str, todo_id: int) -> list[int]:
+    """Every version in ONE contract chain, ascending. A chain is exactly one todo."""
+    return [
+        r["version"]
+        for r in conn.execute(
+            "SELECT version FROM contracts WHERE task_id = ? AND todo_id = ? "
+            "ORDER BY version",
+            (task_id, todo_id),
+        ).fetchall()
+    ]
+
+
+def _wrong_chain_hint(conn, task_id: str, version: int, number: int, todo_id: int) -> str:
+    """"You asked for v3 on this deliverable; v3 on this task is a DIFFERENT one."
+
+    The diagnostics half of the fix. Versions are per-chain now, so ``v1`` usually exists
+    on several todos and naming a sibling is only TRUE when exactly one other chain holds
+    that number. When several do, the honest answer is the rule itself.
+    """
+    others = [
+        r["todo_id"]
+        for r in conn.execute(
+            "SELECT todo_id FROM contracts WHERE task_id = ? AND version = ? "
+            "AND todo_id != ? ORDER BY id",
+            (task_id, version, todo_id),
+        ).fetchall()
+    ]
+    if not others:
+        return ""
+    if len(others) > 1:
+        return (
+            f" (Contract versions are numbered PER DELIVERABLE, from 1, so several todos "
+            f"on this task hold a v{version} and they are different contracts.)"
+        )
+    sibling = todos.row_by_id(conn, task_id, others[0])
+    return (
+        f" Contract v{version} belongs to todo #{sibling['number']} "
+        f"('{sibling['title']}'), not todo #{int(number)} — check get_todos() before signing."
+    )
+
+
+def _no_such_version(conn, identity: Identity, version: int, number: int, todo) -> str:
+    """The refusal for a version that does not exist IN THE CHAIN THE CALLER NAMED.
+
+    This is the message the old code got wrong. It used to look a contract up by
+    ``(task_id, version)`` alone, so ``lock_contract(1, todo=2)`` fetched todo #1's row,
+    found it locked, and answered "contract version 1 is already locked and immutable" —
+    a true sentence about a DIFFERENT deliverable, with advice that was wrong for the one
+    the caller asked about. The chain is established first now, so every branch below is
+    about the deliverable the caller actually meant — ``todo`` is never None, because
+    ``_require_contract_todo`` has already refused a call that named no deliverable.
+    """
+    task_id = identity.task_id
+    todo_id = todo["id"]
+    where = f"todo #{todo['number']} ('{todo['title']}')"
+    gc = f"get_contract(todo={int(number)})"
+    scope = f", todo={int(number)}"
+    hint = _wrong_chain_hint(conn, task_id, version, number, todo_id)
+    mine = _chain_versions(conn, task_id, todo_id)
+
+    if mine:
+        # Something HAS been proposed here — so "nothing to sign" would be a lie. Name
+        # what the chain actually holds; that is the whole answer.
+        return (
+            f"no contract version {version} on {where} — its chain has "
+            f"{', '.join('v' + str(v) for v in mine)}. Contract versions are numbered per "
+            f"deliverable, from 1, so the same number on another todo is a different "
+            f"contract. Read {gc} and sign a version this chain really has." + hint
+        )
+    # Nothing proposed on this chain at all. The commonest way to land here is a human
+    # saying "sign it" on a scope where nobody has proposed anything — and an agent that
+    # only learns "no such version" goes back to its human to ask, which is the stall this
+    # text exists to end. A signature needs a proposal to attach to, so name the move that
+    # is actually missing, and name who can make it (anyone bound by the scope, incl. you).
+    return (
+        f"no contract version {version} on {where}. Check {gc} — if nothing has been "
+        f"proposed yet there is nothing to sign, and the missing step is the PROPOSAL, "
+        f"not the signature. If you are a party you can supply it: "
+        f"propose_contract(spec{scope}) with your reading of your human's instruction "
+        f"stated as an explicit assumption, then sign THAT version. Your peer still "
+        f"reviews and signs (or declines) before anything locks." + hint
+    )
+
+
+def lock_contract(conn, identity: Identity, version: int, number: int | None = None) -> dict:
     """Record this agent's signature on a contract version; lock only when every
     required signatory has signed (SPEC §5 rule 2, §6).
 
-    Who is required depends on what the contract is ABOUT, and this is the hinge of
-    the todos feature:
-
-    * a TASK-level contract (``contracts.todo_id IS NULL`` — every contract that
-      existed before todos, and every one on a task that never grows a todo) needs
-      *all of them*, per ``tasks.roles_json``;
-    * a TODO-scoped contract needs exactly that todo's ``parties_json``. A task seat
-      the todo does not bind neither blocks the lock nor may sign it — SEATS ≠
-      PARTICIPANTS. That is why todos need no separate quorum mechanism: it is the
-      same "all must sign" rule over a smaller "all".
+    The required signatories are exactly the todo's ``parties_json``. A task seat the todo
+    does not bind neither blocks the lock nor may sign it — SEATS ≠ PARTICIPANTS. That is
+    why todos need no separate quorum mechanism: it is the same "all must sign" rule over a
+    smaller "all". (There used to be a second, task-level kind of contract whose signatory
+    set was the whole of ``tasks.roles_json``; it is gone, and with it the branch.)
 
     A locked contract is immutable (rule 6): re-signing or re-locking it is rejected,
     and changes must go through a fresh version that every signatory re-signs.
-    ``todo_id`` is optional — the version already names exactly one row — but when
-    passed it is CHECKED against the contract, so an agent that means to sign the
-    payments todo cannot mis-sign the refunds one.
+
+    ``number`` (the agent's ``todo=N``) is what identifies the CHAIN, and the lookup is
+    scoped by it. That is structural, not a courtesy: versions are numbered per
+    deliverable, so ``(task_id, version)`` names as many rows as there are todos. It also
+    fixes a diagnostics defect — the old unscoped lookup fetched a SIBLING todo's contract
+    and then reported *its* status, so ``lock_contract(1, todo=2)`` answered "version 1 is
+    already locked and immutable" about todo #1 while todo #2 had a perfectly signable
+    draft. The broker must establish WHICH deliverable the caller meant before it says
+    what is wrong with it.
     """
     _assert_live(conn, identity.task_id)
 
+    # Resolve the CHAIN first — the deliverable, not the version. `get_row` is the
+    # resolver for anything a human or an agent typed, and it raises a clean "no todo #N
+    # on task X" before any contract query happens.
+    todo = _require_contract_todo(
+        conn, identity.task_id, number, "lock_contract(version, todo=<N>)"
+    )
     contract = conn.execute(
-        "SELECT id, status, todo_id FROM contracts WHERE task_id = ? AND version = ?",
-        (identity.task_id, version),
+        "SELECT id, status, todo_id FROM contracts "
+        "WHERE task_id = ? AND todo_id = ? AND version = ?",
+        (identity.task_id, todo["id"], version),
     ).fetchone()
     if contract is None:
-        # The commonest way to land here is a human saying "sign it" on a scope where
-        # nobody has proposed anything — and an agent that only learns "no such version"
-        # goes back to its human to ask, which is the stall this text exists to end. A
-        # signature needs a proposal to attach to, so name the move that is actually
-        # missing, and name who can make it (anyone bound by the scope, including you).
-        scope = "" if todo_id is None else f", todo={int(todo_id)}"
+        raise ValueError(_no_such_version(conn, identity, version, number, todo))
+
+    scope_note = f" on todo #{todo['number']} ({todo['title']})"
+
+    # Permission and liveness of the DELIVERABLE come before the state of its contract:
+    # "you are not a party to this" and "this deliverable was dropped" are facts about the
+    # thing the caller named, so they are never the wrong answer, whereas a status
+    # complaint only makes sense once the caller is entitled to hear it.
+    if todo["dropped_at"] is not None:
         raise ValueError(
-            f"no contract version {version} on task '{identity.task_id}'"
-            + ("" if todo_id is None else f" for todo {int(todo_id)}")
-            + f". Check get_contract{'()' if todo_id is None else f'(todo={int(todo_id)})'} "
-            f"— if nothing has been proposed yet there is nothing to sign, and the missing "
-            f"step is the PROPOSAL, not the signature. If you are a party you can supply "
-            f"it: propose_contract(spec{scope}) with your reading of your human's "
-            f"instruction stated as an explicit assumption, then sign THAT version. Your "
-            f"peer still reviews and signs (or declines) before anything locks."
+            f"todo #{todo['number']} was dropped; its contract v{version} cannot be signed"
         )
+    # A non-party has no say in a shape that does not bind it — the mirror image of
+    # "a non-party does not block the lock".
+    todos.assert_party(todo, identity.role, "sign a contract on")
+
     if contract["status"] == "locked":
         raise ValueError(
-            f"contract version {version} is already locked and immutable; "
-            f"propose a new version to change it"
+            f"contract version {version}{scope_note} is already locked and immutable; "
+            f"propose a new version to change it — "
+            f"reopen_negotiations(reason, todo={todo['number']}) then "
+            f"propose_contract(spec, todo={todo['number']})"
         )
     if contract["status"] == "declined":
         raise ValueError(
-            f"contract version {version} was declined and cannot be signed. "
-            f"Propose a new version with propose_contract(spec) that addresses the "
-            f"objection — get_contract shows who declined it and why."
-        )
-
-    todo = None
-    if contract["todo_id"] is not None:
-        todo = todos.get_row(conn, identity.task_id, contract["todo_id"])
-        if todo_id is not None and int(todo_id) != todo["id"]:
-            raise ValueError(
-                f"contract v{version} belongs to todo {todo['id']} ('{todo['title']}'), "
-                f"not todo {int(todo_id)} — check get_todos() before signing"
-            )
-        if todo["dropped_at"] is not None:
-            raise ValueError(
-                f"todo {todo['id']} was dropped; its contract v{version} cannot be signed"
-            )
-        # A non-party has no say in a shape that does not bind it — the mirror image of
-        # "a non-party does not block the lock".
-        todos.assert_party(todo, identity.role, "sign a contract on")
-    elif todo_id is not None:
-        raise ValueError(
-            f"contract v{version} is a TASK-level contract (it binds the whole cast), "
-            f"not one scoped to todo {int(todo_id)} — sign it with lock_contract({version})"
+            f"contract version {version}{scope_note} was declined and cannot be signed. "
+            f"Propose a new version with propose_contract(spec, todo={todo['number']}) that "
+            f"addresses the objection — get_contract shows who declined it and why."
         )
 
     # Record this signature (idempotent — signing twice is a no-op, not an error).
@@ -797,19 +1141,17 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
         (contract["id"], identity.agent_id, _now()),
     )
 
-    required = _roles(conn, identity.task_id) if todo is None else todos.parties_of(todo)
+    required = todos.parties_of(todo)
     signed = [
         r["role"]
         for r in conn.execute(
-            "SELECT a.role FROM contract_signatures s "
+            "SELECT COALESCE(a.handle, a.role) AS role FROM contract_signatures s "
             "JOIN agents a ON a.id = s.agent_id WHERE s.contract_id = ?",
             (contract["id"],),
         ).fetchall()
     ]
     signed_set = set(signed)
     remaining = [r for r in required if r not in signed_set]
-
-    scope_note = "" if todo is None else f" on todo #{todo['id']} ({todo['title']})"
 
     if remaining:
         # Partial signature is a normal, expected outcome — not an error.
@@ -821,45 +1163,54 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
             "contract_lock",
             f"Signed contract v{version}{scope_note}. Waiting on {', '.join(remaining)} to "
             f"sign before it locks.",
-            todo_id=todo["id"] if todo else None,
+            todo_id=todo["id"],
         )
-        out = {
+        return {
             "locked": False,
             "version": version,
             "signed": sorted(signed_set),
             "remaining": remaining,
+            "todo": todo["number"],
         }
-        if todo is not None:
-            out["todo_id"] = todo["id"]
-        return out
 
     # All roles have signed → the contract locks and the task advances. The UPDATE
     # is conditional on status='draft' so that if two roles sign the final signature
     # concurrently and both observe "all signed", exactly one wins the lock — the
     # loser's rowcount is 0 and it returns the locked result WITHOUT a duplicate lock
     # event or a second human Slack ping.
+    # The lock also RECORDS the deployment target that was live at this moment, so
+    # "what did we agree to?" keeps an answer after the host re-points a tunnel. It is
+    # written to its own column, never into `spec_json`: the spec is the signed shape,
+    # and mutating a document at the instant it is signed would be the one thing a
+    # signature must never permit. The recorded value and the live one are allowed to
+    # diverge afterwards — that divergence IS the feature.
     cur = conn.execute(
-        "UPDATE contracts SET status = 'locked', locked_at = ? WHERE id = ? AND status = 'draft'",
-        (_now(), contract["id"]),
+        "UPDATE contracts SET status = 'locked', locked_at = ?, staging_url_at_lock = ? "
+        "WHERE id = ? AND status = 'draft'",
+        (
+            _now(),
+            resolve_staging_url(
+                conn, identity.task_id, todo["id"], _spec_of(conn, contract["id"])
+            ),
+            contract["id"],
+        ),
     )
     if cur.rowcount != 1:
         conn.commit()
         return {"locked": True, "version": version, "signed": sorted(signed_set)}
-    if todo is None:
-        state = _transition(conn, identity.task_id, CONTRACT_LOCKED)
-        lock_detail = {"version": version, "signed": sorted(signed_set)}
-    else:
-        _todo_march(conn, identity.task_id, todo["id"], todo["state"], CONTRACT_LOCKED)
-        # A newly locked version is a genuine new ATTEMPT, so the ping-pong counter
-        # starts over (SPEC §8). The task-level path has to derive that from event
-        # timestamps (D3) because it cannot see the lock from _report_deployed; here we
-        # ARE the lock, so we just reset it — and no check can slip in between, since
-        # checks are refused until the todo reaches backend_live.
-        conn.execute("UPDATE todos SET strikes = 0 WHERE id = ?", (todo["id"],))
-        _clear_todo_stuck(conn, todo["id"])
-        state = todos.apply_rollup(conn, identity.task_id)
-        lock_detail = {"version": version, "signed": sorted(signed_set), "todo_id": todo["id"]}
-    _event(conn, identity.task_id, "lock", lock_detail)
+    _todo_march(conn, identity.task_id, todo["id"], todo["state"], CONTRACT_LOCKED)
+    # A newly locked version is a genuine new ATTEMPT, so the ping-pong counter starts
+    # over (SPEC §8). The task-level `_report_deployed` has to derive that from event
+    # timestamps (D3) because it cannot see the lock; here we ARE the lock, so we just
+    # reset it — and no check can slip in between, since checks are refused until the
+    # todo reaches backend_live.
+    conn.execute("UPDATE todos SET strikes = 0 WHERE id = ?", (todo["id"],))
+    _clear_todo_stuck(conn, todo["id"])
+    state = todos.apply_rollup(conn, identity.task_id)
+    _event(
+        conn, identity.task_id, "lock",
+        {"version": version, "signed": sorted(signed_set), "todo_id": todo["id"]},
+    )
     _notify(
         conn,
         identity.task_id,
@@ -885,23 +1236,23 @@ def lock_contract(conn, identity: Identity, version: int, todo_id: int | None = 
         "contract_locked",
         f"Contract v{version}{scope_note} is LOCKED — signed by all parties "
         f"({', '.join(sorted(signed_set))}). This is the blueprint to build against; read "
-        f"the frozen shape and the staging_url from get_contract"
-        + ("." if todo is None else f"(todo={todo['id']}).")
-        + (
-            "" if todo is None
-            else f" Report progress on this deliverable with report_status(..., todo={todo['id']})."
-        ),
-        todo_id=todo["id"] if todo else None,
+        f"the frozen shape and the staging_url from get_contract(todo={todo['number']}). "
+        f"Report progress on this deliverable with "
+        f"report_status(..., todo={todo['number']}).",
+        todo_id=todo["id"],
     )
-    out = {"locked": True, "version": version, "signed": sorted(signed_set), "state": state}
-    if todo is not None:
-        out["todo_id"] = todo["id"]
-        out["todo_state"] = CONTRACT_LOCKED
-    return out
+    return {
+        "locked": True,
+        "version": version,
+        "signed": sorted(signed_set),
+        "state": state,
+        "todo": todo["number"],
+        "todo_state": CONTRACT_LOCKED,
+    }
 
 
 def decline_contract(
-    conn, identity: Identity, reason: str, todo_id: int | None = None
+    conn, identity: Identity, reason: str, number: int | None = None
 ) -> dict:
     """Formally push back on a PROPOSED contract: mark that version declined, with a reason.
 
@@ -928,31 +1279,59 @@ def decline_contract(
             "next version"
         )
 
-    newest = _newest_contract(conn, identity.task_id, todo_id)
+    # `number` is the agent's `#N` and must be resolved to the internal id BEFORE it
+    # reaches a query against `contracts.todo_id`, which keys on `todos.id`.
+    #
+    # And it is REQUIRED, for the same reason `propose_contract` and `reopen_negotiations`
+    # require it: without it the "newest contract" is whichever chain happened to be
+    # written to last, so a bare decline could kill a proposal on a deliverable the caller
+    # never named — and the refusal it earns instead would be about the wrong one.
+    # "Decline the contract" is not a question with one answer on a six-deliverable task.
+    if number is None and todos.has_todos(conn, identity.task_id):
+        raise ValueError(
+            f"task '{identity.task_id}' runs on todos, so a decline must name the "
+            f"deliverable whose proposal it pushes back on: "
+            f"decline_contract(reason, todo=<N>). Live todos: "
+            f"{_live_todo_list(conn, identity.task_id)} — call get_contract(todo=N) to see "
+            f"what is proposed on each."
+        )
+    scoped_to = None if number is None else todos.get_row(conn, identity.task_id, number)
+    newest = _newest_contract(
+        conn, identity.task_id, scoped_to["id"] if scoped_to is not None else None
+    )
     if newest is None:
-        scope = f"todo {todo_id}" if todo_id is not None else f"task '{identity.task_id}'"
+        # No `number` and no contract means the task has no todos either (the guard above
+        # would have fired), and a task with no todos has nothing to contract.
+        scope = (
+            f"todo #{scoped_to['number']}" if scoped_to is not None
+            else f"task '{identity.task_id}'"
+        )
         raise ValueError(
             f"nothing to decline on {scope} — no contract has been proposed yet. "
             f"Declining pushes back on a PROPOSAL; there has to be one first."
         )
+    # Establish the DELIVERABLE (and the caller's standing on it) before reporting what
+    # is wrong with its contract — the same ordering rule as ``lock_contract``. A status
+    # complaint that does not say which deliverable it is about is how the broker ends up
+    # blaming the wrong thing. `todo_id` is NOT NULL, so there is always one to name.
+    todo = todos.row_by_id(conn, identity.task_id, newest["todo_id"])
+    # A non-party has no say in a shape that does not bind it — the mirror image of the
+    # same rule on signing.
+    todos.assert_party(todo, identity.role, "decline a contract on")
+    scope_note = f" on todo #{todo['number']} ({todo['title']})"
+    scope = f", todo={todo['number']}"
+
     if newest["status"] == "locked":
         raise ValueError(
-            f"contract v{newest['version']} is already locked — a locked contract is "
-            f"immutable. To change it, both of you reopen planning with "
-            f"reopen_negotiations(reason), then a new version is proposed and signed."
+            f"contract v{newest['version']}{scope_note} is already locked — a locked "
+            f"contract is immutable. To change it, both of you reopen planning with "
+            f"reopen_negotiations(reason{scope}), then a new version is proposed and signed."
         )
     if newest["status"] == "declined":
         raise ValueError(
-            f"contract v{newest['version']} is already declined — propose a new version "
-            f"with propose_contract(spec) rather than declining it twice."
+            f"contract v{newest['version']}{scope_note} is already declined — propose a "
+            f"new version with propose_contract(spec{scope}) rather than declining it twice."
         )
-
-    todo = None
-    if newest["todo_id"] is not None:
-        todo = todos.get_row(conn, identity.task_id, newest["todo_id"])
-        # A non-party has no say in a shape that does not bind it — the mirror image of
-        # the same rule on signing.
-        todos.assert_party(todo, identity.role, "decline a contract on")
 
     now = time.time()
     conn.execute(
@@ -965,7 +1344,6 @@ def decline_contract(
     conn.execute("DELETE FROM contract_signatures WHERE contract_id = ?", (newest["id"],))
     conn.commit()
 
-    scope_note = f" on todo #{todo['id']} ({todo['title']})" if todo else ""
     _event(
         conn,
         identity.task_id,
@@ -980,23 +1358,23 @@ def decline_contract(
         identity,
         "renegotiation",
         f"Declined contract v{newest['version']}{scope_note}: {reason}. That version is "
-        f"dead — nobody can sign it now. Propose a new version with propose_contract(spec"
-        + (f", todo={todo['id']}" if todo else "")
-        + ") that addresses this, or message me if you want to talk the shape through first.",
-        todo_id=(todo["id"] if todo else None),
+        f"dead — nobody can sign it now. Propose a new version with "
+        f"propose_contract(spec{scope}) that addresses this, or message me if you want to "
+        f"talk the shape through first.",
+        todo_id=todo["id"],
     )
     return {
         "version": newest["version"],
         "status": "declined",
         "declined_by": identity.role,
         "reason": reason,
-        "todo_id": (todo["id"] if todo else None),
-        "next": "propose a new version with propose_contract(spec)",
+        "todo": todo["number"],
+        "next": f"propose a new version with propose_contract(spec, todo={todo['number']})",
     }
 
 
 def reopen_negotiations(
-    conn, identity: Identity, reason: str, todo_id: int | None = None
+    conn, identity: Identity, reason: str, number: int | None = None
 ) -> dict:
     """Drop a locked-or-later task back to ``contract_proposed`` (planning) so a
     new contract version can be proposed and re-signed.
@@ -1008,7 +1386,7 @@ def reopen_negotiations(
     haven't locked a contract yet (there's nothing to re-plan — just keep talking
     or propose a first version).
 
-    On a task with todos it reopens ONE deliverable (``todo_id`` is then required, for
+    On a task with todos it reopens ONE deliverable (``number`` is then required, for
     the same reason a proposal needs it — "reopen planning" on six chains is not a
     thing), and only that todo goes back to planning; the other five keep marching.
     This is also the sanctioned route to change a todo whose contract already LOCKED:
@@ -1016,15 +1394,15 @@ def reopen_negotiations(
     once a lock exists, because a locked contract is immutable).
     """
     current = _assert_live(conn, identity.task_id)
-    if todo_id is None and todos.has_todos(conn, identity.task_id):
+    if number is None and todos.has_todos(conn, identity.task_id):
         raise ValueError(
             f"task '{identity.task_id}' runs on todos, so name the deliverable to "
-            f"replan: reopen_negotiations(reason, todo=<id>). Live todos: "
+            f"replan: reopen_negotiations(reason, todo=<N>). Live todos: "
             f"{_live_todo_list(conn, identity.task_id)}."
         )
 
-    if todo_id is not None:
-        return _reopen_todo(conn, identity, reason, todo_id)
+    if number is not None:
+        return _reopen_todo(conn, identity, reason, number)
 
     if _current_locked(conn, identity.task_id) is None:
         raise ValueError(
@@ -1049,35 +1427,50 @@ def reopen_negotiations(
     return {"state": state, "from": current, "reason": detail}
 
 
-def _reopen_todo(conn, identity: Identity, reason: str, todo_id: int) -> dict:
-    """Reopen planning on ONE deliverable. Same rules, one level down."""
-    row = todos.get_row(conn, identity.task_id, todo_id)
+def _reopen_todo(conn, identity: Identity, reason: str, number: int) -> dict:
+    """Reopen planning on ONE deliverable. Same rules, one level down.
+
+    ``number`` is the agent's ``#N``; the internal id is read off the resolved row.
+    """
+    row = todos.get_row(conn, identity.task_id, number)
     if row["dropped_at"] is not None:
-        raise ValueError(f"todo {row['id']} was dropped; there is nothing to replan")
+        raise ValueError(f"todo #{row['number']} was dropped; there is nothing to replan")
     todos.assert_party(row, identity.role, "reopen planning on")
     if row["state"] == VERIFIED:
         raise ValueError(
-            f"todo {row['id']} is verified — replanning finished work would make the "
+            f"todo #{row['number']} is verified — replanning finished work would make the "
             f"task's rollup lie. Propose a NEW todo for follow-up work."
         )
     if _current_locked(conn, identity.task_id, todo_id=row["id"]) is None:
         raise ValueError(
-            f"nothing to reopen on todo {row['id']} — no contract has locked on it yet. "
-            f"Keep planning, or propose a first version with "
-            f"propose_contract(spec, todo={row['id']})."
+            f"nothing to reopen on todo #{row['number']} — no contract has locked on it "
+            f"yet. Keep planning, or propose a first version with "
+            f"propose_contract(spec, todo={row['number']})."
         )
     if row["state"] in (OPEN, CONTRACT_PROPOSED):
         raise ValueError(
-            f"todo {row['id']} is already in planning (state '{row['state']}') — "
+            f"todo #{row['number']} is already in planning (state '{row['state']}') — "
             f"nothing to reopen"
         )
 
     detail = (reason or "").strip() or "(no reason given)"
     service.assert_content_size(detail, "reopen reason")
     _todo_march(conn, identity.task_id, row["id"], row["state"], CONTRACT_PROPOSED)
+    # `text` is not decoration: `reopen` is not one of api._EVENT_KINDS, so
+    # `_render_detail` falls through to its generic branch — which prints `text` when
+    # there is one and otherwise DUMPS THE WHOLE DETAIL AS JSON. Without this the human
+    # event log printed the internal `todo_id`. `todo_number` rides along beside the id
+    # for the same reason todos._event carries both: joinable AND printable.
     _event(
         conn, identity.task_id, "reopen",
-        {"from": row["state"], "reason": detail, "todo_id": row["id"]},
+        {
+            "text": f"Reopened planning on todo #{row['number']} ('{row['title']}'), "
+                    f"was {row['state']}: {detail}",
+            "from": row["state"],
+            "reason": detail,
+            "todo_id": row["id"],
+            "todo_number": row["number"],
+        },
     )
     state = todos.apply_rollup(conn, identity.task_id)
     conn.commit()
@@ -1085,9 +1478,9 @@ def _reopen_todo(conn, identity: Identity, reason: str, todo_id: int) -> dict:
         conn,
         identity,
         "renegotiation",
-        f"Reopened planning on todo #{row['id']} ({row['title']}), was {row['state']}: "
+        f"Reopened planning on todo #{row['number']} ({row['title']}), was {row['state']}: "
         f"{detail}. Its last locked contract still stands until a new version is proposed "
-        f"with propose_contract(spec, todo={row['id']}) and re-signed by "
+        f"with propose_contract(spec, todo={row['number']}) and re-signed by "
         f"{', '.join(todos.parties_of(row))}.",
         todo_id=row["id"],
     )
@@ -1095,47 +1488,57 @@ def _reopen_todo(conn, identity: Identity, reason: str, todo_id: int) -> dict:
         "state": state,
         "from": row["state"],
         "reason": detail,
-        "todo_id": row["id"],
+        "todo": row["number"],
         "todo_state": CONTRACT_PROPOSED,
     }
 
 
-def get_contract(conn, task_id: str, todo_id: int | None = None) -> dict:
+def get_contract(conn, task_id: str, number: int | None = None) -> dict:
     """Return the current contract for the task — PROPOSED or LOCKED.
 
     This is the single source of truth for the interface, at both stages:
 
-    * LOCKED — the full frozen contract, including the ``staging_url`` read from the
-      stored ``spec_json`` (NEVER from a chat message; SPEC §5 rule 5, §9). This is
-      the trusted source of the staging URL for a consumer: an injected "test against
-      evil.com" message has no path into this value.
+    * LOCKED — the full frozen shape, plus the ``staging_url`` RESOLVED LIVE from the
+      host's configuration (:func:`resolve_staging_url`), never from a chat message
+      and no longer from the signed document (SPEC §5 rule 5, §9). This is the trusted
+      source of the staging URL for a consumer, and it is now trusted for a stronger
+      reason than before: the value has no agent-writable input at all, so an injected
+      "test against evil.com" has nothing to land in. ``staging_url_at_lock`` rides
+      alongside it — the target that was live when the contract locked — so "what did
+      we agree to?" still has an answer when the host has since re-pointed a tunnel.
     * PROPOSED (not yet locked) — the proposed SHAPE, so an assessor can review it
       before signing, WITH the ``staging_url`` WITHHELD (``None``): an unsigned URL
       must not be fetchable (rule 2), so it only appears once every role has signed.
+      That incentive to actually READ the shape survives the target becoming
+      host-owned, which is why this withholding is keyed on the LOCK and not on
+      whether a target happens to be configured.
       Also returns who has ``signatures`` / who is ``awaiting``.
 
     Returning proposals here (not just locked ones) removes the old chicken-and-egg
     where an assessor was told to review via get_contract but saw exists:false until
     it locked — which it can't do until they sign.
 
-    ``todo_id`` scopes it to ONE deliverable's chain. Without it on a task that has
-    todos you get the task's newest contract whichever todo it belongs to (unchanged
-    behaviour, and what the dashboard reads) — plus a ``todo_id`` field and a note
-    saying which deliverable that is, because "the current contract" is genuinely
-    ambiguous once there are six.
+    ``number`` (the agent's ``todo=N``) scopes it to ONE deliverable's chain. This is the
+    one contract op where it is OPTIONAL, and deliberately so: reading is how an agent
+    recovers a number it has lost. Without it you get the task's newest contract whichever
+    todo it belongs to — which is also what the dashboard reads — plus a ``todo`` field
+    (the per-task ``#N``, the only selector an agent ever gets back) and a note saying
+    which deliverable that is, because "the current contract" is genuinely ambiguous once
+    there are six.
     """
-    todo = None if todo_id is None else todos.get_row(conn, task_id, todo_id)
+    todo = None if number is None else todos.get_row(conn, task_id, number)
     newest = _newest_contract(conn, task_id, todo_id=(todo["id"] if todo is not None else None))
     if newest is None:
         if todo is None:
             return {"exists": False}
         return {
             "exists": False,
-            "todo_id": todo["id"],
+            "todo": todo["number"],
             "note": (
-                f"No contract has been proposed on todo {todo['id']} ('{todo['title']}') "
+                f"No contract has been proposed on todo #{todo['number']} "
+                f"('{todo['title']}') "
                 f"yet. Agree on WHAT first (every party accepts the todo), then one party "
-                f"proposes the HOW with propose_contract(spec, todo={todo['id']}). If your "
+                f"proposes the HOW with propose_contract(spec, todo={todo['number']}). If your "
                 f"human has already told you to sign or lock this one, that IS the "
                 f"direction to propose it — send the shape their instruction implies with "
                 f"your reading stated as an explicit assumption, then sign it; your peer "
@@ -1145,19 +1548,16 @@ def get_contract(conn, task_id: str, todo_id: int | None = None) -> dict:
 
     spec = newest["spec"]
     signed = sorted(_signatures_for(conn, newest["id"]))
-    # The signatory set is the CONTRACT's, not the caller's request: a todo-scoped
-    # contract is signed by its party list even when the caller asked task-wide, so
-    # `awaiting` must never name a seat the todo does not bind.
-    scoped = None if newest["todo_id"] is None else todos.get_row(conn, task_id, newest["todo_id"])
-    todo_block = (
-        {}
-        if scoped is None
-        else {
-            "todo_id": scoped["id"],
-            "todo_title": scoped["title"],
-            "signatories": todos.parties_of(scoped),
-        }
-    )
+    # The signatory set is the CONTRACT's, not the caller's request: a contract is signed
+    # by its todo's party list even when the caller asked task-wide, so `awaiting` must
+    # never name a seat the todo does not bind. `todo_id` is NOT NULL, so there is always
+    # a deliverable to name here.
+    scoped = todos.row_by_id(conn, task_id, newest["todo_id"])
+    todo_block = {
+        "todo": scoped["number"],
+        "todo_title": scoped["title"],
+        "signatories": todos.parties_of(scoped),
+    }
 
     if newest["status"] == "locked":
         return {
@@ -1165,15 +1565,24 @@ def get_contract(conn, task_id: str, todo_id: int | None = None) -> dict:
             "version": newest["version"],
             "status": "locked",
             "locked": True,
-            "staging_url": spec.get("staging_url"),
+            # LIVE, not frozen: the host's current target for this deliverable. A
+            # tunnel restart changes this and touches no contract, no version and no
+            # signature — which is the entire reason the target moved out of the spec.
+            "staging_url": resolve_staging_url(conn, task_id, scoped["id"], spec),
+            # …and the target that was live when this locked, so the two questions
+            # ("where do I point tests now?" / "what did we agree to?") stay separate
+            # answers instead of one string doing both jobs badly.
+            "staging_url_at_lock": newest["staging_url_at_lock"],
             "spec": spec,
             "signatures": signed,
             "locked_at": newest["locked_at"],
             **todo_block,
         }
 
-    # Proposed / draft: expose the shape but strip staging_url until it locks.
-    required = _roles(conn, task_id) if scoped is None else todos.parties_of(scoped)
+    # Proposed / draft: expose the shape, and no target until it locks. `spec` cannot
+    # carry a staging_url any more (the validator refuses one), but a LEGACY row can —
+    # so the strip stays, or reviewing an old proposal would hand out an unsigned URL.
+    required = todos.parties_of(scoped)
     awaiting = [r for r in required if r not in set(signed)]
     shape = {k: v for k, v in spec.items() if k != "staging_url"}
     out = {
@@ -1186,11 +1595,12 @@ def get_contract(conn, task_id: str, todo_id: int | None = None) -> dict:
         "signatures": signed,
         "awaiting": awaiting,
         "note": (
-            "Proposed, not yet locked — this is the shape to review. Call "
-            f"lock_contract({newest['version']}) to sign it; the staging_url appears "
-            "here only after "
-            + ("ALL roles" if scoped is None else f"all of {', '.join(required)}")
-            + " have signed."
+            # The version alone never names one contract: versions are per deliverable,
+            # so the signature call has to carry the todo as well.
+            f"Proposed, not yet locked — this is the shape to review. Call "
+            f"lock_contract({newest['version']}, todo={scoped['number']}) to sign it; "
+            f"the staging_url appears here only after all of {', '.join(required)} "
+            f"have signed."
         ),
         **todo_block,
     }
@@ -1198,9 +1608,7 @@ def get_contract(conn, task_id: str, todo_id: int | None = None) -> dict:
     # contract — point the assessor at it so they know what's currently in force.
     # Scoped to the same chain: the version in force on THIS deliverable, never a
     # sibling todo's lock, which would send the assessor to the wrong blueprint.
-    locked = _current_locked(
-        conn, task_id, todo_id=(scoped["id"] if scoped is not None else None)
-    )
+    locked = _current_locked(conn, task_id, todo_id=scoped["id"])
     if locked is not None and locked["version"] != newest["version"]:
         out["locked_version_in_force"] = locked["version"]
     return out
@@ -1210,7 +1618,7 @@ def get_contract(conn, task_id: str, todo_id: int | None = None) -> dict:
 # status reporting — the transitions, the strikes, the typed messages
 # --------------------------------------------------------------------------- #
 def report_status(
-    conn, identity: Identity, status: str, detail: str, todo_id: int | None = None
+    conn, identity: Identity, status: str, detail: str, number: int | None = None
 ) -> dict:
     """Drive a state transition AND post the corresponding typed message so the
     dashboard thread reflects it. Rejects (raises ``ValueError``) with a clear,
@@ -1226,7 +1634,7 @@ def report_status(
 
     SCOPE, once the task has todos (v2): "backend is ready" is meaningless when there
     are six deliverables, so ``ready``/``checked``/``blocked``/``verified`` are
-    todo-scoped and ``todo_id`` is REQUIRED — the ambiguity is removed by construction,
+    todo-scoped and ``number`` (``todo=N``) is REQUIRED — the ambiguity is removed by construction,
     not by convention. ``stuck`` is valid at BOTH levels and they stay distinguishable:
     with a todo it FLAGS that deliverable (the other five keep marching), without one it
     escalates the whole collaboration to a terminal ``stuck``. The TASK's own state is
@@ -1247,19 +1655,19 @@ def report_status(
     # on both contract and debug tasks. It pings the humans without changing state, touching
     # strikes, or ending anything: the rung below 'stuck' for "a peer's gone quiet, a human's
     # attention would help" (see the give-up rule in the prompt). Task-level only — to flag
-    # ONE deliverable, use 'stuck' with a todo id.
+    # ONE deliverable, use 'stuck' with a todo NUMBER.
     if status == STATUS_WAITING:
-        if todo_id is not None:
+        if number is not None:
             raise ValueError(
-                "'waiting' is a task-level nudge for the humans — it takes no todo id. To "
-                "flag one deliverable, use report_status('stuck', detail, todo=<id>)."
+                "'waiting' is a task-level nudge for the humans — it takes no todo number. "
+                "To flag one deliverable, use report_status('stuck', detail, todo=<N>)."
             )
         return _report_waiting(conn, identity, detail)
 
     # Mode gate: debug tasks have a single 'resolved' status; contract tasks have
     # the full deploy/test/verified vocabulary. Keep the two vocabularies disjoint.
     mode = _task_mode(conn, identity.task_id)
-    if mode == "debug" and todo_id is not None:
+    if mode == "debug" and number is not None:
         raise ValueError(
             "debug tasks don't carry todos — they are a single problem you fix and "
             "report_status('resolved'). Todos are for contract tasks."
@@ -1274,13 +1682,13 @@ def report_status(
             "'resolved' is only for debug tasks; contract tasks finish with 'verified'"
         )
 
-    if todo_id is not None:
-        return _report_on_todo(conn, identity, status, detail, todo_id, requested)
+    if number is not None:
+        return _report_on_todo(conn, identity, status, detail, number, requested)
     if status in TODO_SCOPED_STATUSES and todos.has_todos(conn, identity.task_id):
         raise ValueError(
             f"'{requested}' is per-DELIVERABLE on task '{identity.task_id}', which runs on "
-            f"todos — '{requested}' on which one? Pass the todo id: "
-            f"report_status('{requested}', detail, todo=<id>). Live todos: "
+            f"todos — '{requested}' on which one? Pass the todo number: "
+            f"report_status('{requested}', detail, todo=<N>). Live todos: "
             f"{_live_todo_list(conn, identity.task_id)} — call get_todos() to see their "
             f"scopes, parties and progress. (Only 'stuck' may be reported without a todo, "
             f"and that escalates the WHOLE collaboration, not one deliverable.)"
@@ -1307,7 +1715,7 @@ def report_status(
 # status reporting, one level down — the per-todo march
 # --------------------------------------------------------------------------- #
 def _report_on_todo(
-    conn, identity: Identity, status: str, detail: str, todo_id: int, requested: str
+    conn, identity: Identity, status: str, detail: str, number: int, requested: str
 ) -> dict:
     """Dispatch a todo-scoped report: same gates, one deliverable, then re-derive
     the task.
@@ -1323,10 +1731,10 @@ def _report_on_todo(
       context for those humans.
     """
     _assert_live(conn, identity.task_id)
-    row = todos.get_row(conn, identity.task_id, todo_id)
+    row = todos.get_row(conn, identity.task_id, number)
     if row["dropped_at"] is not None:
         raise ValueError(
-            f"todo {row['id']} was dropped; there is nothing left to report on it"
+            f"todo #{row['number']} was dropped; there is nothing left to report on it"
         )
     todos.assert_party(row, identity.role, f"report '{requested}' on")
     # ``verified`` IS terminal for a todo, even though it no longer is for the task: any
@@ -1335,7 +1743,7 @@ def _report_on_todo(
     # work on something already verified is a NEW todo.
     if row["state"] == VERIFIED:
         raise ValueError(
-            f"todo {row['id']} ('{row['title']}') is verified — nothing more is reported "
+            f"todo #{row['number']} ('{row['title']}') is verified — nothing more is reported "
             f"on it. Propose a NEW todo for follow-up work, or escalate the whole task "
             f"with report_status('stuck', detail) if it needs humans."
         )
@@ -1344,7 +1752,7 @@ def _report_on_todo(
         return _report_todo_stuck(conn, identity, row, detail)
     if row["strikes"] >= MAX_STRIKES:
         raise ValueError(
-            f"todo {row['id']} ('{row['title']}') reached {MAX_STRIKES} fix cycles — the "
+            f"todo #{row['number']} ('{row['title']}') reached {MAX_STRIKES} fix cycles — the "
             f"broker pulled the cord and humans own it now. The other todos on this task "
             f"are unaffected; either the host drops this one or you agree a fresh todo."
         )
@@ -1366,10 +1774,12 @@ def _todo_result(conn, identity: Identity, row, status: str, **extra) -> dict:
     re-derived. An agent that only reads ``state`` still sees the truth about the task."""
     task_state = todos.apply_rollup(conn, identity.task_id)
     conn.commit()
-    fresh = todos.get_row(conn, identity.task_id, row["id"])
+    fresh = todos.row_by_id(conn, identity.task_id, row["id"])
     return {
         "status": status,
-        "todo_id": fresh["id"],
+        # `todo` is the `#N` the agent hands back on its next report, and the ONLY
+        # deliverable handle in an agent-facing reply — see `propose_contract`.
+        "todo": fresh["number"],
         "todo_state": fresh["state"],
         "strikes": fresh["strikes"],
         "state": task_state,
@@ -1387,19 +1797,19 @@ def _report_todo_deployed(conn, identity: Identity, row, detail: str) -> dict:
     newest = _newest_contract(conn, identity.task_id, todo_id=row["id"])
     if newest is not None and newest["status"] != "locked":
         raise ValueError(
-            f"cannot report 'ready' on todo {row['id']} while contract v{newest['version']} "
+            f"cannot report 'ready' on todo #{row['number']} while contract v{newest['version']} "
             f"is awaiting signatures; lock that version first"
         )
     if _current_locked(conn, identity.task_id, todo_id=row["id"]) is None:
         raise ValueError(
-            f"cannot report 'ready' on todo {row['id']}: no locked contract exists on it "
-            f"yet. Agree the shape with propose_contract(spec, todo={row['id']}) and have "
+            f"cannot report 'ready' on todo #{row['number']}: no locked contract exists on "
+            f"it yet. Agree the shape with propose_contract(spec, todo={row['number']}) and have "
             f"every party sign it."
         )
     producer = _producer_role(conn, identity.task_id, todo_id=row["id"])
     if identity.role != producer:
         raise ValueError(
-            f"only the role that proposed the contract on todo {row['id']} may report "
+            f"only the role that proposed the contract on todo #{row['number']} may report "
             f"'ready' for it (the producer there is '{producer}', you are "
             f"'{identity.role}')"
         )
@@ -1422,14 +1832,14 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
     FLAG and never a march state)."""
     if row["state"] not in (BACKEND_LIVE, TESTING):
         raise ValueError(
-            f"cannot report a check on todo {row['id']} before its producer is ready "
+            f"cannot report a check on todo #{row['number']} before its producer is ready "
             f"(the todo is '{row['state']}', need '{BACKEND_LIVE}')"
         )
     producer = _producer_role(conn, identity.task_id, todo_id=row["id"])
     if identity.role == producer:
         raise ValueError(
             f"the producer ('{producer}') doesn't report checks on its own work; the "
-            f"consuming party/parties on todo {row['id']} do"
+            f"consuming party/parties on todo #{row['number']} do"
         )
 
     # First check after a deploy moves this deliverable into its testing phase.
@@ -1444,7 +1854,7 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
 
     # blocked → the broker (not the agent) counts the strike, on the todo.
     conn.execute("UPDATE todos SET strikes = strikes + 1 WHERE id = ?", (row["id"],))
-    strikes = todos.get_row(conn, identity.task_id, row["id"])["strikes"]
+    strikes = todos.row_by_id(conn, identity.task_id, row["id"])["strikes"]
     _event(conn, identity.task_id, "test",
            {"pass": False, "strike": strikes, "todo_id": row["id"]})
     service.post_message(conn, identity, "test_result", f"{_todo_label(row)} {detail}",
@@ -1466,7 +1876,7 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
         )
         _notify(
             conn, identity.task_id,
-            f"[{identity.task_id}] STUCK on todo #{row['id']} ({row['title']}): "
+            f"[{identity.task_id}] STUCK on todo #{row['number']} ({row['title']}): "
             f"{MAX_STRIKES} fix cycles reached — humans needed. Last failure: {detail}",
         )
     return _todo_result(conn, identity, row, status)
@@ -1481,10 +1891,10 @@ def _report_todo_verified(conn, identity: Identity, row, detail: str) -> dict:
     one rather than the first."""
     if row["state"] != TESTING:
         raise ValueError(
-            f"cannot report 'verified' on todo {row['id']} before checks have run on it "
+            f"cannot report 'verified' on todo #{row['number']} before checks have run on it "
             f"(the todo is '{row['state']}', need '{TESTING}'): nobody has checked it yet. "
             f"A CONSUMING party — not the producer, who may not check its own work — "
-            f"reports it first with report_status('checked', todo={row['id']}), which is "
+            f"reports it first with report_status('checked', todo={row['number']}), which is "
             f"what moves this todo to 'testing'; 'verified' is available after that. That "
             f"gate is why a verified todo can never mean 'nobody actually tried it'."
         )
@@ -1506,7 +1916,7 @@ def _report_todo_verified(conn, identity: Identity, row, detail: str) -> dict:
     else:
         _notify(
             conn, identity.task_id,
-            f"[{identity.name}] todo #{row['id']} ({row['title']}) VERIFIED "
+            f"[{identity.name}] todo #{row['number']} ({row['title']}) VERIFIED "
             f"({roll.get('verified')}/{roll.get('total')} on '{identity.task_id}'): {detail}",
         )
     conn.commit()
@@ -1532,7 +1942,7 @@ def _report_todo_stuck(conn, identity: Identity, row, detail: str) -> dict:
                          todo_id=row["id"])
     _notify(
         conn, identity.task_id,
-        f"[{identity.task_id}] STUCK on todo #{row['id']} ({row['title']}): {detail}",
+        f"[{identity.task_id}] STUCK on todo #{row['number']} ({row['title']}): {detail}",
     )
     return _todo_result(conn, identity, row, STATUS_STUCK, stuck=True)
 
@@ -1694,7 +2104,7 @@ def _report_stuck(conn, identity: Identity, detail: str) -> dict:
     the goal") and stays available on a task with todos, where it outranks the rollup:
     ``todos.apply_rollup`` refuses to overwrite a human-escalated stuck, so one call
     here freezes every deliverable until a human reopens it. To flag a single
-    deliverable instead, pass a todo id — see ``_report_todo_stuck``."""
+    deliverable instead, pass its ``#N`` (``todos.number``) — see ``_report_todo_stuck``."""
     _assert_live(conn, identity.task_id)
     state = _transition(conn, identity.task_id, STUCK)
     service.post_message(conn, identity, "stuck", detail)

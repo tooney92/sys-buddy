@@ -7,8 +7,8 @@ Three claims are load-bearing here and each has its own test:
 * ``ready``/``checked``/``blocked``/``verified`` are per-DELIVERABLE once a task has
   todos, and the TASK's state is a rollup no agent sets, so the task concludes on the
   LAST todo rather than the first;
-* a task with NO todos, and any debug task, behaves exactly as it did before todos
-  existed — the migration story is "do nothing".
+* a task with NO todos has nothing to contract — there is exactly ONE kind of contract,
+  an agreement about one deliverable — and any debug task carries no todos at all.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ def _valid_spec(path="/api/items") -> dict:
     return {
         "version": 1,
         "endpoints": [{"method": "POST", "path": path}],
-        "staging_url": "https://api-staging.example.com",
     }
 
 
@@ -47,91 +46,174 @@ def _task_state(conn, task="signin") -> str:
     return conn.execute("SELECT state FROM tasks WHERE id = ?", (task,)).fetchone()["state"]
 
 
-def _todo_row(conn, todo_id, task="signin"):
-    return todos.get_row(conn, task, todo_id)
+def _todo_row(conn, num, task="signin"):
+    """By the human `#N` — the same resolution every tool does."""
+    return todos.get_row(conn, task, num)
+
+
+def _internal_id(conn, num, task="signin") -> int:
+    """The `todos.id` behind a `#N`, for the few places that join on the real key."""
+    return _todo_row(conn, num, task)["id"]
 
 
 def _accepted_todo(conn, ag, proposer, parties, title="api123") -> int:
-    """Propose a todo and have every other named party accept it."""
+    """Propose a todo and have every other named party accept it. Returns its NUMBER —
+    the per-task `#N` every tool takes, never the global `todos.id`."""
     t = todos.propose_todo(conn, ag[proposer], title, f"scope of {title}", list(parties))
     for p in parties:
         if p != proposer:
-            todos.accept_todo(conn, ag[p], t["id"])
-    return t["id"]
+            todos.accept_todo(conn, ag[p], t["number"])
+    return t["number"]
 
 
 def _locked_todo(conn, ag, proposer, parties, title="api123", path="/api/items"):
-    """…and give it a locked contract, signed by every party. Returns (todo_id, version)."""
-    todo_id = _accepted_todo(conn, ag, proposer, parties, title)
-    r = state.propose_contract(conn, ag[proposer], _valid_spec(path), todo_id)
+    """…and give it a locked contract, signed by every party. Returns (number, version)."""
+    num = _accepted_todo(conn, ag, proposer, parties, title)
+    r = state.propose_contract(conn, ag[proposer], _valid_spec(path), num)
     for p in parties:
-        state.lock_contract(conn, ag[p], r["version"], todo_id)
-    return todo_id, r["version"]
+        state.lock_contract(conn, ag[p], r["version"], num)
+    return num, r["version"]
 
 
-def _verify_todo(conn, ag, todo_id, producer, consumer):
+def _verify_todo(conn, ag, num, producer, consumer):
     """Drive one deliverable ready → checked → verified."""
-    state.report_status(conn, ag[producer], "ready", "live on staging", todo_id)
-    state.report_status(conn, ag[consumer], "checked", "works against it", todo_id)
-    return state.report_status(conn, ag[consumer], "verified", "done end to end", todo_id)
+    state.report_status(conn, ag[producer], "ready", "live on staging", num)
+    state.report_status(conn, ag[consumer], "checked", "works against it", num)
+    return state.report_status(conn, ag[consumer], "verified", "done end to end", num)
 
 
 # --- quorum: the party list, not the task's roles ---------------------------
 def test_lock_quorum_is_the_todos_party_list(conn):
     """The hinge of the feature: two of three seats sign, and it locks."""
     ag = _agents(conn)  # backend, frontend, mobile
-    todo_id = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
 
-    r = state.propose_contract(conn, ag["backend"], _valid_spec(), todo_id)
+    r = state.propose_contract(conn, ag["backend"], _valid_spec(), num)
     assert r["signatories"] == ["backend", "mobile"]
 
-    first = state.lock_contract(conn, ag["backend"], r["version"], todo_id)
+    first = state.lock_contract(conn, ag["backend"], r["version"], num)
     assert first["locked"] is False
     assert first["remaining"] == ["mobile"]  # NOT frontend — it is not a party
 
-    second = state.lock_contract(conn, ag["mobile"], r["version"], todo_id)
+    second = state.lock_contract(conn, ag["mobile"], r["version"], num)
     assert second["locked"] is True
     assert second["signed"] == ["backend", "mobile"]
-    assert _todo_row(conn, todo_id)["state"] == state.CONTRACT_LOCKED
+    assert _todo_row(conn, num)["state"] == state.CONTRACT_LOCKED
 
 
 def test_a_task_seat_that_is_not_a_party_neither_blocks_nor_signs(conn):
     ag = _agents(conn)
-    todo_id = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
-    r = state.propose_contract(conn, ag["backend"], _valid_spec(), todo_id)
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    r = state.propose_contract(conn, ag["backend"], _valid_spec(), num)
 
     with pytest.raises(ValueError, match="not a party"):
-        state.lock_contract(conn, ag["frontend"], r["version"], todo_id)
+        state.lock_contract(conn, ag["frontend"], r["version"], num)
 
     # …and its absence is not a blocker: the two parties lock it without frontend.
-    state.lock_contract(conn, ag["backend"], r["version"], todo_id)
-    assert state.lock_contract(conn, ag["mobile"], r["version"], todo_id)["locked"] is True
+    state.lock_contract(conn, ag["backend"], r["version"], num)
+    assert state.lock_contract(conn, ag["mobile"], r["version"], num)["locked"] is True
 
 
-def test_task_level_quorum_is_untouched_by_the_existence_of_todos(conn):
-    """A task with no todos still needs ALL roles — the old rule, unchanged."""
+# --- pre-flight gates the INTERACTION, not the task -------------------------
+# Same rule as the two tests above, one field along: a seat a todo does not name is
+# not in its quorum AND is not in its readiness check. Remote-only, because local
+# self-declared identities never run pre-flight at all.
+def _remote(conn):
+    from sys_buddy.config import Config, get_config, set_config
+
+    set_config(Config(mode="remote", db_path=get_config().db_path))
+
+
+def _passes_preflight(conn, ag, *roles) -> None:
+    for role in roles:
+        conn.execute(
+            "UPDATE agents SET ready = 1, readiness_status = 'passed' WHERE id = ?",
+            (ag[role].agent_id,),
+        )
+    conn.commit()
+
+
+def _lapses(conn, ag, role) -> None:
+    """A seat that was revoked and re-paired comes back with ``ready = 0``. It is also
+    the only way to reach an unready PARTY now that ``propose_todo`` refuses to bind
+    one in the first place."""
+    conn.execute(
+        "UPDATE agents SET ready = 0, readiness_status = 'pending' WHERE id = ?",
+        (ag[role].agent_id,),
+    )
+    conn.commit()
+
+
+def test_an_unready_non_party_does_not_block_a_contract(conn):
+    """The owner's live bug, reproduced: three seats, both todos binding two of them,
+    and the third — party to NEITHER deliverable — froze the task by never running
+    pre-flight. The readiness gate was task-wide; the agreement never was.
+    """
+    _remote(conn)
+    ag = _agents(conn)  # backend, frontend, mobile
+    _passes_preflight(conn, ag, "backend", "frontend")  # mobile never does
+
+    num = _accepted_todo(conn, ag, "backend", ["backend", "frontend"])
+    r = state.propose_contract(conn, ag["backend"], _valid_spec(), num)
+
+    assert r["signatories"] == ["backend", "frontend"]
+    assert _todo_row(conn, num)["state"] == state.CONTRACT_PROPOSED
+    # …and the two of them can finish the agreement without mobile ever appearing.
+    state.lock_contract(conn, ag["backend"], r["version"], num)
+    assert state.lock_contract(conn, ag["frontend"], r["version"], num)["locked"] is True
+
+
+def test_an_unready_party_still_blocks_the_contract(conn):
+    """Narrowing WHO is asked did not stop anyone being asked."""
+    _remote(conn)
     ag = _agents(conn)
-    r = state.propose_contract(conn, ag["backend"], _valid_spec())
-    assert state.lock_contract(conn, ag["backend"], r["version"])["remaining"] == [
-        "frontend", "mobile",
-    ]
-    state.lock_contract(conn, ag["frontend"], r["version"])
-    assert state.lock_contract(conn, ag["mobile"], r["version"])["locked"] is True
+    _passes_preflight(conn, ag, "backend", "frontend", "mobile")
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    _lapses(conn, ag, "mobile")
+
+    with pytest.raises(ValueError) as exc:
+        state.propose_contract(conn, ag["backend"], _valid_spec(), num)
+    msg = str(exc.value)
+    assert "pre-flight" in msg
+    assert "mobile" in msg          # names who it is waiting on…
+    assert "frontend" not in msg    # …and never a seat this todo does not bind
+
+    _passes_preflight(conn, ag, "mobile")
+    assert state.propose_contract(conn, ag["backend"], _valid_spec(), num)["version"] == 1
 
 
-def test_a_todo_selector_is_required_once_the_task_has_todos(conn):
+def test_a_todo_refuses_to_bind_a_seat_that_has_not_passed_preflight(conn):
+    """Blocked at the moment you CHOOSE to depend on someone — the one point where the
+    caller can still act on it, by waiting or by binding someone else."""
+    _remote(conn)
+    ag = _agents(conn)
+    _passes_preflight(conn, ag, "backend", "frontend")  # mobile never does
+
+    with pytest.raises(ValueError) as exc:
+        todos.propose_todo(
+            conn, ag["backend"], "Push tokens", "device registration",
+            ["backend", "mobile"],
+        )
+    msg = str(exc.value)
+    assert "mobile" in msg           # names them…
+    assert "submit_readiness" in msg  # …and what they must do
+    assert "send_message" in msg      # messaging an unready seat is never refused
+
+    # The same work, bound to the seats that ARE ready, goes through untouched.
+    assert todos.propose_todo(
+        conn, ag["backend"], "Push tokens", "device registration",
+        ["backend", "frontend"],
+    )["number"] == 1
+
+
+def test_a_todo_selector_is_required_to_propose_a_contract(conn):
+    """There is one kind of contract, so the deliverable is never optional — and the
+    refusal lists the live todos so the agent can pick one without a second call."""
     ag = _agents(conn)
     _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
-    with pytest.raises(ValueError, match="runs on todos"):
+    with pytest.raises(ValueError, match="must name the deliverable it shapes") as exc:
         state.propose_contract(conn, ag["backend"], _valid_spec())
-
-
-def test_a_task_level_contract_cannot_be_signed_with_a_todo_selector(conn):
-    ag = _agents(conn)
-    r = state.propose_contract(conn, ag["backend"], _valid_spec())
-    todo_id = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
-    with pytest.raises(ValueError, match="TASK-level"):
-        state.lock_contract(conn, ag["backend"], r["version"], todo_id)
+    assert "#1 (api123)" in str(exc.value)
 
 
 def test_signing_the_wrong_deliverable_is_refused(conn):
@@ -139,7 +221,7 @@ def test_signing_the_wrong_deliverable_is_refused(conn):
     a = _accepted_todo(conn, ag, "backend", ["backend", "mobile"], title="payments")
     b = _accepted_todo(conn, ag, "backend", ["backend", "frontend"], title="refunds")
     r = state.propose_contract(conn, ag["backend"], _valid_spec(), a)
-    with pytest.raises(ValueError, match=f"belongs to todo {a}"):
+    with pytest.raises(ValueError, match=f"belongs to todo #{a}"):
         state.lock_contract(conn, ag["backend"], r["version"], b)
 
 
@@ -148,11 +230,11 @@ def test_a_contract_needs_an_accepted_todo(conn):
     ag = _agents(conn)
     t = todos.propose_todo(conn, ag["backend"], "api123", "the scope", ["backend", "mobile"])
     with pytest.raises(ValueError, match="not accepted yet"):
-        state.propose_contract(conn, ag["backend"], _valid_spec(), t["id"])
+        state.propose_contract(conn, ag["backend"], _valid_spec(), t["number"])
     # A non-party cannot contract it either, however far along it is.
-    todos.accept_todo(conn, ag["mobile"], t["id"])
+    todos.accept_todo(conn, ag["mobile"], t["number"])
     with pytest.raises(ValueError, match="not a party"):
-        state.propose_contract(conn, ag["frontend"], _valid_spec(), t["id"])
+        state.propose_contract(conn, ag["frontend"], _valid_spec(), t["number"])
 
 
 # --- two deliverables, one task --------------------------------------------
@@ -160,7 +242,8 @@ def test_two_todos_with_disjoint_parties_progress_independently(conn):
     ag = _agents(conn, roles=("backend", "frontend", "mobile", "data"))
     a, va = _locked_todo(conn, ag, "backend", ["backend", "mobile"], "payments", "/pay")
     b, vb = _locked_todo(conn, ag, "frontend", ["frontend", "data"], "reports", "/report")
-    assert (va, vb) == (1, 2)
+    # Each deliverable owns its own contract chain, so BOTH first proposals are v1.
+    assert (va, vb) == (1, 1)
 
     # Each todo has its OWN producer — model B, one level down.
     state.report_status(conn, ag["backend"], "ready", "pay is live", a)
@@ -173,8 +256,10 @@ def test_two_todos_with_disjoint_parties_progress_independently(conn):
     assert _todo_row(conn, b)["state"] == state.BACKEND_LIVE  # untouched by a's progress
 
 
-def test_version_numbers_stay_one_sequence_per_task(conn):
-    """One MAX+1 sequence per TASK, so a todo's chain is v1, v4, v7 — not renumbered."""
+def test_version_numbers_are_a_sequence_per_TODO(conn):
+    """MAX+1 within the CHAIN, so every deliverable's first proposal is v1 and its chain
+    is contiguous from there. A task-wide sequence made todo #2's first proposal "v2" —
+    which reads as a renegotiation that never happened."""
     ag = _agents(conn)
     a = _accepted_todo(conn, ag, "backend", ["backend", "mobile"], "payments")
     b = _accepted_todo(conn, ag, "backend", ["backend", "frontend"], "refunds")
@@ -182,15 +267,49 @@ def test_version_numbers_stay_one_sequence_per_task(conn):
     v1 = state.propose_contract(conn, ag["backend"], _valid_spec("/pay"), a)["version"]
     v2 = state.propose_contract(conn, ag["backend"], _valid_spec("/refund"), b)["version"]
     v3 = state.propose_contract(conn, ag["backend"], _valid_spec("/pay/v2"), a)["version"]
-    assert [v1, v2, v3] == [1, 2, 3]
+    # payments: 1 then 2. refunds: its own 1, interleaved and unaffected.
+    assert [v1, v2, v3] == [1, 1, 2]
 
-    chain_a = [
-        r["version"]
-        for r in conn.execute("SELECT version FROM contracts WHERE todo_id = ? ORDER BY version", (a,))
-    ]
-    assert chain_a == [1, 3]  # non-contiguous but unambiguous
-    assert state.get_contract(conn, "signin", a)["version"] == 3
-    assert state.get_contract(conn, "signin", b)["version"] == 2
+    def chain(num):
+        return [
+            r["version"]
+            for r in conn.execute(
+                "SELECT version FROM contracts WHERE todo_id = ? ORDER BY version",
+                (_internal_id(conn, num),),
+            )
+        ]
+
+    assert chain(a) == [1, 2]
+    assert chain(b) == [1]
+    assert state.get_contract(conn, "signin", a)["version"] == 2
+    assert state.get_contract(conn, "signin", b)["version"] == 1
+
+
+def test_a_declined_version_is_not_reused_inside_its_chain(conn):
+    """MAX+1, never COUNT+1: a declined v1 keeps its number and the replacement is v2,
+    so "v1" in the thread means exactly one proposal forever."""
+    ag = _agents(conn)
+    a = _accepted_todo(conn, ag, "backend", ["backend", "mobile"], "payments")
+    assert state.propose_contract(conn, ag["backend"], _valid_spec("/pay"), a)["version"] == 1
+    state.decline_contract(conn, ag["mobile"], "wrong verb", a)
+    assert state.propose_contract(conn, ag["backend"], _valid_spec("/pay"), a)["version"] == 2
+
+
+def test_the_same_version_on_two_todos_is_two_different_contracts(conn):
+    """The point of per-chain numbering: `v1` is only meaningful with a deliverable beside
+    it, and the broker must never resolve one chain's number against another's."""
+    ag = _agents(conn)
+    a = _accepted_todo(conn, ag, "backend", ["backend", "mobile"], "payments")
+    b = _accepted_todo(conn, ag, "backend", ["backend", "frontend"], "refunds")
+    state.propose_contract(conn, ag["backend"], _valid_spec("/pay"), a)
+    state.propose_contract(conn, ag["backend"], _valid_spec("/refund"), b)
+
+    assert state.get_contract(conn, "signin", a)["spec"]["endpoints"][0]["path"] == "/pay"
+    assert state.get_contract(conn, "signin", b)["spec"]["endpoints"][0]["path"] == "/refund"
+    # Signing v1 on each locks that one and leaves the other alone.
+    state.lock_contract(conn, ag["backend"], 1, a)
+    assert state.lock_contract(conn, ag["mobile"], 1, a)["locked"] is True
+    assert state.get_contract(conn, "signin", b)["locked"] is False
 
 
 def test_get_contract_scopes_awaiting_to_the_todos_parties(conn):
@@ -207,7 +326,7 @@ def test_get_contract_on_a_todo_with_no_contract_says_so(conn):
     ag = _agents(conn)
     a = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
     out = state.get_contract(conn, "signin", a)
-    assert out["exists"] is False and out["todo_id"] == a
+    assert out["exists"] is False and out["todo"] == a
     assert "propose_contract" in out["note"]
 
 
@@ -244,7 +363,7 @@ def test_proposing_is_consent_and_the_others_are_awaited(conn):
     t = todos.propose_todo(conn, ag["backend"], "api123", "the scope", ["backend", "mobile"])
     assert t["status"] == todos.PENDING
     assert t["accepted_by"] == ["backend"] and t["awaiting"] == ["mobile"]
-    assert todos.accept_todo(conn, ag["mobile"], t["id"])["status"] == todos.ACCEPTED
+    assert todos.accept_todo(conn, ag["mobile"], t["number"])["status"] == todos.ACCEPTED
 
 
 def test_decline_is_recorded_beside_the_acceptances(conn):
@@ -259,13 +378,13 @@ def test_decline_is_recorded_beside_the_acceptances(conn):
 def test_repropose_issues_a_new_version_and_resets_acceptances(conn):
     ag = _agents(conn)
     t = todos.propose_todo(conn, ag["backend"], "api123", "the scope", ["backend", "mobile"])
-    todos.accept_todo(conn, ag["mobile"], t["id"])
+    todos.accept_todo(conn, ag["mobile"], t["number"])
 
     out = todos.repropose_todo(conn, ag["backend"], t["id"], scope="a narrower scope")
     assert out["version"] == 2
     assert out["accepted_by"] == ["backend"]  # mobile's v1 acceptance does not carry
     assert out["status"] == todos.PENDING
-    assert todos.accept_todo(conn, ag["mobile"], t["id"])["status"] == todos.ACCEPTED
+    assert todos.accept_todo(conn, ag["mobile"], t["number"])["status"] == todos.ACCEPTED
 
 
 def test_repropose_resets_a_draft_contracts_signatures(conn):
@@ -368,7 +487,7 @@ def test_a_todo_cannot_reach_across_tasks(conn):
     ag = _agents(conn)
     other = _agents(conn, task="other", roles=("backend", "mobile"))
     t = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
-    with pytest.raises(ValueError, match=f"no todo {t} on task 'other'"):
+    with pytest.raises(ValueError, match=f"no todo #{t} on task 'other'"):
         todos.accept_todo(conn, other["mobile"], t)
 
 
@@ -381,7 +500,7 @@ def test_report_status_requires_a_todo_once_the_task_has_todos(conn, status):
         state.report_status(conn, ag["backend"], status, "no idea which one")
     msg = str(e.value)
     assert status in msg               # the word the AGENT typed, not the alias
-    assert "todo=<id>" in msg          # how to fix it
+    assert "todo=<N>" in msg          # how to fix it
     assert "get_todos()" in msg        # where to look
     assert "api123" in msg             # which todos are live
 
@@ -394,7 +513,7 @@ def test_stuck_works_at_both_levels_and_they_are_distinguishable(conn):
     # With a todo: a FLAG on that deliverable. The task keeps its rollup state and the
     # sibling todo is untouched.
     per_todo = state.report_status(conn, ag["backend"], "stuck", "vendor API is down", a)
-    assert per_todo["todo_id"] == a and per_todo["stuck"] is True
+    assert per_todo["todo"] == a and per_todo["stuck"] is True
     assert per_todo["state"] == state.CONTRACT_LOCKED != state.STUCK
     assert _todo_row(conn, a)["stuck_at"] is not None
     assert _todo_row(conn, b)["stuck_at"] is None
@@ -403,7 +522,7 @@ def test_stuck_works_at_both_levels_and_they_are_distinguishable(conn):
     # Without one: the whole collaboration escalates, terminally.
     whole = state.report_status(conn, ag["backend"], "stuck", "my token expired")
     assert whole == {"status": state.STATUS_STUCK, "state": state.STUCK}
-    assert "todo_id" not in whole
+    assert "todo" not in whole and "todo_id" not in whole
     assert _task_state(conn) == state.STUCK
     # …and it outranks the rollup: nothing moves until a human reopens it.
     with pytest.raises(ValueError, match="terminal state 'stuck'"):
@@ -552,28 +671,19 @@ def test_a_verified_todo_cannot_be_marched_backwards(conn, status):
     assert _task_state(conn) == state.VERIFIED
 
 
-# --- regression: nothing changes for a task without todos ------------------
-def test_a_task_with_no_todos_is_behaviourally_unchanged(conn):
+# --- a task with no todos has nothing to contract ---------------------------
+def test_a_task_with_no_todos_has_nothing_to_contract(conn):
+    """The refusal has to teach the next call, not just say no: a contract is an
+    agreement about ONE deliverable, so a task with none is pointed at propose_todo
+    rather than left guessing which argument it got wrong."""
     ag = _agents(conn, roles=("backend", "frontend"))
-    r = state.propose_contract(conn, ag["backend"], _valid_spec())
-    assert r == {"version": 1, "state": state.CONTRACT_PROPOSED}
-    state.lock_contract(conn, ag["backend"], 1)
-    assert state.lock_contract(conn, ag["frontend"], 1) == {
-        "locked": True, "version": 1, "signed": ["backend", "frontend"],
-        "state": state.CONTRACT_LOCKED,
-    }
-    # No todo id anywhere, and `verified` is still TERMINAL.
-    assert state.report_status(conn, ag["backend"], "ready", "live") == {
-        "status": state.STATUS_DEPLOYED, "state": state.BACKEND_LIVE, "strikes": 0,
-    }
-    assert state.report_status(conn, ag["frontend"], "checked", "works") == {
-        "status": state.STATUS_TEST_PASSED, "state": state.TESTING, "strikes": 0,
-    }
-    assert state.report_status(conn, ag["frontend"], "verified", "done") == {
-        "status": state.STATUS_VERIFIED, "state": state.VERIFIED,
-    }
-    with pytest.raises(ValueError, match="terminal state 'verified'"):
-        state.report_status(conn, ag["backend"], "stuck", "too late")
+    with pytest.raises(ValueError, match="has no todos yet") as exc:
+        state.propose_contract(conn, ag["backend"], _valid_spec())
+    assert "propose_todo(title, scope, parties)" in str(exc.value)
+    # …and signing refuses for the same reason, rather than "no such version 1",
+    # which would send the agent looking for a contract that could never exist.
+    with pytest.raises(ValueError, match="no todos, so it has no contracts"):
+        state.lock_contract(conn, ag["backend"], 1)
 
 
 def test_a_debug_task_is_behaviourally_unchanged(conn):

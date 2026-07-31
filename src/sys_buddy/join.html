@@ -94,6 +94,30 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 .input:focus{outline:none;border-color:var(--accent);background:var(--surface-2)}
 .input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
+/* ---------- "what you're joining" context block ----------
+   Rendered only after the invite VALIDATES. Same visual weight as a form field, above
+   the field, because it is the thing that makes the name choice make sense. */
+.ctx{
+  margin-top:clamp(20px,4vh,28px);
+  border:1px solid var(--border-strong);border-radius:12px;background:var(--surface);
+  padding:13px 15px;display:flex;flex-direction:column;gap:9px;
+}
+.ctx-row{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+.ctx-k{flex:none;min-width:104px;font-size:.76rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3)}
+.ctx-v{font-size:.93rem;color:var(--text);min-width:0;overflow-wrap:anywhere;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.seat{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:.84rem;font-weight:600;color:var(--text);
+  border:1px solid var(--border-strong);border-radius:999px;padding:1px 9px;white-space:nowrap;
+}
+.ctx-role{font-size:.86rem;color:var(--text-2)}
+.ctx-cast-name{font-weight:600}
+.ctx-cast-role{color:var(--text-2)}
+.namestate{font-size:.83rem;min-height:1.1em;line-height:1.4}
+.namestate.ok{color:var(--ok-fg)}
+.namestate.bad{color:var(--err-fg)}
+.namestate.dim{color:var(--text-3)}
+
 /* ---------- buttons ---------- */
 .btn{
   appearance:none;cursor:pointer;font-family:inherit;font-size:.95rem;font-weight:600;
@@ -255,13 +279,29 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   <section id="view-intro" hidden>
     <div class="head">
       <h1>Join a task</h1>
-      <p>You've been invited to pair on a sys-buddy task. Name your agent, then pair to get your setup — the invite is single-use, so we'll only redeem it when you're ready.</p>
+      <p>You've been invited to pair on a sys-buddy task. Pick a name, then pair to get your setup — the invite is single-use, so we'll only redeem it when you're ready.</p>
+    </div>
+
+    <!-- ---------- what you are walking into ----------
+         Populated from POST /pair/preview, and ONLY once the invite code has validated
+         server-side. Showing the cast for any code would turn a random guess into a
+         team directory, so this block does not exist until the broker says the code is
+         real. The seat and its role type come off the INVITE (invites are per seat), so
+         the joiner knows what they are being onboarded as before typing anything. -->
+    <div class="ctx" id="join-ctx" hidden>
+      <div class="ctx-row"><span class="ctx-k">You're joining</span><span class="ctx-v" id="ctx-title"></span></div>
+      <div class="ctx-row"><span class="ctx-k">Your seat</span><span class="ctx-v"><span class="seat" id="ctx-seat"></span><span class="ctx-role" id="ctx-role"></span></span></div>
+      <div class="ctx-row" id="ctx-cast-row"><span class="ctx-k">Already here</span><span class="ctx-v" id="ctx-cast"></span></div>
     </div>
 
     <div class="form">
       <div class="field">
-        <label for="in-name">Your agent name</label>
-        <input class="input" type="text" id="in-name" autocomplete="off" spellcheck="false" value="buddy">
+        <label for="in-name">Your name</label>
+        <input class="input" type="text" id="in-name" autocomplete="off" spellcheck="false" placeholder="e.g. Sarah">
+        <!-- Advisory only, and debounced: the guarantee is the check inside the
+             broker's insert transaction. This just saves burning a single-use invite
+             to discover a collision. -->
+        <span class="namestate" id="name-state" aria-live="polite"></span>
       </div>
 
       <button type="button" class="btn primary" id="btn-pair">
@@ -594,9 +634,104 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   }
   viewIntro.hidden = false;
 
+  /* ---------- the cast, AFTER the invite validates ----------
+     POST /pair/preview is read-only and burns nothing — the single-use code is spent on
+     the Pair click, never on the load. It is gated on the code being real, which is
+     precisely what stops a random guess from enumerating the team, so nothing below is
+     rendered until the broker has said so.
+
+     Everything here is ADVISORY. The name-uniqueness guarantee lives in the broker's
+     insert transaction; this exists so the joiner does not spend a single-use invite
+     discovering a collision. */
+  var ctxBox   = document.getElementById('join-ctx');
+  var ctxTitle = document.getElementById('ctx-title');
+  var ctxSeat  = document.getElementById('ctx-seat');
+  var ctxRole  = document.getElementById('ctx-role');
+  var ctxCast  = document.getElementById('ctx-cast');
+  var ctxCastRow = document.getElementById('ctx-cast-row');
+  var nameState = document.getElementById('name-state');
+  var preview = null;
+
+  function postPreview(body){
+    return fetch('/pair/preview', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    }).then(function(r){
+      return r.json().catch(function(){ return null; }).then(function(data){
+        return {ok:r.ok, data:data};
+      });
+    });
+  }
+
+  function renderPreview(p){
+    preview = p;
+    ctxTitle.textContent = p.title || p.task_id || '';
+    ctxSeat.textContent  = '@' + (p.seat || '');
+    ctxRole.textContent  = p.role_type || '';
+    var cast = p.cast || [];
+    if (cast.length){
+      ctxCast.innerHTML = cast.map(function(c){
+        return '<span><span class="ctx-cast-name">'+esc(c.name)+'</span> '+
+               '<span class="ctx-cast-role">('+esc(c.role)+')</span></span>';
+      }).join('<span class="ctx-cast-role">·</span>');
+    } else {
+      ctxCast.innerHTML = '<span class="ctx-cast-role">nobody yet — you’re first</span>';
+    }
+    ctxCastRow.hidden = false;
+    ctxBox.hidden = false;
+  }
+
+  postPreview({code: code}).then(function(res){
+    if (res.ok && res.data && !res.data.error){ renderPreview(res.data); return; }
+    // A dead invite is worth saying NOW rather than after they've thought of a name.
+    if (res.data && res.data.error) showError(String(res.data.error));
+  }).catch(function(){ /* an older broker has no /pair/preview; pair still works */ });
+
+  /* Locally-known collisions answer instantly; the server confirms on a debounce, so a
+     buddy who joined thirty seconds ago is still caught. Both may race a simultaneous
+     joiner — the insert-time check is what actually decides. */
+  function folded(s){ return String(s||'').trim().replace(/\s+/g,' ').toLowerCase(); }
+  function nameTaken(s){
+    var t = (preview && preview.taken_names) || [];
+    return t.indexOf(folded(s)) >= 0;
+  }
+  function setNameState(cls, text){
+    nameState.className = 'namestate' + (cls ? ' ' + cls : '');
+    nameState.textContent = text || '';
+    pairBtn.disabled = (cls === 'bad');
+  }
+
+  var checkTimer = null, checkSeq = 0;
+  function onNameInput(){
+    var value = nameEl.value;
+    if (checkTimer) clearTimeout(checkTimer);
+    if (!value.trim()){ setNameState('', ''); return; }
+    if (nameTaken(value)){
+      setNameState('bad', '✗ already taken');
+      return;
+    }
+    setNameState('dim', 'checking…');
+    var seq = ++checkSeq;
+    checkTimer = setTimeout(function(){
+      postPreview({code: code, name: value}).then(function(res){
+        if (seq !== checkSeq) return;                 // a later keystroke won
+        if (!res.ok || !res.data || res.data.error){ setNameState('', ''); return; }
+        if (res.data.taken_names) preview = res.data; // refresh the local list too
+        if (res.data.name_available === false){
+          setNameState('bad', '✗ ' + (res.data.name_error || 'already taken'));
+        } else {
+          setNameState('ok', '✓ available');
+        }
+      }).catch(function(){ if (seq === checkSeq) setNameState('', ''); });
+    }, 300);
+  }
+  nameEl.addEventListener('input', onNameInput);
+
   /* ---------- pairing ---------- */
   function setPairing(on){
-    pairBtn.disabled = on;
+    // Never re-enable over a known-bad name: the button coming back alive would read
+    // as "we changed our mind about that name".
+    pairBtn.disabled = on || nameState.classList.contains('bad');
     pairSpinner.hidden = !on;
     pairBtnLabel.textContent = on ? 'Pairing…' : 'Pair & get setup';
   }
@@ -613,7 +748,14 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
   pairBtn.addEventListener('click', function(){
     clearError();
-    var agentName = (nameEl.value || '').trim() || 'buddy';
+    var agentName = (nameEl.value || '').trim();
+    if (!agentName){
+      // No silent 'buddy' default any more: a name is unique per task and is how your
+      // buddy's agent addresses you, so it is a choice, not a fallback.
+      setNameState('bad', '✗ pick a name — it is how your buddy addresses you');
+      nameEl.focus();
+      return;
+    }
     setPairing(true);
 
     fetch('/pair', {

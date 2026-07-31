@@ -46,12 +46,14 @@ def _spec(path="/api/items") -> dict:
     return {
         "version": 1,
         "endpoints": [{"method": "POST", "path": path}],
-        "staging_url": "https://api-staging.example.com",
     }
 
 
 def _proposed(conn, ag, proposer="backend", parties=PARTIES, title="login") -> int:
-    return todos.propose_todo(conn, ag[proposer], title, f"scope of {title}", list(parties))["id"]
+    """Returns the todo's per-task NUMBER — the `#N` a human types and every tool takes."""
+    return todos.propose_todo(
+        conn, ag[proposer], title, f"scope of {title}", list(parties)
+    )["number"]
 
 
 def _accepted(conn, ag, proposer="backend", parties=PARTIES, title="login") -> int:
@@ -74,19 +76,25 @@ def _locked(conn, ag, producer="backend", parties=PARTIES, title="login"):
 
 def _live(conn, ag, producer="backend", parties=PARTIES):
     tid, _v = _locked(conn, ag, producer, parties)
-    state.report_status(conn, ag[producer], "ready", "up", todo_id=tid)
+    state.report_status(conn, ag[producer], "ready", "up", number=tid)
     return tid
 
 
 def _testing(conn, ag, producer="backend", parties=PARTIES):
     tid = _live(conn, ag, producer, parties)
     consumer = next(p for p in parties if p != producer)
-    state.report_status(conn, ag[consumer], "checked", "works", todo_id=tid)
+    state.report_status(conn, ag[consumer], "checked", "works", number=tid)
     return tid
 
 
+def _internal_id(conn, num, task="signin") -> int:
+    """``next_step`` is called by the DASHBOARD off a row it already holds, so it takes
+    the internal ``todos.id``; these tests carry the human ``#N``."""
+    return todos.get_row(conn, task, num)["id"]
+
+
 def _next(conn, tid, task="signin"):
-    return state.next_step(conn, task, tid)
+    return state.next_step(conn, task, _internal_id(conn, tid, task))
 
 
 # --------------------------------------------------------------------------- #
@@ -169,7 +177,7 @@ def test_testing_offers_done(conn):
 def test_verified_says_it_is_done_and_asks_for_nothing(conn):
     ag = _agents(conn)
     tid = _testing(conn, ag)
-    state.report_status(conn, ag["frontend"], "verified", "confirmed", todo_id=tid)
+    state.report_status(conn, ag["frontend"], "verified", "confirmed", number=tid)
     n = _next(conn, tid)
     assert n["stage"] == "verified"
     assert n["done"] is True
@@ -191,13 +199,13 @@ def test_three_strikes_hands_it_to_the_humans_with_no_command(conn):
     ag = _agents(conn)
     tid = _live(conn, ag, producer="backend")
     for _ in range(state.MAX_STRIKES):
-        state.report_status(conn, ag["frontend"], "blocked", "nope", todo_id=tid)
+        state.report_status(conn, ag["frontend"], "blocked", "nope", number=tid)
     n = _next(conn, tid)
     assert n["stage"] == "cord_pulled"
     assert n["human"] is True
     assert n["cmd"] is None
     with pytest.raises(ValueError):
-        state.report_status(conn, ag["frontend"], "blocked", "again", todo_id=tid)
+        state.report_status(conn, ag["frontend"], "blocked", "again", number=tid)
 
 
 def test_a_stuck_flag_does_not_erase_the_move(conn):
@@ -205,7 +213,7 @@ def test_a_stuck_flag_does_not_erase_the_move(conn):
     where it was, so the next move is unchanged and the human still needs to see it."""
     ag = _agents(conn)
     tid, _v = _locked(conn, ag, producer="backend")
-    state.report_status(conn, ag["backend"], "stuck", "waiting on infra", todo_id=tid)
+    state.report_status(conn, ag["backend"], "stuck", "waiting on infra", number=tid)
     n = _next(conn, tid)
     assert n["stage"] == "contract_locked"
     assert n["cmd"] == f"ready #{tid}"
@@ -217,13 +225,13 @@ def test_a_newer_proposal_in_flight_asks_for_signatures_not_ready(conn):
     build. This is the branch most likely to drift if the rules were copied into JS."""
     ag = _agents(conn)
     tid = _live(conn, ag, producer="backend")
-    state.reopen_negotiations(conn, ag["backend"], "shape changed", todo_id=tid)
+    state.reopen_negotiations(conn, ag["backend"], "shape changed", number=tid)
     v2 = state.propose_contract(conn, ag["backend"], _spec("/api/v2"), tid)["version"]
     n = _next(conn, tid)
     assert n["stage"] == "contract_proposed"
     assert n["cmd"] == f"sign #{tid}"
     with pytest.raises(ValueError, match="awaiting signatures"):
-        state.report_status(conn, ag["backend"], "ready", "up", todo_id=tid)
+        state.report_status(conn, ag["backend"], "ready", "up", number=tid)
     for p in PARTIES:
         state.lock_contract(conn, ag[p], v2, tid)
     assert _next(conn, tid)["cmd"] == f"ready #{tid}"
@@ -245,7 +253,7 @@ def _perform(conn, ag, role, cmd, tid, version=None):
         return state.propose_contract(conn, ag[role], _spec(), tid)
     if verb == "sign":
         return state.lock_contract(conn, ag[role], version, tid)
-    return state.report_status(conn, ag[role], _SHORTHAND[verb], "detail", todo_id=tid)
+    return state.report_status(conn, ag[role], _SHORTHAND[verb], "detail", number=tid)
 
 
 def test_the_named_command_is_the_one_the_broker_accepts(conn):
@@ -262,7 +270,7 @@ def test_the_named_command_is_the_one_the_broker_accepts(conn):
         if n["done"] or n["human"]:
             break
         assert n["cmd"], f"stage {n['stage']} offered no command"
-        assert f"#{tid}" in n["cmd"], "the shorthand must carry the todo id"
+        assert f"#{tid}" in n["cmd"], "the shorthand must carry the todo number"
         # Every named role must be able to make the move it is told to make.
         for role in n["who"]:
             out = _perform(conn, ag, role, n["cmd"], tid, version)
@@ -303,8 +311,12 @@ def test_a_non_party_is_never_named(conn):
             break
         for role in n["who"]:
             _perform(conn, ag, role, n["cmd"], tid,
-                     version=state._newest_contract(conn, "signin", todo_id=tid)["version"]
-                     if state._newest_contract(conn, "signin", todo_id=tid) else None)
+                     version=state._newest_contract(
+                         conn, "signin", todo_id=_internal_id(conn, tid)
+                     )["version"]
+                     if state._newest_contract(
+                         conn, "signin", todo_id=_internal_id(conn, tid)
+                     ) else None)
     with pytest.raises(ValueError, match="not a party"):
         todos.accept_todo(conn, ag["mobile"], tid)
 
@@ -323,8 +335,8 @@ def test_every_step_carries_a_sentence_and_the_broker_tool_it_maps_to(conn):
         n = _next(conn, tid)
         assert n["text"].strip()
         assert n["who_label"]
-        # The shorthand to TYPE, and the broker tool it maps to — both carry the id,
-        # so a human can copy either one and hit the right deliverable.
+        # The shorthand to TYPE, and the broker tool it maps to — both carry the
+        # per-task NUMBER, so a human can copy either one and hit the right deliverable.
         assert f"#{tid}" in n["cmd"]
         assert str(tid) in n["tool"]
 
@@ -353,3 +365,36 @@ def test_next_is_absent_for_a_task_with_no_todos(conn):
     so there is no ``next`` to add anywhere."""
     _agents(conn)
     assert api._todos_for(conn, "signin") == []
+
+
+def test_the_panel_speaks_in_names_not_seat_handles(conn):
+    """`next_step` is called from ONE place — the dashboard — and never reaches an agent.
+
+    So its prose has no reason to speak in seat handles. A handle is the token you TYPE;
+    a name is who you are waiting for, and the human reading this panel wants the second.
+    The mismatch was visible on one screen: the header said "Sarah's agent (@frontend-1)"
+    while the sentence under it said "waiting on frontend-1 to sign".
+
+    Unjoined seats are the deliberate exception — nobody has paired into them, there is
+    no name to use, and the handle is exactly what the reader has to chase.
+    """
+    from tests.test_state import _agents, _valid_spec
+
+    ag = _agents(conn, roles=("backend", "frontend"))
+    conn.execute("UPDATE agents SET name = 'Sarah' WHERE handle = 'frontend'")
+    conn.execute("UPDATE agents SET name = 'Tony' WHERE handle = 'backend'")
+    conn.commit()
+
+    state.propose_contract(conn, ag["backend"], _valid_spec(), 1)
+    todo_id = conn.execute(
+        "SELECT id FROM todos WHERE task_id = 'signin' AND number = 1"
+    ).fetchone()["id"]
+
+    nxt = state.next_step(conn, "signin", todo_id)
+    # Both parties still owe a signature on a fresh proposal, so both are named.
+    assert nxt["who_label"] == "Tony or Sarah"
+    assert "Sarah" in nxt["text"] and "Tony" in nxt["text"]
+    assert "frontend" not in nxt["text"], nxt["text"]
+    assert "backend" not in nxt["text"], nxt["text"]
+    # `who` stays the HANDLE — structured data the UI keys on, never prose.
+    assert nxt["who"] == ["backend", "frontend"]

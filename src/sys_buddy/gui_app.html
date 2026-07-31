@@ -308,6 +308,51 @@ textarea.prompt:focus{outline:none;border-color:var(--accent)}
 textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .copy-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 
+/* ---------- connect-your-agent picker (shared by the buddy + host-seat steps) ----
+   Same structure and class names as join.html's step 1, so the browser page and the
+   desktop app stay ONE design rather than two that drift. Only the palette differs:
+   this shell is dark-only, so the tokens come from :root above instead of join.html's
+   light/dark pair. */
+.connect-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0}
+.connect-tab{
+  appearance:none;cursor:pointer;font-family:inherit;font-size:.82rem;font-weight:500;
+  padding:6px 13px;border-radius:9px;color:var(--text-2);
+  background:var(--surface-2);border:1px solid var(--border-strong);
+}
+.connect-tab:hover{border-color:var(--accent);color:var(--text)}
+.connect-tab.is-on{background:var(--accent);border-color:var(--accent);color:#1a1512;font-weight:600}
+.connect-tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.pick{display:flex;flex-direction:column;gap:7px;margin:2px 0 6px}
+.pick-q{font-size:.84rem;font-weight:600;color:var(--text-2)}
+.pick.sub{margin-top:4px}
+
+/* one client's instructions */
+.pane{display:flex;flex-direction:column;gap:9px;margin-top:4px}
+.substep{font-size:.88rem;font-weight:600;color:var(--text);line-height:1.5;margin:6px 0 -2px}
+.substep .n{color:var(--text-3)}
+.substep .lite{font-weight:400;color:var(--text-2)}
+
+/* callouts: ⓘ context, ⚠ things that bite */
+.note{display:flex;gap:9px;padding:10px 13px;border-radius:11px;font-size:.85rem;line-height:1.5;border:1px solid}
+.note .ic{flex:none;font-weight:700}
+.note.info{color:var(--text-2);background:var(--surface-2);border-color:var(--border-strong)}
+.note.info strong{color:var(--text)}
+.note.warn{color:#f0d29a;background:rgba(224,168,63,.09);border-color:rgba(224,168,63,.42)}
+.note.warn strong{color:inherit}
+.note code{background:transparent}
+
+/* "how to know it worked" — every client gets one; every failure we found was silent */
+.verify{
+  border:1px solid var(--border-strong);border-radius:11px;background:var(--surface);
+  padding:11px 13px;font-size:.85rem;line-height:1.55;color:var(--text-2);
+}
+.verify .vh{display:block;font-weight:600;color:var(--text);margin-bottom:4px}
+.verify strong{color:var(--text)}
+
+/* the two raw facts, each independently copyable (Other) */
+.kv{display:flex;flex-direction:column;gap:6px}
+.kv .k{font-size:.74rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-3)}
+
 /* ---------- host: roles ---------- */
 .label-txt{font-size:.82rem;font-weight:600;color:var(--text-2);letter-spacing:.01em}
 .roles{display:flex;flex-wrap:wrap;gap:10px}
@@ -555,7 +600,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
         <button type="button" class="card buddy" id="card-buddy">
           <span class="top"><span class="role-dot"></span><span class="kicker">Join a task</span></span>
           <h2>I'm the Buddy</h2>
-          <p>Paste an invite link, pair your agent, and wire Claude to the broker.</p>
+          <p>Paste an invite link, pair your agent, and wire it up to the broker.</p>
           <span class="go" aria-hidden="true">Join with a link →</span>
         </button>
       </div>
@@ -692,7 +737,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
         <p class="paired" id="host-seat-line"></p>
         <div class="blk" id="host-seat-cfg"><!-- Step 1: connect command injected here --></div>
         <div class="blk">
-          <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your Claude session:</span>
+          <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your agent's chat:</span>
           <textarea class="prompt" id="host-seat-prompt" readonly rows="10" aria-label="Your agent briefing prompt"></textarea>
           <div class="copy-row">
             <button type="button" class="btn copy" data-copy="host-seat-prompt">Copy prompt</button>
@@ -720,7 +765,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     <button type="button" class="back" data-nav="home">← Back</button>
     <div class="flow-head">
       <h1>Join a task</h1>
-      <p>Paste the invite link your host gave you, name your agent, and we'll pair you and wire up Claude Code.</p>
+      <p>Paste the invite link your host gave you, name your agent, and we'll pair you and show you how to connect whichever agent you use.</p>
     </div>
 
     <div class="form" id="buddy-form">
@@ -754,7 +799,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       </div>
 
       <div class="blk">
-        <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your Claude session:</span>
+        <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your agent's chat:</span>
         <textarea class="prompt" id="prompt-text" readonly rows="10" aria-label="Agent briefing prompt"></textarea>
         <div class="copy-row">
           <button type="button" class="btn copy" data-copy="prompt-text">Copy prompt</button>
@@ -789,12 +834,231 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   </footer>
 </main>
 
+<!-- ============ STEP 1 — "connect your agent", cloned by BOTH flows ============
+     The buddy's join result and the host's own seat need the identical step, so it
+     lives here once as a <template> and each flow stamps a copy (ids would collide,
+     hence data-pane / data-slot hooks). The structure, the wording and the order of
+     the panes mirror src/sys_buddy/join.html — one design, rendered in two places,
+     rather than a second one invented for the desktop.
+
+     Ask which AGENT, not which mechanism: "do you use a CLI?" asks the operator to
+     classify OUR implementation detail; they know they use Cursor. Claude is
+     default-selected (zero clicks for today's audience) and is the ONLY one with a
+     sub-step — the others have exactly one way in.
+
+     Every command / paste / snippet below is left EMPTY here and filled from the
+     broker's own render (onboarding.connect_clients, carried on the join_flow and
+     host_seat results as `clients`). This page therefore contains no client field
+     name of its own — see renderConnect() for why that matters. -->
+<template id="tpl-connect">
+  <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your agent to sys-buddy</span>
+
+  <div class="pick">
+    <span class="pick-q">Which agent are you using?</span>
+    <div class="connect-tabs" role="tablist" aria-label="Which agent are you using?">
+      <button type="button" class="connect-tab is-on" role="tab" aria-selected="true"  data-agent="claude">Claude</button>
+      <button type="button" class="connect-tab"       role="tab" aria-selected="false" data-agent="cursor">Cursor</button>
+      <button type="button" class="connect-tab"       role="tab" aria-selected="false" data-agent="gemini">Gemini CLI</button>
+      <button type="button" class="connect-tab"       role="tab" aria-selected="false" data-agent="other">Other</button>
+    </div>
+  </div>
+
+  <div class="pick sub" data-sub="claude">
+    <span class="pick-q">Where do you use Claude?</span>
+    <div class="connect-tabs" role="tablist" aria-label="Where do you use Claude?">
+      <button type="button" class="connect-tab is-on" role="tab" aria-selected="true"  data-where="cli">In the terminal</button>
+      <button type="button" class="connect-tab"       role="tab" aria-selected="false" data-where="app">In the desktop app</button>
+    </div>
+  </div>
+
+  <!-- ---------- Claude · terminal ----------
+       The ONLY branch this app can run for you: configure_claude() shells out to the
+       `claude` binary, so its result is reported here and nowhere else (see the
+       data-slot="autocfg" block, filled by renderConnect).
+
+       `--scope local` is deliberate: the token is a seat on ONE task, so the
+       connection belongs to the folder that task is worked from, and several tasks in
+       several folders then work at once. Global (`user`) scope was tried and reverted
+       — it capped you at one active task per machine and left one task's bearer token
+       in every project you opened. The REMOVE half passes no scope, so it clears the
+       entry wherever it lives. -->
+  <div class="pane" data-pane="claude-cli">
+    <pre class="code" data-slot="claude-cli"></pre>
+    <div class="copy-row">
+      <button type="button" class="btn copy" data-copy-slot="claude-cli">Copy command</button>
+    </div>
+    <p class="hint">Run it <strong>in the folder you'll open your agent in</strong>, then
+       restart your session.</p>
+    <div data-slot="autocfg"></div>
+    <div class="verify">
+      <span class="vh">How to know it worked</span>
+      <code>claude mcp list</code> — run it from that same folder; it should list
+      <strong>sys-buddy</strong>. Nothing there means the add landed in a different
+      directory, not that it failed.
+    </div>
+  </div>
+
+  <!-- ---------- Claude · desktop app ----------
+       No terminal — Claude writes the file itself. `claude mcp add` does NOT work
+       here: the binary isn't on the app's PATH, and the buddy in the session that
+       prompted all this had never heard of the CLI and installed it just to join.
+       Every line of the paste block was earned. "Save this as .mcp.json" CLOBBERED
+       existing servers, so it must say merge. "Fully quit the app" was wrong — a new
+       conversation is enough. "Reconnect with /mcp" is CLI-only advice; the desktop
+       app answers "MCP controls aren't available right now". -->
+  <div class="pane" data-pane="claude-desktop" hidden>
+    <p class="substep"><span class="n">0 —</span> open your project in Claude first.
+       <span class="lite">With no project open there is no project root to write to, and
+       the entry lands in a home-directory config.</span></p>
+
+    <p class="substep"><span class="n">1 —</span> paste this into the chat</p>
+    <pre class="code" data-slot="claude-desktop"></pre>
+    <div class="copy-row">
+      <button type="button" class="btn copy" data-copy-slot="claude-desktop">Copy instructions</button>
+    </div>
+    <div class="note info"><span class="ic" aria-hidden="true">ⓘ</span><span>sys-buddy can't do
+      this one for you — it never writes into your project or your editor's settings.
+      <strong>Claude</strong> writes the file, and shows you the result.</span></div>
+
+    <p class="substep"><span class="n">2 —</span> start a NEW conversation.
+       <span class="lite">Not a restart; a new conversation is enough.</span></p>
+
+    <p class="substep"><span class="n">3 —</span> verify</p>
+    <div class="verify">
+      Ask <strong>“what sys-buddy tools do you have?”</strong> — expect
+      <code>rules</code>, <code>readiness_check</code>, <code>send_message</code>, …
+    </div>
+
+    <div class="note warn"><span class="ic" aria-hidden="true">⚠</span><span>Nothing? The
+      file must be at the root of the project you have open in Claude — not your home
+      folder.</span></div>
+    <div class="note info"><span class="ic" aria-hidden="true">ⓘ</span><span>You won't find
+      sys-buddy in the Directory. That's a catalogue of published connectors; this is your
+      own broker.</span></div>
+    <div class="note warn"><span class="ic" aria-hidden="true">⚠</span><span>This file holds
+      your access token. Don't commit it.</span></div>
+  </div>
+
+  <!-- ---------- Cursor ----------
+       Same shape as Claude's desktop branch — merge, reload, verify — so both share one
+       mental model. Two differences: the path is `.cursor/mcp.json` inside a `.cursor/`
+       directory, and there is no "type": "http" (Cursor infers transport from `url`).
+       The Home tab is a real trap: with no project open, "this project's
+       .cursor/mcp.json" resolves to ~/.cursor/mcp.json — Cursor's GLOBAL config — and
+       the tools then show up namespaced as `user-sys-buddy`. -->
+  <div class="pane" data-pane="cursor" hidden>
+    <p class="substep"><span class="n">0 —</span> open your project in Cursor first.
+       <span class="lite">On the Home tab, with no project open, the file lands in
+       Cursor's global config rather than your project.</span></p>
+
+    <p class="substep"><span class="n">1 —</span> paste this into Cursor's chat</p>
+    <pre class="code" data-slot="cursor"></pre>
+    <div class="copy-row">
+      <button type="button" class="btn copy" data-copy-slot="cursor">Copy instructions</button>
+    </div>
+    <div class="note info"><span class="ic" aria-hidden="true">ⓘ</span><span>sys-buddy can't do
+      this one for you — it never writes into your project or your editor's settings.
+      <strong>Cursor</strong> writes the file, and shows you the result.</span></div>
+
+    <p class="substep"><span class="n">2 —</span> reload.
+       <span class="lite">Cursor's own advice: “Reload the Cursor window or restart MCP
+       servers in Settings → MCP.”</span></p>
+
+    <p class="substep"><span class="n">3 —</span> verify</p>
+    <div class="verify">
+      Ask <strong>“what sys-buddy tools do you have?”</strong>, or check
+      <strong>Settings → Tools &amp; MCPs</strong>, where a working server shows a green
+      dot and a tool count.
+    </div>
+
+    <div class="note warn"><span class="ic" aria-hidden="true">⚠</span><span>Expect the file
+      at <code>&lt;your-project&gt;/.cursor/mcp.json</code>. If your agent says it wrote
+      <code>~/.cursor/mcp.json</code>, it had no project open and wrote Cursor's
+      <strong>global</strong> config instead — that works, but it registers this task for
+      every project you open.</span></div>
+  </div>
+
+  <!-- ---------- Gemini CLI ----------
+       Scope is per project by default — same reason as Claude's `--scope local`. The CLI
+       writes `url` (not `httpUrl`) plus "type": "http" into
+       <project>/.gemini/settings.json, and that works; take its output over any doc,
+       including ours. `gemini mcp list` labels it (sse) — the wire is the standard
+       streamable HTTP handshake; do NOT "fix" it by switching to httpUrl. -->
+  <div class="pane" data-pane="gemini-cli" hidden>
+    <pre class="code" data-slot="gemini-cli"></pre>
+    <div class="copy-row">
+      <button type="button" class="btn copy" data-copy-slot="gemini-cli">Copy command</button>
+    </div>
+    <p class="hint">Run it <strong>in the folder you'll open Gemini in</strong> — it writes
+       to that project.</p>
+    <div class="note info"><span class="ic" aria-hidden="true">ⓘ</span><span>You run this one
+      yourself. sys-buddy only ever runs the <code>claude</code> CLI for you, and only when
+      you pick Claude · in the terminal.</span></div>
+    <div class="verify">
+      <span class="vh">How to know it worked</span>
+      Check it with <code>gemini mcp list</code>; you want a green ✓ and
+      <strong>“Connected”</strong>.
+    </div>
+    <div class="note info"><span class="ic" aria-hidden="true">ⓘ</span><span><code>gemini mcp
+      list</code> prints <code>(sse)</code> next to the entry even though this is HTTP.
+      Ignore the label — it's cosmetic, and the connection is fine.</span></div>
+  </div>
+
+  <!-- ---------- Other ----------
+       The honest escape hatch. We do NOT ship a per-client snippet for anything we
+       cannot run — it would look as authoritative as the tested ones and be confidently
+       wrong. Instead: the two raw facts, the generic shape, the specific way it fails
+       (field names), and a verification question that works on any client. -->
+  <div class="pane" data-pane="other" hidden>
+    <p class="hint">sys-buddy is a standard MCP server over HTTP. Any MCP client can connect
+       with two things.</p>
+
+    <div class="kv">
+      <span class="k">URL</span>
+      <pre class="code" data-slot="other-url"></pre>
+      <div class="copy-row"><button type="button" class="btn copy" data-copy-slot="other-url">Copy URL</button></div>
+    </div>
+    <div class="kv">
+      <span class="k">Header</span>
+      <pre class="code" data-slot="other-header"></pre>
+      <div class="copy-row"><button type="button" class="btn copy" data-copy-slot="other-header">Copy header</button></div>
+    </div>
+
+    <p class="hint">Most clients take a config file shaped like this:</p>
+    <pre class="code" data-slot="other-config"></pre>
+    <div class="copy-row"><button type="button" class="btn copy" data-copy-slot="other-config">Copy config</button></div>
+
+    <div class="note warn"><span class="ic" aria-hidden="true">⚠</span><span>Field names differ
+      between clients — check your client's docs:<br>
+      · top-level key &nbsp;<code>mcpServers</code> · <code>servers</code> · <code>context_servers</code><br>
+      · URL field &nbsp;<code>url</code> · <code>serverUrl</code> · <code>httpUrl</code><br>
+      · VS Code requires <code>"type": "http"</code>; most infer it</span></div>
+
+    <div class="verify">
+      <span class="vh">How to know it worked</span>
+      Ask your agent: <strong>“what sys-buddy tools do you have?”</strong> You should see
+      <code>rules</code>, <code>readiness_check</code>, <code>send_message</code>,
+      <code>report_status</code>…<br>
+      If it lists them you are connected — nothing else to do. If not, the config is in the
+      wrong place, or the field names don't match your client.
+    </div>
+
+    <p class="hint">Got it working? Tell us which client and we'll add it to the list.</p>
+  </div>
+</template>
+
 <script>
 (function(){
   "use strict";
 
   // ---- module state ----------------------------------------------------
   var dashboardUrl = null;   // stashed from a successful join_flow result
+
+  // The native bridge, or null when this page is opened in a plain browser (and while
+  // pywebview is still injecting it). Always call it — never close over the result —
+  // and never touch a bare `api`: an undeclared read throws under "use strict" and
+  // takes the whole IIFE's remaining statements down with it.
+  function bridge(){ return (window.pywebview && window.pywebview.api) || null; }
 
   // ---- tiny router -----------------------------------------------------
   var views = {
@@ -889,6 +1153,122 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       .replace(/"/g,'&quot;');
   }
 
+  /* ---- Step 1 — "connect your agent" ---------------------------------------
+     ONE renderer for BOTH flows (the buddy's join result and the host's own seat):
+     they need the identical step, and two copies of it is how the Claude-only
+     assumption survived in two places at once. `container` gets a fresh clone of
+     #tpl-connect; `seat` is the join_flow / host_seat result.
+
+     It assumed Claude-with-a-terminal, which cost a real pairing session: the buddy
+     was driving Claude Code inside the desktop app, had no terminal, had never heard
+     of the CLI, and there was no other way in. */
+  function renderConnect(container, seat){
+    container.innerHTML = '';
+    container.appendChild(document.getElementById('tpl-connect').content.cloneNode(true));
+
+    /* The instructions come from the BROKER — onboarding.connect_clients(), carried on
+       the join_flow / host_seat result as `clients`, beside `prompt`. This page renders
+       no client field name of its own, and that matters more than it looks: the keys
+       differ per client in ways that read as cosmetic (`mcpServers` vs `servers` vs
+       `context_servers`, `url` vs `serverUrl` vs `httpUrl`), so a second copy here would
+       drift into configs that fail SILENTLY. That drift is the recurring failure in this
+       codebase — the Python side is pinned by tests against docs/connect-your-agent.md;
+       a copy in this file would be covered by nothing.
+
+       No rebasing (join.html does one): the broker runs in THIS process and stamped the
+       very base_url this window handed it, so the URL it rendered with is already the
+       one the operator's agent must call. */
+    var byId = {};
+    (seat.clients || []).forEach(function(c){ byId[c.id] = c; });
+    var haveClients = false;
+    for (var k in byId) { if (Object.prototype.hasOwnProperty.call(byId, k)) haveClients = true; }
+
+    function slot(name){ return container.querySelector('[data-slot="' + name + '"]'); }
+    function put(name, text){ var el = slot(name); if (el) el.textContent = text || ''; }
+    function field(id, key){ var e = byId[id]; return e ? (e[key] || '') : ''; }
+
+    put('claude-cli',     field('claude-cli', 'command'));
+    put('claude-desktop', field('claude-desktop', 'paste'));
+    put('cursor',         field('cursor', 'paste'));
+    put('gemini-cli',     field('gemini-cli', 'command'));
+    put('other-url',      field('other', 'url'));
+    put('other-header',   field('other', 'header'));
+    put('other-config',   field('other', 'config'));
+
+    // Older bridge with no client list: show the one path we can still fill from the
+    // legacy field, rather than four empty boxes.
+    if (!haveClients) put('claude-cli', seat.config_command || '');
+
+    // Every copy button names the <pre> it copies, so the two can never drift apart.
+    Array.prototype.forEach.call(container.querySelectorAll('[data-copy-slot]'), function(btn){
+      btn.addEventListener('click', function(){
+        var src = slot(btn.getAttribute('data-copy-slot'));
+        if (src) copyText(src.textContent, btn);
+      });
+    });
+
+    /* AUTO-CONFIGURE ONLY WHERE IT IS POSSIBLE. onboarding.configure_claude() shells out
+       to the `claude` binary: that works for Claude·terminal and for nothing else. So its
+       outcome is reported inside THAT pane and no other. The file-based branches say
+       plainly that sys-buddy does not write into your project or your editor's settings —
+       an honest boundary beats a button that looks like it worked and silently did
+       nothing. (It is also why `claude mcp add` is useless in the desktop app: the binary
+       isn't on its PATH.) */
+    var auto = slot('autocfg');
+    if (auto) {
+      auto.innerHTML = seat.config_ok
+        ? '<p class="hint" style="margin-top:2px">We tried to run this for you. ' +
+          'If <code>claude mcp list</code> doesn’t show <strong>sys-buddy</strong>, run the ' +
+          'command above in the terminal where you start your agent (same folder/profile).</p>'
+        : '<div class="alert amber show" role="status" style="margin-top:2px">' +
+            '<strong>Couldn’t auto-configure — run the command above in your terminal.</strong>' +
+          '</div>' +
+          (seat.config_detail
+            ? '<p class="hint" style="margin-top:8px">' + esc(seat.config_detail) + '</p>' : '');
+    }
+
+    /* Picker wiring. Claude is default-selected and is the only client with a sub-step;
+       the others have exactly one way in, so a second click would be friction with no
+       information. */
+    var agentBtns = container.querySelectorAll('[data-agent]');
+    var whereBtns = container.querySelectorAll('[data-where]');
+    var claudeSub = container.querySelector('[data-sub="claude"]');
+    var agent = 'claude', where = 'cli';
+
+    function pane(name){ return container.querySelector('[data-pane="' + name + '"]'); }
+    function paint(){
+      Array.prototype.forEach.call(agentBtns, function(b){
+        var on = b.getAttribute('data-agent') === agent;
+        b.classList.toggle('is-on', on);
+        b.setAttribute('aria-selected', String(on));
+      });
+      Array.prototype.forEach.call(whereBtns, function(b){
+        var on = b.getAttribute('data-where') === where;
+        b.classList.toggle('is-on', on);
+        b.setAttribute('aria-selected', String(on));
+      });
+      claudeSub.hidden = agent !== 'claude';
+      pane('claude-cli').hidden     = !(agent === 'claude' && where === 'cli');
+      pane('claude-desktop').hidden = !(agent === 'claude' && where === 'app');
+      pane('cursor').hidden         = agent !== 'cursor';
+      pane('gemini-cli').hidden     = agent !== 'gemini';
+      pane('other').hidden          = agent !== 'other';
+    }
+    Array.prototype.forEach.call(agentBtns, function(b){
+      b.addEventListener('click', function(){ agent = b.getAttribute('data-agent'); paint(); });
+    });
+    Array.prototype.forEach.call(whereBtns, function(b){
+      b.addEventListener('click', function(){ where = b.getAttribute('data-where'); paint(); });
+    });
+    paint();
+
+    // Nothing to pick between when the list didn't arrive — hide the chips rather than
+    // offering three branches that would render blank.
+    if (!haveClients) {
+      Array.prototype.forEach.call(container.querySelectorAll('.pick'), function(p){ p.hidden = true; });
+    }
+  }
+
   joinBtn.addEventListener('click', function(){
     // reset transient UI
     joinErr.classList.remove('show'); joinErr.textContent = '';
@@ -942,32 +1322,10 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       '✓ Paired as <span class="role" style="color:' + col + '">' + esc(res.role) + '</span>' +
       ' on task “<span class="tid">' + esc(res.task_id) + '</span>”';
 
-    // Step 1 — Connect Claude to sys-buddy. The `claude mcp add …` command is
-    // ALWAYS shown: the GUI's auto-run may write to a different Claude config/scope
-    // than the user's terminal, so they must be able to run it themselves.
-    var cmd = res.config_command || '';
-    var note;
-    if (res.config_ok) {
-      note =
-        '<p class="hint" style="margin-top:2px">We tried to run this for you. ' +
-        'If <code>claude mcp list</code> doesn’t show <strong>sys-buddy</strong>, run the command ' +
-        'above in the terminal where you start Claude (same folder/profile).</p>';
-    } else {
-      note =
-        '<div class="alert amber show" role="status" style="margin-top:2px">' +
-          '<strong>Couldn’t auto-configure — run the command above in your terminal.</strong>' +
-        '</div>' +
-        (res.config_detail ? '<p class="hint" style="margin-top:8px">' + esc(res.config_detail) + '</p>' : '');
-    }
-    cfgBlock.innerHTML =
-      '<span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your Claude to sys-buddy</span>' +
-      '<pre class="code" id="cfg-cmd">' + esc(cmd) + '</pre>' +
-      '<div class="copy-row">' +
-        '<button type="button" class="btn copy" id="cfg-copy">Copy command</button>' +
-      '</div>' +
-      note;
-    var cmdBtn = cfgBlock.querySelector('#cfg-copy');
-    cmdBtn.addEventListener('click', function(){ copyText(cmd, cmdBtn); });
+    // Step 1 — connect whichever agent this buddy actually uses. The command/paste is
+    // ALWAYS shown even when the auto-run succeeded: the GUI's Claude config/scope may
+    // differ from the one their terminal sees, so they must be able to run it themselves.
+    renderConnect(cfgBlock, res);
 
     // briefing prompt
     promptTa.value = res.prompt || '';
@@ -1013,6 +1371,8 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       if (!url) { slackStatusEl.textContent = 'Paste a webhook URL first.'; return; }
       slackTestBtn.disabled = true;
       slackStatusEl.textContent = 'Sending…';
+      var api = bridge();
+      if (!api) { slackStatusEl.textContent = 'Bridge unavailable — run inside the app.'; slackTestBtn.disabled = false; return; }
       Promise.resolve(api.set_slack_webhook(url)).then(function(set){
         if (!set || !set.ok) { throw new Error((set && set.error) || 'Could not set the webhook.'); }
         return api.test_slack();
@@ -1027,14 +1387,24 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   }
 
   /* If SLACK_WEBHOOK_URL is exported, Slack is already armed — say so, so an empty box
-     doesn't read as "off" over a working webhook. */
-  if (slackStatusEl && api.slack_status) {
+     doesn't read as "off" over a working webhook.
+
+     Reached through bridge() and re-run on `pywebviewready`, like the version check
+     below: this line used to read a bare `api`, which is not a variable in this scope.
+     Under the IIFE's "use strict" that threw at LOAD time and took every statement
+     after it with it — including renderRoles(), so the Host screen came up with no
+     role chips and a permanently disabled Create button. */
+  function probeSlack(){
+    var api = bridge();
+    if (!slackStatusEl || !api || !api.slack_status) return;
     Promise.resolve(api.slack_status()).then(function(s){
       if (s && s.active && s.source === 'env') {
         slackStatusEl.textContent = '✓ Active from SLACK_WEBHOOK_URL — leave blank to keep it.';
       }
     }).catch(function(){});
   }
+  window.addEventListener('pywebviewready', probeSlack);
+  probeSlack();
   var stagingHint  = document.getElementById('staging-hint');
   var hostBtn    = document.getElementById('btn-host');
   var hostGate   = document.getElementById('host-gate');
@@ -1309,28 +1679,8 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       'You’re the <span class="role" style="color:' + col + '">' + esc(seat.role) + '</span>' +
       ' — set up your own agent:';
 
-    var cmd = seat.config_command || '';
-    var note;
-    if (seat.config_ok) {
-      note =
-        '<p class="hint" style="margin-top:2px">We tried to run this for you. ' +
-        'If <code>claude mcp list</code> doesn’t show <strong>sys-buddy</strong>, run the command ' +
-        'above in the terminal where you start Claude (same folder/profile).</p>';
-    } else {
-      note =
-        '<div class="alert amber show" role="status" style="margin-top:2px">' +
-          '<strong>Couldn’t auto-configure — run the command above in your terminal.</strong>' +
-        '</div>' +
-        (seat.config_detail ? '<p class="hint" style="margin-top:8px">' + esc(seat.config_detail) + '</p>' : '');
-    }
-    var cfg = document.getElementById('host-seat-cfg');
-    cfg.innerHTML =
-      '<span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your Claude to sys-buddy</span>' +
-      '<pre class="code">' + esc(cmd) + '</pre>' +
-      '<div class="copy-row"><button type="button" class="btn copy" id="host-seat-copy">Copy command</button></div>' +
-      note;
-    var cmdBtn = cfg.querySelector('#host-seat-copy');
-    cmdBtn.addEventListener('click', function(){ copyText(cmd, cmdBtn); });
+    // Same step 1 the buddy gets — the host may not be on Claude either.
+    renderConnect(document.getElementById('host-seat-cfg'), seat);
 
     document.getElementById('host-seat-prompt').value = seat.prompt || '';
     wrap.hidden = false;

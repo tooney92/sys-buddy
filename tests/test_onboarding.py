@@ -197,7 +197,7 @@ def test_role_prompt_teaches_the_agent_owned_wait_loop_not_a_subagent(mode):
 
 @pytest.mark.parametrize("role", ["backend", "frontend", "mobile", "designer"])
 def test_role_prompt_teaches_the_ship_shorthand(role):
-    """`ship [#N]` = propose-then-sign in ONE move, because that is how a human thinks
+    """`ship #N` = propose-then-sign in ONE move, because that is how a human thinks
     about it ("agree this and sign my side") while the broker needs two calls.
 
     It is PROMPT-side only — it maps to propose_contract then lock_contract; there is no
@@ -206,7 +206,9 @@ def test_role_prompt_teaches_the_ship_shorthand(role):
     """
     text = onboarding.role_prompt(role, "signin")
     low = text.lower()
-    assert "`ship [#n]`" in low
+    # `#N` is REQUIRED, here as everywhere bar `stuck` — the old `ship [#N]` spelling
+    # taught an optional id that no longer exists (see tests/test_shortcodes.py).
+    assert "`ship #n`" in low
     assert "propose_contract" in text and "lock_contract" in text
     assert "signs your side only" in low
     assert "every party has" in low or "everyone has" in low
@@ -476,9 +478,14 @@ def test_host_setup_seats_host_role(conn):
 
     seat = r["host_seat"]
     assert set(seat) == {
-        "role", "mcp_url", "agent_token", "prompt", "config_command", "clients",
+        "role", "handle", "role_type", "mcp_url", "agent_token", "prompt",
+        "config_command", "clients",
     }
+    # The host is a seat like any other: `role` is its handle, `role_type` the kind of
+    # work. On a one-seat-per-role cast they are the same string.
     assert seat["role"] == "backend"
+    assert seat["handle"] == "backend"
+    assert seat["role_type"] == "backend"
     assert seat["mcp_url"] == "http://127.0.0.1:8787/mcp"
     assert seat["agent_token"]
     assert "signin" in seat["prompt"]

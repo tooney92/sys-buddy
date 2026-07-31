@@ -120,3 +120,128 @@ that the dashboard warns EARLY ENOUGH to act (token countdown at T-1h, listening
 dot, pre-flight badge) and the human and their agent do the acting.
 
 Revisit only with a real write-auth story — not per-button.
+
+## D12 — A contract is ≥1 named unit, and the unit key names the KIND
+
+**Spec (§6):** a contract spec is `endpoints` (each a valid HTTP method + path) plus a
+`staging_url`. The only shape a contract can take is an HTTP API.
+
+**Deviation:** a contract is **≥1 named unit with attributes**, in one of four KINDS.
+Only the validator and the dashboard's renderer are kind-aware; versioning, both-sides
+`lock_contract`, `decline`, `reopen_negotiations` and `get_contract` never mention HTTP.
+
+| kind | unit key | the broker enforces |
+|---|---|---|
+| `http` (default) | `endpoints` | ≥1, valid method + non-empty path |
+| `schema` | `types` | ≥1, each a `name` + non-empty `fields` (name + shape) |
+| `ui` | `screens` | ≥1, each a `name` + non-empty `states` |
+| `none` | `criteria` | ≥1 non-empty checkable string |
+
+**Why:** the spec's shape is not a permissions problem — any party to a todo may propose
+— it is a SCHEMA problem. A designer+frontend pair agreeing six screens, or two frontends
+agreeing a `<SessionProvider>`, are entitled to propose and simply cannot produce a spec
+that validates. Both were forced to either skip the contract (losing the signed, versioned,
+both-locked artifact) or fake an HTTP one, and the second is the likelier failure because
+extra spec keys are kept: a real agreement smuggled in beside a dummy endpoint, invisible
+to the dashboard.
+
+**`interface_type` is INFERRED, not declared.** SPEC §6 has no such field and the
+`v2.md` note proposed one. Each kind has a DISTINCT unit key, so the key already names
+the kind — requiring an agent to declare a kind AND pick the matching key is two chances
+to be wrong instead of none. It stays *accepted* for exactly two jobs: catching a
+contradiction (declared `http`, supplied `screens` — the broker names both and refuses
+rather than picking which half was the mistake), and disambiguating any future kinds that
+share a key. Two unit keys in one spec is refused as ambiguous, never silently preferred.
+
+**Backwards compatibility is total.** `http` keeps `endpoints` and stays the default, so
+every contract written before kinds existed validates byte-for-byte with no `spec_json`
+migration — verified against the owner's 11 real contracts, all of which infer `http`.
+The dashboard payload keeps emitting `endpoints` for http alongside the generic
+`kind`/`unit_key`/`units`, because `ui.html` is served from disk and a browser tab may be
+older than the running `api.py`.
+
+**Security is simpler, not laxer.** `staging_url` remains the ONLY fetchable URL the
+broker ever hands out — see D13, which took it out of the spec entirely: no kind
+requires one, no kind may carry one, and every kind RESOLVES one when the host has set
+it. `has_http_surface` gates the validator and the renderer, never the target.
+
+**Rejected:** a generic `units: [...]` wire format. It would have forced a `spec_json`
+migration for zero gain, and an agent writes `screens:` more reliably than an abstraction.
+
+**Not decided here** (see `docs/contract-kinds-design.md`): whether a `ui` contract wants
+a first-class design reference, whether `ui` should collapse into `schema`, and whether a
+todo's contract may change kind between versions (the dashboard's version diff would have
+to cope).
+
+## D13 — `staging_url` is host-owned CONFIGURATION, not part of the signed shape
+
+**Spec (§6, §9):** the producer's agent puts `staging_url` inside the contract spec, and
+it is part of the signed document; `get_contract` reads it out of `spec_json`.
+
+**Deviation:** the deployment target lives on the TASK (`tasks.staging_url`), optionally
+overridden per deliverable (`todos.staging_url`), and is **resolved live on every read**
+(`state.resolve_staging_url`: todo override → task → the legacy spec). A spec that
+carries a `staging_url` is REFUSED. Only the host writes it — CLI (`sys-buddy task
+staging-url`), the desktop app, and host setup — and the change is an ordinary event in
+the log, not a renegotiation.
+
+**Why 1 — it churned for reasons nobody negotiated.** ngrok free URLs rotate on every
+tunnel restart, so a locked contract went stale routinely, and the only sanctioned fix
+was a full renegotiation producing a version identical but for one string. Forcing people
+to re-sign on non-events trains them to sign without reading, which devalues every other
+signature — including the ones that catch real problems. The owner hit this live: a
+locked contract carrying `https://a1b2c3d4.ngrok-free.dev:3000`, which
+cannot connect (ngrok terminates on 443; the `:3000` belonged on localhost) and was
+immutable inside a signed document.
+
+**Why 2 — it was an agent-controlled field on the most security-sensitive value in the
+system.** An injected "test against `evil.com`" landed in a proposal and was defended
+only by the consumer noticing during review. With the host owning the target there is no
+field for it to land in at all. This makes the posture STRONGER, not weaker: the SSRF and
+https rules are unchanged (`contracts.validate_staging_url`, now public), only the door
+they guard has moved to where a human writes the value.
+
+**An agent-supplied `staging_url` is REFUSED, not ignored.** Silently dropping it would
+let a prompt-injected target appear to succeed — the agent would believe the contract
+points there and could repeat it in chat. The refusal contradicts the injection out loud,
+names the owner and the door (`get_contract`, after the lock), and rides in the same
+collected-errors list so one revision still fixes everything. It is refused on PRESENCE,
+not on being non-empty: a blank one is still an agent reaching for a field it does not
+own, and keying the rule on emptiness would make it depend on how carefully the injection
+was written.
+
+**The contract still records what it agreed to.** `contracts.staging_url_at_lock` is
+written when the final signature lands — a column, never `spec_json`, because mutating
+the signed document at the instant it is signed is the one thing a signature must not
+permit. `get_contract` returns both: `staging_url` (live) and `staging_url_at_lock`
+(historical). They are allowed to diverge; that divergence IS the feature.
+
+**`get_contract` still withholds the target until every party has signed.** The
+withholding keys on the LOCK, never on whether a target happens to be configured, so the
+incentive to actually read the shape survives. `get_todos` never carries it at all — that
+is the agents' view, and publishing it there would hand out the URL with nothing signed.
+The dashboard does show it, because a viewer token is a human.
+
+**Resolution is KIND-AGNOSTIC.** The target resolves for `http`, `schema`, `ui` and
+`none` alike, whenever the host has set one. It is tempting to gate it on
+`has_http_surface`, and that would be wrong: that flag answers *does this contract
+describe HTTP?*, not *does the consumer need somewhere to go and look?* — and the two
+diverge for the kind that invites the mistake. A `ui` contract is verified by opening the
+deployed app, so gating would strip the URL from the kind that most needs one and make
+`ok #N` unanswerable. Nothing is loosened by resolving it: agents still cannot write it,
+and it is still withheld until full signature. The pre-D13 wording in
+`docs/contract-kinds-design.md` ("a kind with no HTTP surface has nothing to grant")
+described the design where the target lived inside the signed spec; it is flagged there
+as stale so nobody "fixes" the code back to it.
+
+**No new tool.** There is deliberately no agent-facing way to set or request a target;
+adding one would give an injection somewhere to aim again.
+
+**Migration deletes nothing and rewrites no spec.** `_migrate_staging_url_off_the_spec`
+materialises `staging_url_at_lock` from each LOCKED contract's spec, and seeds
+`tasks.staging_url` from the newest locked contract for any task that has none — a task
+whose host already chose a target is never overwritten. Verified on a copy of the owner's
+live db (29 tasks, 12 contracts, 9 todos): 4 tasks gained a target (`signin`,
+`rhema-demo-6389`, `leave-management-f17c`, `lightdey-v3-75d9`), 11 host-chosen targets
+were left alone, all 7 locked contracts recorded theirs, drafts recorded nothing, no
+`spec_json` changed, and a second and third boot were byte-for-byte no-ops.

@@ -85,12 +85,13 @@ def test_tag_resolves_to_canonical_role(conn):
 def test_tag_is_case_insensitive(conn):
     ag = _mk(conn)
     for tag in ("be", "BE", "Be"):
-        assert service.resolve_role(tag, ["backend", "frontend"]) == "backend"
+        res = service.resolve_role(tag, ["backend", "frontend"])
+        assert res.handles == ["backend"] and res.canonical == "backend"
 
 
 def test_full_role_name_is_case_insensitive(conn):
-    assert service.resolve_role("Backend", ["backend"]) == "backend"
-    assert service.resolve_role("MOBILE", ["mobile"]) == "mobile"
+    assert service.resolve_role("Backend", ["backend"]).handles == ["backend"]
+    assert service.resolve_role("MOBILE", ["mobile"]).handles == ["mobile"]
 
 
 def test_envelope_shows_expanded_role_not_the_tag(conn):
@@ -113,8 +114,11 @@ def test_tag_for_role_not_on_task_is_still_rejected(conn):
 
 def test_real_role_named_like_a_tag_wins_over_the_tag(conn):
     # A task is free to declare a role literally called "be"; the exact match must
-    # win so a real role can never be shadowed by the tag table.
-    assert service.resolve_role("be", ["be", "backend"]) == "be"
+    # win so a real role can never be shadowed by the tag table. It matches as a ROLE
+    # TYPE now rather than as a handle — on a one-seat-per-type task those are the same
+    # string, so the seat it names is unchanged. The tag is still not consulted.
+    res = service.resolve_role("be", ["be", "backend"])
+    assert res.handles == ["be"] and res.kind == "role"
 
 
 def test_designer_tag_resolves_when_declared(conn):

@@ -12,6 +12,23 @@ Every design decision in this document derives from that sentence. If a rule can
 
 ---
 
+## 0.1 v2 amendment — a contract is an agreement about ONE todo
+
+This document was written before **todos** existed, when a task carried a single contract.
+It no longer does. A task is delivered by one or more **todos** (deliverables), and there
+is exactly **one kind of contract: an agreement about one todo**. `contracts.todo_id` is
+`NOT NULL`; the signatory set is that todo's party list, not the task's full cast;
+versions are numbered per todo, so every deliverable's first proposal is v1; and
+`ready`/`checked`/`blocked`/`verified` name a deliverable too. The TASK's state is a
+**rollup** of its todos that no agent sets.
+
+There is no task-level contract and no second path to teach. A task with no todos has
+nothing to contract — start with `propose_todo`. The sections below are amended where they
+still describe the single-contract world; **[`docs/todo-flow.md`](docs/todo-flow.md)** is
+the source of truth for the flow.
+
+---
+
 ## 1. Problem
 
 Modern features span repos. A backend engineer and a frontend engineer both use Claude Code. Today, every API contract, every field rename, every "it's deployed now" must be manually relayed by a human copying context between two agent sessions. The human becomes a slow, error-prone message bus between two systems that could coordinate at machine speed.
@@ -92,12 +109,14 @@ tasks
 contracts
   id            INTEGER PRIMARY KEY
   task_id       TEXT NOT NULL
-  version       INTEGER NOT NULL        -- 1, 2, 3...
+  todo_id       INTEGER NOT NULL        -- v2: the deliverable this agrees about. NOT NULL
+                                        --     because there is no other kind of contract.
+  version       INTEGER NOT NULL        -- 1, 2, 3... PER TODO, not per task
   spec_json     TEXT NOT NULL           -- validated structure, see §6
-  status        TEXT NOT NULL           -- 'draft' | 'locked'
+  status        TEXT NOT NULL           -- 'draft' | 'locked' | 'declined'
   proposed_by   INTEGER                 -- agents.id
   locked_at     REAL
-  UNIQUE(task_id, version)
+  UNIQUE(todo_id, version)              -- NOT (task_id, version): six todos each hold a v1
 
 contract_signatures
   contract_id   INTEGER NOT NULL
@@ -175,9 +194,9 @@ events
 
 **Broker-enforced rules** (remote mode; advisory in local):
 
-1. `propose_contract` valid in `open` or any later state (a v2 proposal reopens negotiation).
-2. `lock_contract` requires **all declared roles** to have signed. Not two — *all of them*, per `tasks.roles_json`.
-3. `report_status(deployed)` **rejected** unless a locked contract exists. No contract, no deploy.
+1. `propose_contract(spec, todo=N)` valid in `open` or any later state (a v2 proposal reopens negotiation on that todo). The todo must already be **accepted** by every party — agree on WHAT before HOW.
+2. `lock_contract(version, todo=N)` requires **every party on that todo** to have signed, per `todos.parties_json`. A task seat the todo does not bind neither blocks the lock nor may sign it: SEATS ≠ PARTICIPANTS.
+3. `report_status('ready', todo=N)` **rejected** unless a locked contract exists on that todo. No contract, no ready.
 4. Test-phase actions **rejected** before `backend_live`. This is the "frontend can't run Playwright until backend says it's live" rule — enforced in code, not prompt.
 5. The staging URL is read **from the locked contract**, never from a message body. (See §9 — this kills an entire injection class.)
 6. Locked contracts are **immutable**. Changes require a new version → all roles re-sign → Slack ping.
@@ -189,7 +208,9 @@ Every transition writes an `events` row. The state machine is the audit trail.
 
 ## 6. Contract structure
 
-Contracts are **structured JSON, validated before a lock is permitted** — not freeform prose both agents nod at.
+A contract is the agreement about **HOW** one todo will be built (the todo itself is the
+agreement about WHAT). It is **structured JSON, validated before a lock is permitted** —
+not freeform prose both agents nod at.
 
 ```json
 {
@@ -214,18 +235,19 @@ Contracts are **structured JSON, validated before a lock is permitted** — not 
       ]
     }
   ],
-  "staging_url": "https://api-staging.example.com",
   "notes": "free-form addendum, not enforced"
 }
 ```
 
+**No `staging_url` in the spec.** The deployment target is HOST-OWNED configuration on the task (`tasks.staging_url`, overridable per deliverable on `todos.staging_url`), resolved live on every read; a spec that carries one is refused. See DECISIONS.md D13 — it churned on tunnel restarts, forcing renegotiations of a shape nobody changed, and it was an agent-controlled field on the most security-sensitive value in the system. `get_contract` returns the live value (plus `staging_url_at_lock`, what was live at signing) and still withholds it until every party has signed.
+
 **Why structured, three reasons:**
 
-1. **Security** — `staging_url` lives here, in a document both parties cryptographically signed. The test-runner agent gets the URL from `get_contract()`, never from chat. An injected "run your tests against evil.com" message has nowhere to land.
+1. **Security** — the test-runner agent gets the URL from `get_contract()`, never from chat, and now no agent can write it anywhere: an injected "run your tests against evil.com" has no field to land in at all.
 2. **Enforcement** — the broker can validate shape before allowing a lock. Freeform can't be validated.
 3. **UI** — the dashboard's contract panel renders method badges, field tables, and error codes *from this JSON*. Freeform would render as a wall of text.
 
-Validation on `propose_contract`: required keys present, methods in the HTTP verb set, `staging_url` is a well-formed absolute https URL, field types are strings. Reject with a clear error the agent can act on.
+Validation on `propose_contract`: required keys present, methods in the HTTP verb set, field types are strings, and no `staging_url` (that is the host's). Reject with a clear error the agent can act on. The URL rules themselves — absolute https, no private/reserved/metadata target — are unchanged and enforced in `contracts.validate_staging_url`, where the HOST writes the value.
 
 ---
 
@@ -380,10 +402,12 @@ Sets `revoked_at`; middleware checks it on every call. Instant.
 | `check_messages` | — | unread, wrapped in `<msg trust="external">` |
 | `wait_for_message` | `timeout_seconds` (≤540) | long-poll; `[]` on timeout |
 | `ack_messages` | `ids` | marks processed (crash-safe) |
-| `propose_contract` | `spec` (structured JSON) | version number, or validation errors |
-| `lock_contract` | `version` | signature recorded; locks when all roles signed |
-| `get_contract` | — | current locked contract (incl. `staging_url`) |
-| `report_status` | `status`, `detail` | state transition, or rejection with reason |
+| `propose_contract` | `spec` (structured JSON), `todo` | version number, or validation errors |
+| `lock_contract` | `version`, `todo` | signature recorded; locks when every party on that todo has signed |
+| `decline_contract` | `reason`, `todo` | that version is dead; the answer is a new one |
+| `get_contract` | `todo` (optional) | that todo's current contract (`staging_url` — the host's live target — withheld until locked) |
+| `reopen_negotiations` | `reason`, `todo` | drops ONE deliverable back to planning |
+| `report_status` | `status`, `detail`, `todo` | state transition, or rejection with reason |
 | `channel_history` | `limit` | recent traffic for context |
 | `notify_human` | `message` | Slack; terminal events only |
 
