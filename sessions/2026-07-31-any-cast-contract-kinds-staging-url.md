@@ -4,12 +4,15 @@ Branch `feat/todos-are-the-story`. **Committed** — working tree clean, three c
 of `1b1392c wip`:
 
 ```
+98fa5d0 fix: the next-step panel says "Sarah", not "frontend-1"
+8b985d9 fix: the dashboard leaked an unsigned contract's staging_url to a buddy
+0494c97 docs: fold the UI review and the commit record into the session handoff
 6083737 fix: four dashboard copy and affordance fixes from a UI review
 7a99127 docs: session handoffs for the todos and v2 work
 6b9be1f feat!: one kind of contract, any cast, contract kinds, host-owned targets
 ```
 
-`uv run pytest -q` → **986 passed** (session started at 669). Not pushed. No Claude
+`uv run pytest -q` → **988 passed** (session started at 669). Not pushed. No Claude
 attribution in the commit messages, per the owner's standing preference that the public
 record read as their own work.
 
@@ -255,10 +258,51 @@ noting because none of them would have been found by a test:
 
 Also dropped the "Briefly, allies." closer from the debug section, at the owner's request.
 
+### Then the remaining screens — and the bug they found
+
+**A buddy could read an unsigned contract's `staging_url` off the dashboard** (`8b985d9`).
+`get_contract` has always withheld the target until every party signs — the incentive to
+read the shape is that signing is what releases it. But `/api` emitted `staging_url` on
+every version regardless of lock state, and `pairing.py` issues every buddy a viewer token.
+So a party who did not want to read the contract could open the page instead of signing,
+and the rule quietly did not hold on the one surface nobody was checking.
+
+Proven against the live broker before fixing:
+`todo #3 v1 locked=False staging_url=https://payments-stg.example.com`.
+
+The host is exempt — the host CHOSE the value, and hiding a person's own configuration from
+them protects nothing. Pinned by a test verified to fail with the fix reverted.
+
+**How it surfaced is the point:** the NEXT card said *"The staging URL stays hidden until
+every party has signed"* directly above a card printing **CONNECT TO**. Two contradictory
+claims on one screen. No test would have caught it — the rule held in `state.py` and failed
+in `api.py`, and only rendering both together made the contradiction visible.
+
+**And the panel now speaks in names** (`98fa5d0`). One screen read "Sarah's agent
+(@frontend-1)" in its header and "waiting on frontend-1 to sign" beneath. I had assumed
+that was untouchable because the same string reaches agents — **it does not**:
+`state.next_step` is called from exactly one place, `api.py`, and is dashboard-only. Fixed
+as one bounded substitution over `who` (an exact, known list of handles — not a regex over
+prose), longest handle first because `frontend` is a prefix of `frontend-2`. Unjoined seats
+keep their handle (no name exists, and the handle is what you chase); `who` itself stays
+handles because it is structured data the UI keys on. Knock-on caught: *"the producer
+(Sarah) may not check ITS own work"* now reads "their".
+
+**Deliberately NOT changed:** the two frontends' pills both read `[frontend]` with no
+handle appended, because their NAMES differ and nothing is ambiguous. Adding the handle
+whenever a role type is shared would clutter every pill on every multi-seat task to
+disambiguate something already distinct — and the Cast panel carries all three columns for
+anyone who needs the token.
+
 ## Where it stopped
 
-`pwr` for a **three-seat UI review** — four fixes landed (above), the remaining screens not
-yet walked. The seeded task is still live for whoever picks it up.
+The UI review is **done** — every screen walked, two real bugs found and fixed. The seeded
+three-seat task is reproducible from `scratchpad/seed_three.py` (drives the real ops):
+
+```
+uv run python <scratchpad>/seed_three.py      # prints a viewer token
+SYS_BUDDY_DB=~/.sys-buddy-dev-pwr3/sys_buddy.db uv run sys-buddy local --port 9292
+```
 
 - Broker **UP on :9292** against `~/.sys-buddy-dev-pwr3/sys_buddy.db`.
 - Seed script: `scratchpad/seed_three.py` — drives the REAL ops, not a fixture dump.
@@ -328,3 +372,10 @@ sys-buddy host-viewer --port 9292` if the old one is lost, then drive the dashbo
   `_assert_text` says "The other parties accept the SCOPE, not the title."
 - **`ui.html`'s `<script>` is IIFE-wrapped**, so nothing hoists into a `new Function(js)`
   scope. Strip the wrapper to test its internals under node.
+- **Check who actually consumes a string before deciding you cannot change it.** Twice this
+  session a rule was assumed ("agents read this too") and twice it was false — `next_step`
+  is dashboard-only, and the "no HTTP surface has nothing to grant" line described a design
+  that no longer existed. One `grep` for the call sites settled both.
+- **A rule enforced in one layer is not enforced.** `get_contract` withheld the staging_url
+  and `/api` handed it out. Both were "correct" in isolation; the property only exists where
+  every surface honours it. Rendering two surfaces on one screen is what exposed it.
