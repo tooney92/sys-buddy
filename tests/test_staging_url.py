@@ -7,7 +7,7 @@ restart, so a locked contract went stale routinely — and under the old rules t
 sanctioned fix was a full renegotiation producing a version identical but for one
 string. Making people re-sign on non-events teaches them to sign without reading, which
 costs every signature that WOULD have caught something. (The owner hit this live: a
-locked contract carrying ``https://carmelo-convertive-neta.ngrok-free.dev:3000``, which
+locked contract carrying ``https://a1b2c3d4.ngrok-free.dev:3000``, which
 cannot connect — ngrok terminates on 443 — and was immutable inside a signed document.)
 
 **It was an agent-controlled field on the most security-sensitive value in the system.**
@@ -100,14 +100,14 @@ def test_a_legacy_spec_is_the_last_resort_not_the_first(conn):
     IS the fix for the reported case: a locked contract holding a URL that could never
     connect must be overridable without re-signing anything."""
     legacy = {"endpoints": [{"method": "GET", "path": "/x"}],
-              "staging_url": "https://carmelo-convertive-neta.ngrok-free.dev:3000"}
+              "staging_url": "https://a1b2c3d4.ngrok-free.dev:3000"}
     assert state.resolve_staging_url(conn, "signin", None, legacy) == (
-        "https://carmelo-convertive-neta.ngrok-free.dev:3000"
+        "https://a1b2c3d4.ngrok-free.dev:3000"
     )
     seed_task(conn, "signin", roles=("backend", "frontend"))
-    _target(conn, "https://carmelo-convertive-neta.ngrok-free.dev")
+    _target(conn, "https://a1b2c3d4.ngrok-free.dev")
     assert state.resolve_staging_url(conn, "signin", None, legacy) == (
-        "https://carmelo-convertive-neta.ngrok-free.dev"
+        "https://a1b2c3d4.ngrok-free.dev"
     )
 
 
@@ -301,7 +301,7 @@ def test_the_record_and_the_live_value_are_separate_answers(conn):
 # --------------------------------------------------------------------------- #
 # the migration — off the spec, onto the task. Nothing is rewritten.
 # --------------------------------------------------------------------------- #
-_OLD_URL = "https://carmelo-convertive-neta.ngrok-free.dev:3000"
+_OLD_URL = "https://a1b2c3d4.ngrok-free.dev:3000"
 
 # Captured at import, before any test can monkeypatch the module attribute.
 _REAL_MIGRATION = db._migrate_staging_url_off_the_spec

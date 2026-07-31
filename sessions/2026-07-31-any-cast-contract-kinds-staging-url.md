@@ -1,7 +1,6 @@
 # Session handoff — one kind of contract, any cast, contract kinds, host-owned targets (2026-07-31)
 
-Branch `feat/todos-are-the-story`. **Committed** — working tree clean, three commits on top
-of `1b1392c wip`:
+Branch `feat/todos-are-the-story`. **Committed** — working tree clean, on top of `1b1392c wip`:
 
 ```
 98fa5d0 fix: the next-step panel says "Sarah", not "frontend-1"
@@ -22,8 +21,8 @@ them. Splitting post-hoc would have needed `git add -p` surgery and produced com
 did not individually pass tests, which defeats the only real benefit of splitting
 (bisectability). Session notes went separately because they are genuinely independent.
 
-A broker is **still running on :9292** against `~/.sys-buddy-dev-pwr3/sys_buddy.db`, seeded
-with a three-seat session — see "Where it stopped".
+The three-seat review broker on `:9292` has been stopped; the seed is reproducible — see
+"Where it stopped".
 
 The owner's live db at `~/.sys-buddy/sys_buddy.db` was **never opened for write** by any
 agent. One deliberate manual write is documented under "The live unblock".
@@ -220,14 +219,14 @@ pre-flight, and the refusals point at `send_message` as the fix.
 ## The live unblock (the one manual write)
 
 The owner's active session was blocked by the pre-flight bug above. With explicit
-instruction, `ready = 1` was set on agent 53 (`najiu`, mobile) by raw SQL —
+instruction, `ready = 1` was set on the unready `@mobile` seat by raw SQL —
 `readiness_status` left `pending` so the dashboard stays truthful. Backup:
 `~/.sys-buddy/sys_buddy.db.bak-20260730-180533`. Raw SQL on purpose: running any current-code
 CLI against that db would have triggered the schema migration mid-session with a live broker
 holding it open.
 
 Once the scoped-pre-flight fix ships that row can honestly return to 0. The owner has since
-said najiu is not needed.
+said that seat is not needed.
 
 **A lesson worth keeping:** their agent then reported *"the blocker resolved itself… it
 cleared between my two attempts."* It did not — the timestamps show every successful proposal
@@ -330,7 +329,7 @@ sys-buddy host-viewer --port 9292` if the old one is lost, then drive the dashbo
    `staging_url` is refused. `releases/v1.5.0.md` is a committed 07-28 draft that says "No
    schema change and no migration" — now false; it wants rewriting, not extending.
 3. **The owner's live db is still UNMIGRATED** and will migrate on next boot of this code.
-   Verified safe on copies repeatedly. One consequence on `employee-form-feature-e287`, which
+   Verified safe on copies repeatedly. One consequence on the owner's live task, which
    is mid-negotiation: contracts currently quoted as "v3 on todo #4" and "v2 on todo #5"
    become "v2 on #1" and "v1 on #2". Messages are immutable, so the thread will reference
    numbers that no longer resolve. **Get those two signatures in before upgrading.** The

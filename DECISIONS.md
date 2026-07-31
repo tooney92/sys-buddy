@@ -190,7 +190,7 @@ tunnel restart, so a locked contract went stale routinely, and the only sanction
 was a full renegotiation producing a version identical but for one string. Forcing people
 to re-sign on non-events trains them to sign without reading, which devalues every other
 signature — including the ones that catch real problems. The owner hit this live: a
-locked contract carrying `https://carmelo-convertive-neta.ngrok-free.dev:3000`, which
+locked contract carrying `https://a1b2c3d4.ngrok-free.dev:3000`, which
 cannot connect (ngrok terminates on 443; the `:3000` belonged on localhost) and was
 immutable inside a signed document.
 
