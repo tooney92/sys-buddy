@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.0.1](https://github.com/tooney92/sys-buddy/compare/v2.0.0...v2.0.1) (2026-08-01)
+
+
+### Fixed
+
+* a buddy could read the staging target without signing for it ([9f27c65](https://github.com/tooney92/sys-buddy/commit/9f27c659f71574277a1e5af4f2059db280b56218))
+
 ## [2.0.0](https://github.com/tooney92/sys-buddy/compare/v1.4.0...v2.0.0) (2026-08-01)
 
 
