@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from sys_buddy import service, state, todos
+from sys_buddy import contracts, service, state, todos
 from tests.conftest import seed_agent, seed_task
 
 
@@ -704,3 +704,56 @@ def test_todos_cannot_be_added_to_a_terminated_task(conn):
     state.report_status(conn, ag["backend"], "stuck", "humans needed")
     with pytest.raises(ValueError, match="terminal state 'stuck'"):
         todos.propose_todo(conn, ag["backend"], "api123", "scope", ["backend", "frontend"])
+
+
+# --------------------------------------------------------------------------- #
+# the proposal announcement counts the units of ITS OWN kind
+# --------------------------------------------------------------------------- #
+def _one_unit_spec(kind) -> dict:
+    """A minimal VALID spec of `kind`, carrying exactly one unit."""
+    return {
+        "http": {"endpoints": [{"method": "POST", "path": "/api/items"}]},
+        "schema": {"types": [{"name": "Item", "fields": [{"name": "id", "type": "string"}]}]},
+        "ui": {"screens": [{"name": "ItemList", "states": ["loading", "loaded"]}]},
+        "none": {"criteria": ["the list renders once items load"]},
+    }[kind.name]
+
+
+@pytest.mark.parametrize("kind_name", sorted(contracts.KINDS))
+def test_the_proposal_message_counts_the_units_of_its_own_kind(conn, kind_name):
+    """A `ui` contract of one screen announced itself as "(0 endpoints)".
+
+    The count was hardcoded to `spec["endpoints"]`, so every kind but http reported
+    zero — which reads as an EMPTY contract to the one agent whose job is to review it,
+    on the surface that is its only prompt to go and look. Parameterised over the kind
+    table so a new kind fails here until its announcement counts the right thing.
+    """
+    kind = contracts.KINDS[kind_name]
+    ag = _agents(conn)
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    state.propose_contract(conn, ag["backend"], _one_unit_spec(kind), num)
+
+    body = conn.execute(
+        "SELECT body_json FROM messages WHERE type = 'contract_proposal' ORDER BY id DESC LIMIT 1"
+    ).fetchone()["body_json"]
+    # Singular, because there is exactly one unit — and never another kind's noun.
+    assert f"(1 {kind.unit_label})" in body
+    for other in contracts.KINDS.values():
+        if other.name != kind.name:
+            assert other.unit_key not in body
+
+
+def test_criteria_are_not_pluralised_into_criterions(conn):
+    """`unit_key` carries the plural precisely because appending "s" to `unit_label`
+    is wrong for the one kind whose plural is irregular."""
+    ag = _agents(conn)
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    state.propose_contract(conn, ag["backend"], {"criteria": [
+        "the list renders once items load",
+        "the empty state renders when there are none",
+    ]}, num)
+    body = conn.execute(
+        "SELECT body_json FROM messages WHERE type = 'contract_proposal' ORDER BY id DESC LIMIT 1"
+    ).fetchone()["body_json"]
+    assert "(2 criteria)" in body
+    assert "criterions" not in body

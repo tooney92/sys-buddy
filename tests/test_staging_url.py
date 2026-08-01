@@ -178,11 +178,13 @@ def test_get_todos_never_carries_the_target(conn):
         assert "staging_url" not in t
 
 
-def test_the_dashboard_does_show_it_because_a_viewer_is_a_human(conn):
+def test_the_host_sees_their_own_configuration_everywhere_it_appears(conn):
+    """The host CHOSE the value; hiding a person's own configuration from them protects
+    nothing. Every surface that carries the target shows it to the host."""
     _locked(conn)
     admin.set_staging_url("signin", "https://api-staging.example.com")
     admin.set_staging_url("signin", "https://override.example.com", todo=1)
-    detail = api._task_detail(conn, "signin")
+    detail = api._task_detail(conn, "signin", is_host=True)
     assert detail["staging_url"] == "https://api-staging.example.com"
     row = detail["todos"][0]
     assert row["staging_url"] == "https://override.example.com"
@@ -191,6 +193,45 @@ def test_the_dashboard_does_show_it_because_a_viewer_is_a_human(conn):
     v1 = row["contract"]["data"]["v1"]
     assert v1["staging_url"] == "https://override.example.com"
     assert v1["staging_url_at_lock"] is None   # nothing was configured when it locked
+
+
+def test_the_todo_row_withholds_the_target_from_a_buddy_too(conn):
+    """The contract block was fixed to withhold; the TODO ROW beside it was not.
+
+    `/api` carried `staging_url` and `staging_url_effective` on every todo regardless of
+    signature, so a buddy — who is handed a `viewer_token` the moment they pair — could
+    read the target off an unsigned deliverable one key away from the block that had just
+    been taught to refuse. Two fields that disagree about who has earned the target means
+    the stricter one is decoration.
+    """
+    ag = _agents(conn, roles=("backend", "frontend"))
+    _target(conn, "https://payments-stg.example.com")
+    state.propose_contract(conn, ag["backend"], _valid_spec(), 1)   # proposed, unsigned
+
+    def row_seen_by(*, is_host):
+        return api._task_detail(conn, "signin", is_host=is_host)["todos"][0]
+
+    buddy = row_seen_by(is_host=False)
+    assert buddy["staging_url"] is None
+    assert buddy["staging_url_effective"] is None
+    # …and the scope is NOT withheld: a buddy still has to be able to read what is
+    # being proposed. Withholding the target is the incentive to read it.
+    assert buddy["title"] and buddy["parties"]
+
+    assert row_seen_by(is_host=True)["staging_url_effective"] == "https://payments-stg.example.com"
+
+    # Signing is what releases it — the same rule the contract block follows.
+    _lock_all(conn, ag, 1)
+    assert row_seen_by(is_host=False)["staging_url_effective"] == "https://payments-stg.example.com"
+
+
+def test_the_task_wide_target_is_host_only(conn):
+    """A buddy reaches the target through a todo they SIGNED. The task-wide value would
+    hand it over before any signature, which is the bypass the withholding exists for."""
+    _locked(conn)
+    admin.set_staging_url("signin", "https://api-staging.example.com")
+    assert api._task_detail(conn, "signin", is_host=True)["staging_url"] == "https://api-staging.example.com"
+    assert api._task_detail(conn, "signin", is_host=False)["staging_url"] is None
 
 
 # --------------------------------------------------------------------------- #

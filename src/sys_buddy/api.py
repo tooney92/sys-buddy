@@ -408,9 +408,8 @@ def _todos_for(conn, task_id: str, *, is_host: bool = True) -> list[dict]:
     JS — a "next step" that drifts from what the broker allows sends a human to type a
     command that will be refused.
 
-    Nothing is withheld by stage: a todo is a title, a scope and a party list, with no
-    ``staging_url`` equivalent to protect until agreement (its contract block does the
-    withholding that needs doing, at the task level, as before).
+    The title, scope and party list are withheld from nobody. The TARGET is, on the same
+    rule the contract block uses — see the staging_url comment below.
     """
     out = []
     for t in todos.get_todos(conn, task_id):
@@ -420,11 +419,21 @@ def _todos_for(conn, task_id: str, *, is_host: bool = True) -> list[dict]:
         d["next"] = state.next_step(conn, task_id, t["id"])
         # The host's per-deliverable target override and what this todo actually
         # resolves to. VIEW-ONLY and deliberately not on `todos.to_dict`: that shape is
-        # what the AGENTS' get_todos returns, and putting the target there would hand
-        # an agent the URL without signing anything — the one incentive get_contract's
-        # withholding exists to create. A viewer token is a human reading a dashboard.
-        d["staging_url"] = _todo_staging_url(conn, t["id"])
-        d["staging_url_effective"] = state.resolve_staging_url(conn, task_id, t["id"])
+        # what the AGENTS' get_todos returns, and putting the target there would hand an
+        # agent the URL without signing anything — the one incentive get_contract's
+        # withholding exists to create.
+        #
+        # Withheld on the SAME rule as the contract block: host, or this deliverable has
+        # a locked contract. "A viewer token is a human reading a dashboard" was the
+        # original reasoning for leaving these open, and it does not hold — pairing hands
+        # every buddy a viewer token, so a party could read the target here without
+        # signing, which is the exact bypass the contract block was fixed to close. Two
+        # fields one key apart cannot disagree about who has earned the target.
+        released = is_host or bool(t["locked_versions"])
+        d["staging_url"] = _todo_staging_url(conn, t["id"]) if released else None
+        d["staging_url_effective"] = (
+            state.resolve_staging_url(conn, task_id, t["id"]) if released else None
+        )
         out.append(d)
     # Creation order within a bucket, which is `number` order: numbers are handed out
     # MAX+1 as todos are proposed and never renumbered, so this is also the order the
@@ -702,7 +711,12 @@ def _task_detail(conn, task_id: str, *, is_host: bool = True) -> dict | None:
         # The HOST's deployment target for the task, so the dashboard can show what is
         # in force and where it came from. Host-owned configuration — the only surface
         # that CHANGES it is the host's (CLI / desktop app), never an agent tool.
-        "staging_url": state._task_staging_url(conn, task_id),
+        #
+        # HOST ONLY. A buddy reaches the target through the contract block of a todo
+        # they have signed; handing them the task-wide value here would release it
+        # before any signature, which is what the per-contract withholding exists to
+        # prevent. The host is exempt because the host CHOSE the value.
+        "staging_url": state._task_staging_url(conn, task_id) if is_host else None,
         "times": _times_for(conn, task_id, t["created_at"]),
         "contract": _contract_for(conn, task_id, is_host=is_host),
         "messages": _messages_for(conn, task_id),
