@@ -203,6 +203,34 @@ Collaborator access lets you push branches to this repo instead of to a fork. It
 does **not** let you push to `main` — branch protection still requires a PR and an
 approving review. Everything else above is unchanged.
 
+## Cutting a release (maintainers)
+
+You don't cut releases by hand. Merging to `main` makes release-please open (or update) a
+**Release PR** titled `chore(main): release X.Y.Z`, with the version and changelog computed
+from the PR titles since the last tag. Merging *that* PR tags the release and publishes to
+PyPI and ghcr.io — that merge is the irreversible step.
+
+Two things worth knowing before you get there:
+
+**Write `releases/vX.Y.Z.md` before merging the Release PR, not after.** The changelog
+header promises a fuller note for every release, and the generated changelog entry is one
+line per PR — enough to say *what* changed, never *why it was worth changing* or *what it
+means for someone upgrading*. 2.0.0 reached its Release PR without one.
+
+**If the Release PR shows no checks at all, that is a missing secret, not a broken
+pipeline.** GitHub refuses to trigger workflows from anything the built-in `GITHUB_TOKEN`
+did, so a Release PR it opened gets no `pull_request` runs — and since `pytest` and
+`conventional PR title` are required, it sits unmergeable with nothing red to explain why.
+`--admin` does not help either; `enforce_admins` is on.
+
+```bash
+gh pr close <n> && gh pr reopen <n>   # reopening is attributed to you, so CI runs
+```
+
+The permanent fix is the `RELEASE_PLEASE_TOKEN` secret — setup instructions are in the
+header of `.github/workflows/release-please.yml`, and the workflow prints this same
+guidance into its run summary whenever it opens a Release PR without one.
+
 ## Ground rules
 
 - Don't commit secrets, tokens, or generated artifacts (screenshots, local `.db`
