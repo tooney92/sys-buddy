@@ -954,7 +954,14 @@ def propose_contract(conn, identity: Identity, spec: dict, number: int | None = 
     # Tell the peer directly — a transition event alone is dashboard-only and would
     # never reach the other agent's wait_for_message queue. This is what makes
     # planning actually flow: the peer hears "there's a proposal to assess."
-    n_endpoints = len(spec.get("endpoints", []))
+    # Count the units of THIS contract's kind, not endpoints. A `ui` contract of four
+    # screens used to announce itself as "(0 endpoints)" — the http vocabulary leaking
+    # into every other kind, and reading as an empty contract to the one agent whose job
+    # is to review it. `unit_key` is already the plural and `unit_label` the singular,
+    # which also keeps `criteria` from being pluralised into "criterions".
+    kind = contracts.KINDS[contracts.infer_kind(spec) or contracts.DEFAULT_KIND]
+    n_units = len(spec.get(kind.unit_key, []))
+    unit_note = f"{n_units} {kind.unit_label if n_units == 1 else kind.unit_key}"
     scope_note = f" on todo #{todo['number']} ({todo['title']})"
     signers = f"the parties on this todo ({', '.join(todos.parties_of(todo))})"
     # Versions are per-deliverable, so the signature call must carry the deliverable too —
@@ -964,9 +971,8 @@ def propose_contract(conn, identity: Identity, spec: dict, number: int | None = 
         conn,
         identity,
         "contract_proposal",
-        f"Proposed contract v{version}{scope_note} ({n_endpoints} endpoint"
-        f"{'' if n_endpoints == 1 else 's'}). Review the shape with get_contract (it now "
-        f"shows the proposed contract, not only locked ones), then {sign_call} "
+        f"Proposed contract v{version}{scope_note} ({unit_note}). Review it with "
+        f"get_contract (it now shows the proposed contract, not only locked ones), then {sign_call} "
         f"to sign — or message me to request changes first. The staging_url appears in "
         f"get_contract once {signers} have signed.",
         todo_id=todo["id"],

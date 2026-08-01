@@ -871,8 +871,8 @@ function listHTML(){
      that could be showing thirty. It also described a task as having "the contract" —
      pre-todo framing for a model where a task is delivered by one or more todos, each
      with its own. */
-  var TASKS_BLURB = 'Your agents, working. Watch them agree what to build, sign the '
-                  + 'shape of it, and ship — you’re just here to observe.';
+  var TASKS_BLURB = 'Your agents, working. Watch them agree what to build, sign a '
+                  + 'contract for how, and ship — you’re just here to observe.';
   if(!state.tasks.length){
     return '<div style="max-width:1040px;margin:0 auto;padding:30px 20px 70px">'+
       '<h1 style="font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;color:var(--text)">Tasks</h1>'+
@@ -1029,7 +1029,12 @@ function threadHTML(d){
    header, inches from the avatars they decode and the `→ role` chips they define. The test
    this has to pass: someone who sees a `→ designer` chip can learn what it means without
    opening anything. */
-var ROLE_COLOR_TIP='Roles are colour-coded — backend · frontend · mobile · designer.';
+/* Deliberately NOT a list of role names. A task can declare any cast — two backends and
+   a QA is as valid as backend+frontend — so an enumeration here goes stale the moment
+   someone adds a seat, and sat contradicting a `qa` avatar rendered right beside it. What
+   the viewer actually needs is the two rules the row encodes: colour means type, ×N means
+   several seats of that type. */
+var ROLE_COLOR_TIP='Roles are colour-coded — one colour per role type, and ×N marks several seats of the same type.';
 function roleDotsHTML(){
   var dot='width:7px;height:7px;border-radius:50%;flex:none';
   return ['backend','frontend','mobile','designer'].map(function(r){
