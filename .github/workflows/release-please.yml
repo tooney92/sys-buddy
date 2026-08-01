@@ -6,6 +6,25 @@ name: Release
 # workflow triggered by the release event — a release created with the built-in
 # GITHUB_TOKEN does not trigger other workflows, so chaining here is what makes publish
 # actually fire.
+#
+# THAT SAME RULE APPLIES TO THE RELEASE PR, which is what `RELEASE_PLEASE_TOKEN` is for.
+# GitHub refuses to trigger workflows from anything the built-in GITHUB_TOKEN did, to stop
+# a workflow re-triggering itself forever. So a Release PR opened with GITHUB_TOKEN gets
+# NO `pull_request` runs at all — and `pytest` / `conventional PR title` are REQUIRED
+# checks, so it sits unmergeable with nothing red to explain why. It is not a failure; the
+# checks never ran. This bit v2.0.0 and v2.0.1, one after the other.
+#
+# Set the secret and its PRs trigger CI like anyone else's. One-time setup:
+#
+#   1. A fine-grained PAT scoped to THIS repo, with Contents: read+write and
+#      Pull requests: read+write. (A GitHub App token minted by
+#      actions/create-github-app-token works too — same secret, shorter-lived; worth it
+#      if this ever stops being a one-owner repo.)
+#   2. gh secret set RELEASE_PLEASE_TOKEN --repo tooney92/sys-buddy
+#
+# Unset is SAFE: it falls back to GITHUB_TOKEN and releases still work, they just need the
+# manual unblock the "release PR checks" job below prints. Do not make this required —
+# a forked or freshly-cloned repo has no such secret and must still be able to release.
 on:
   push:
     branches: [main]
@@ -18,6 +37,11 @@ jobs:
   release-please:
     name: release PR / tag
     runs-on: ubuntu-latest
+    # The `secrets` context is NOT available in a step-level `if:`, only `env` is — so the
+    # presence of the token is resolved to a string here, where secrets DO reach, and the
+    # step below branches on that.
+    env:
+      HAS_RELEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN != '' }}
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -26,9 +50,41 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Falls back to the built-in token so a repo without the secret still
+          # releases — see the header for what that costs and how to set it.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Say so IN THE RUN, at the moment the PR is opened. Without this the symptom is a
+      # Release PR with an empty checks list and no explanation anywhere — which reads as
+      # a broken pipeline rather than a missing secret, and costs whoever hits it the
+      # twenty minutes it costs the first time. Never fails the job: the fallback path is
+      # supported, just manual.
+      - name: Explain the checks gap when running on the fallback token
+        # `prs_created` is the documented boolean for "a Release PR was opened or updated".
+        # (`pr` carries the PR object but the action documents it as unset unless a
+        # RELEASE was created, which is the opposite half of the cycle from this one.)
+        if: ${{ steps.release.outputs.prs_created == 'true' && env.HAS_RELEASE_TOKEN == 'false' }}
+        run: |
+          {
+            echo "### Release PR opened with the built-in token"
+            echo
+            echo "\`RELEASE_PLEASE_TOKEN\` is not set, so this PR was opened by"
+            echo "\`GITHUB_TOKEN\`. GitHub will not trigger workflows from it, so the"
+            echo "required checks (\`pytest\`, \`conventional PR title\`) will NOT run and"
+            echo "the PR cannot be merged as-is."
+            echo
+            echo "**Unblock it:** close and reopen the PR. Reopening is attributed to"
+            echo "your account, so the checks run normally."
+            echo
+            echo '```'
+            echo "gh pr close <n> && gh pr reopen <n>"
+            echo '```'
+            echo
+            echo "**Fix it permanently:** see the header of"
+            echo "\`.github/workflows/release-please.yml\`."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish-pypi:
     name: publish to PyPI
