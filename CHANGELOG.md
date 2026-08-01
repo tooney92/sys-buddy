@@ -10,49 +10,6 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
-## [Unreleased]
-
-### Changed — BREAKING
-
-- **One kind of contract: an agreement about ONE todo.** The task-level contract is gone.
-  A task is delivered by one or more todos, so "a contract on the task" and "a contract on
-  a todo" were two names for the same idea and two code paths for every operation — and the
-  second stayed reachable in ways nobody intended (a bare `decline_contract` could kill a
-  proposal on a deliverable the caller never named). The word *contract* stays; only the
-  second kind is removed. The user-facing name is **Todo Contract**.
-  - `contracts.todo_id` is now `NOT NULL`, and `UNIQUE(task_id, version)` is replaced by
-    `UNIQUE(todo_id, version)` — versions are numbered per deliverable, so six todos each
-    hold a v1.
-  - `propose_contract`, `lock_contract`, `decline_contract` and `reopen_negotiations`
-    **require** `todo=N` in their tool signatures. `get_contract` and `report_status` stay
-    optional on purpose: reading is how an agent recovers a number it lost, and bare
-    `stuck` deliberately escalates the whole collaboration.
-  - A task with no todos has nothing to contract. The refusal points at `propose_todo`.
-
-### Migration
-
-- Existing task-level contracts are **adopted**, never deleted: each task's chain moves onto
-  a NEW todo (`MAX(number)+1`) whose party list is the task's full cast — exactly who a
-  task-level contract bound — and whose scope records where it came from. Signatures key on
-  `contract_id`, so every one survives untouched. The `contracts` table is rebuilt once to
-  make `todo_id` `NOT NULL`; the migration is re-entrant, deletes nothing, and rolls back
-  whole on any failure.
-- Added the missing `contracts.proposed_by` migration. A database old enough to predate
-  todos may also predate that column, and the adoption reads it — without the `ALTER` the
-  boot died on `no such column`, i.e. on exactly the databases the migration exists to
-  rescue.
-
-### Fixed
-
-- A signature landing on a todo's contract now moves the SSE detail token, so the dashboard
-  refreshes live on the moment that matters most. Every signature lands on a todo chain now,
-  and the task-level contract fingerprint saw none of them.
-- The dashboard state chip says `locked` rather than `contract locked`, matching the stepper
-  and the task-list pill — the same state was named two different things on one screen.
-- The Workflows panel says "contract" in prose again. An earlier pass had substituted "the
-  shape", which read as a different concept from the `propose_contract`/`lock_contract`
-  tools sitting beside it and taught neither.
-
 ## [1.4.0](https://github.com/tooney92/sys-buddy/compare/v1.3.0...v1.4.0) (2026-07-26)
 
 
