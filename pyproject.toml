@@ -1,6 +1,6 @@
 [project]
 name = "sys-buddy"
-version = "1.4.0"
+version = "2.0.0"
 description = "An authenticated, contract-enforcing message broker that lets two developers' AI coding agents collaborate across the internet."
 readme = "README.md"
 requires-python = ">=3.11"

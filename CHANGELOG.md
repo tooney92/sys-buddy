@@ -10,6 +10,24 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.0.0](https://github.com/tooney92/sys-buddy/compare/v1.4.0...v2.0.0) (2026-08-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* Contracts are per-todo — propose_contract, lock_contract, decline_contract and reopen_contract all require todo=N. staging_url is no longer accepted inside a contract spec; it is host-owned configuration set on the task or overridden per todo. Role strings that used to identify a single agent now identify a role type; party lists take seats.
+
+### Added
+
+* one kind of contract, any cast, contract kinds, host-owned targets ([6acc751](https://github.com/tooney92/sys-buddy/commit/6acc751674743c6f8a5acdb6fbb44595d569cdc7))
+* role tags (@BE/@FE/@MB/@DE), designer role, and Slack that actually fires ([#43](https://github.com/tooney92/sys-buddy/issues/43)) ([08449ba](https://github.com/tooney92/sys-buddy/commit/08449ba10efe5ee7e14fe1644dc544b39bde99be))
+
+
+### Fixed
+
+* show `testing` as its own step, and serve the connect blocks from one place ([#46](https://github.com/tooney92/sys-buddy/issues/46)) ([19d0ba2](https://github.com/tooney92/sys-buddy/commit/19d0ba2ef75d41621935125d2f9018391f59df61))
+* the todo-scoped verified error refused without explaining ([#47](https://github.com/tooney92/sys-buddy/issues/47)) ([0bf823e](https://github.com/tooney92/sys-buddy/commit/0bf823e54fbbcfd783f5961c9ef8295d91a5a255))
+
 ## [1.4.0](https://github.com/tooney92/sys-buddy/compare/v1.3.0...v1.4.0) (2026-07-26)
 
 
