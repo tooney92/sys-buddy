@@ -406,6 +406,28 @@ def _signatures_for(conn, contract_id: int) -> list[str]:
     ]
 
 
+def _is_solo_engagement_todo(conn, identity: Identity, row) -> bool:
+    """A one-party todo on an engagement — where the producer MAY check their own work.
+
+    "The producer does not check their own work" is right whenever there is somebody
+    else to do it. On a solo engagement todo there is not, and the rule becomes a
+    deadlock rather than a safeguard: the todo can never reach `verified`, so the
+    owner's verification run is refused forever, so nothing is ever checked by anyone.
+
+    Letting the producer through grants nothing, because it is not the real check. The
+    engagement's outer ring is: the client's agent goes to the deployed app and looks,
+    and the task only reaches `confirmed` if every deliverable comes back accepted. Tony
+    marking his own todo done merely says "I have finished" — Ada's agent still decides
+    whether it works, and a false claim is caught there.
+
+    Deliberately narrow. Two parties means somebody else can check, so they must; a peer
+    task has no outer ring at all, so the original rule stands unconditionally there.
+    """
+    if len(todos.parties_of(row)) != 1:
+        return False
+    return deliverables.is_engagement(conn, identity.task_id)
+
+
 def _producer_role(conn, task_id: str, todo_id: int | None = None) -> str | None:
     """The PRODUCER role for a task — model B: whoever proposed the current locked
     contract. That role is the one others build against: it reports ``ready``, and it
@@ -1853,7 +1875,7 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
             f"(the todo is '{row['state']}', need '{BACKEND_LIVE}')"
         )
     producer = _producer_role(conn, identity.task_id, todo_id=row["id"])
-    if identity.role == producer:
+    if identity.role == producer and not _is_solo_engagement_todo(conn, identity, row):
         raise ValueError(
             f"the producer ('{producer}') doesn't report checks on its own work; the "
             f"consuming party/parties on todo #{row['number']} do"

@@ -238,3 +238,61 @@ def test_a_todo_with_no_parties_is_refused_even_on_an_engagement(conn):
     _agree_the_scope(conn, ag)
     with pytest.raises(ValueError, match="at least one"):
         todos.propose_todo(conn, ag["frontend"], "Nobody's work", "scope", [])
+
+
+def test_the_producer_may_check_a_SOLO_engagement_todo(conn):
+    """Otherwise a solo todo deadlocks the entire engagement.
+
+    "The producer does not check their own work" is right whenever somebody else can.
+    On a solo engagement todo nobody can, so the rule stops being a safeguard and
+    becomes a trap: the todo never reaches `verified`, the owner's run is refused
+    forever, and nothing is ever checked by anyone.
+
+    Letting the producer through grants nothing. The real check is the outer ring — the
+    client's agent goes to the deployed app, and the task only reaches `confirmed` if
+    every deliverable comes back accepted. Tony marking his own todo done says "I have
+    finished"; Ada's agent still decides whether it works.
+    """
+    ag = _agents(conn)
+    _agree_the_scope(conn, ag)
+    num = todos.propose_todo(conn, ag["frontend"], "Mobile layout", "fit a phone",
+                             ["frontend"])["number"]
+    state.propose_contract(conn, ag["frontend"],
+                           {"screens": [{"name": "Landing", "states": ["mobile"]}]}, num)
+    state.lock_contract(conn, ag["frontend"], 1, num)
+    state.report_status(conn, ag["frontend"], state.STATUS_DEPLOYED, "live", num)
+    state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, "checked", num)
+    state.report_status(conn, ag["frontend"], state.STATUS_VERIFIED, "done", num)
+    assert todos.get_row(conn, "acme", num)["state"] == "verified"
+
+
+def test_the_producer_still_cannot_check_a_shared_todo_on_an_engagement(conn):
+    """Narrow by design: two parties means somebody else CAN check, so they must."""
+    ag = _agents(conn)
+    _agree_the_scope(conn, ag)
+    num = todos.propose_todo(conn, ag["frontend"], "Shared work", "scope",
+                             ["frontend", "backend"])["number"]
+    todos.accept_todo(conn, ag["backend"], num)
+    state.propose_contract(conn, ag["frontend"],
+                           {"screens": [{"name": "S", "states": ["a"]}]}, num)
+    state.lock_contract(conn, ag["frontend"], 1, num)
+    state.lock_contract(conn, ag["backend"], 1, num)
+    state.report_status(conn, ag["frontend"], state.STATUS_DEPLOYED, "live", num)
+    with pytest.raises(ValueError, match="doesn't report checks on its own work"):
+        state.report_status(conn, ag["frontend"], state.STATUS_TEST_PASSED, "self", num)
+
+
+@pytest.mark.parametrize("mode", ["contract"])
+def test_a_peer_producer_can_never_check_their_own_work(conn, mode):
+    """A peer task has no outer ring at all, so the original rule stands unconditionally
+    — there is nothing there to catch a false claim."""
+    ag = _agents(conn, roles=("backend", "frontend"), mode=mode)
+    num = todos.propose_todo(conn, ag["backend"], "API", "scope",
+                             ["backend", "frontend"])["number"]
+    todos.accept_todo(conn, ag["frontend"], num)
+    state.propose_contract(conn, ag["backend"], _spec(), num)
+    state.lock_contract(conn, ag["backend"], 1, num)
+    state.lock_contract(conn, ag["frontend"], 1, num)
+    state.report_status(conn, ag["backend"], state.STATUS_DEPLOYED, "live", num)
+    with pytest.raises(ValueError, match="doesn't report checks on its own work"):
+        state.report_status(conn, ag["backend"], state.STATUS_TEST_PASSED, "self", num)
