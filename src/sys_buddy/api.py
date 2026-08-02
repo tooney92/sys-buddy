@@ -37,7 +37,9 @@ from starlette.responses import (
 from . import (
     activity,
     contracts,
+    deliverables,
     files,
+    guidelines,
     identity,
     notify,
     readiness,
@@ -45,6 +47,7 @@ from . import (
     service,
     state,
     todos,
+    verification,
 )
 from .config import Config
 from .db import connect
@@ -679,6 +682,108 @@ def _activity_for(conn, task_id: str) -> list[dict]:
     ]
 
 
+def _result_for(results: list[dict]) -> dict | None:
+    """The one verdict the dashboard prints beside a deliverable, or ``None``.
+
+    ``results`` is one deliverable's slice of the LATEST run (``latest_results``), and
+    a run can file two KINDS of row against it: a whole-deliverable verdict
+    (``spec_id`` NULL) and one verdict per dev's claim. The deliverable-level row is
+    preferred because that is the answer to the owner's question — *did I get the
+    thing I asked for?* — and the per-claim rows answer a different one (*who built
+    what, and was his claim true?*).
+
+    The fallback matters as much as the preference: a run that filed ONLY per-claim
+    verdicts still shows the most recent of them rather than nothing, because a blank
+    beside a deliverable somebody did check reads as "not checked", and silence
+    reading as a pass — or as a miss — is exactly what this feature exists to stop.
+
+    Reduced to the four fields that are rendered. ``strength_label`` rides along
+    already computed so the page never maps ``evidence`` → "Evidence reviewed" itself:
+    that mapping is the difference between "this ran" and "somebody read a diff", and
+    it is not a distinction to leave to a copy in the client's JS.
+    """
+    if not results:
+        return None
+    whole = [r for r in results if r["spec_id"] is None]
+    row = whole[-1] if whole else results[-1]
+    return {k: row[k] for k in ("verdict", "strength", "strength_label", "detail")}
+
+
+def _engagement_for(conn, task_id: str, *, is_host: bool = True) -> dict:
+    """The engagement keys for ``_task_detail`` — or ``{}`` for every other task.
+
+    This is the two registers of ONE record (``docs/enhancements.md`` item 1): the
+    same rows the team reads as todos, rendered as the outcomes the owner asked for.
+    Nothing here is a second source of truth — every value is a domain-module call,
+    so the dashboard cannot drift from what the agents' tools enforce.
+
+    ``{}`` for a ``contract`` or ``debug`` task, and the caller merges it, so a
+    non-engagement payload is BYTE-IDENTICAL to before this feature — the same
+    additive/omit-when-empty rule the ``todos``, ``files`` and ``activity`` keys
+    already follow, and for the same reason: ``ui.html`` is served from disk and can
+    be older than the running ``api.py``.
+
+    ``is_host`` is threaded for the shape of the surface rather than to withhold
+    anything today: a spec is a hint about where a thing lives and a result is a
+    verdict on work the viewer is party to, so neither is a secret the way a
+    pre-signature staging target is. It stays a parameter because if any of this ever
+    IS withheld, this is the one place it happens.
+
+    **``must_mention`` never leaves this function.** Guideline rules are stored with
+    the keys a correct assessment answer has to contain, and the dashboard has a
+    viewer token behind it — publishing the answer key would turn the assessment into
+    a reading exercise. Only ``rule`` is projected out, per ``tests/test_guidelines.py``.
+    """
+    if not deliverables.is_engagement(conn, task_id):
+        return {}
+
+    record = deliverables.record(conn, task_id)
+    latest = verification.latest_results(conn, task_id)
+    rows = []
+    for d in record["deliverables"]:
+        rows.append({
+            "id": d["id"],
+            "number": d["number"],
+            "text": d["text"],
+            "withdrawn": d["withdrawn"],
+            "withdraw_reason": d["withdraw_reason"],
+            # The translation back into the team's register: the work that serves this
+            # outcome, by the `#N` a human types.
+            "todos": d["todos"],
+            "specs": [
+                {k: s[k] for k in ("role", "name", "claim", "how", "staleness")}
+                for s in verification.specs_for(conn, d["id"])
+            ],
+            "result": _result_for(latest["by_deliverable"].get(d["id"], [])),
+        })
+
+    block: dict = {
+        "engagement": True,
+        "deliverables": {
+            "locked": record["locked"],
+            "version": record["version"],
+            "accepted_by": record["accepted_by"],
+            # The builders who have NOT accepted — the panel's "who are we waiting on",
+            # which is the state that silently stalls an engagement before it starts.
+            "awaiting": record["awaiting"],
+            "rows": rows,
+        },
+    }
+    rules = guidelines.all_guidelines(conn, task_id)
+    if rules:
+        # OMITTED, not empty, when the task declares none — which is the normal case.
+        block["guidelines"] = {
+            role_type: [{"rule": r["rule"]} for r in rs] for role_type, rs in rules.items()
+        }
+    block["verification"] = {
+        "run": latest["run"],
+        # Two mechanical counts beside the verdicts, so "everything passed" cannot hide
+        # a deliverable nobody looked at. Presence, NOT quality — see verification.coverage.
+        "coverage": verification.coverage(conn, task_id),
+    }
+    return block
+
+
 def _task_detail(conn, task_id: str, *, is_host: bool = True) -> dict | None:
     """Full per-task payload (SPEC §11 ``/api/task/{id}``), or ``None`` if absent.
 
@@ -738,6 +843,11 @@ def _task_detail(conn, task_id: str, *, is_host: bool = True) -> dict | None:
         detail["has_todos"] = todos.has_todos(conn, task_id)
         detail["todos"] = todo_list
         detail["todo_rollup"] = todos.rollup(conn, task_id)
+    # The owner's register — scope, guidelines and what was checked. Merged (rather than
+    # composed above) because it is EMPTY for a `contract` or `debug` task, and empty here
+    # means the keys are ABSENT: that task's payload is byte-identical to before engagement
+    # mode existed, exactly as `todos`/`files`/`activity` are for a task without them.
+    detail.update(_engagement_for(conn, task_id, is_host=is_host))
     # `files` follows the same additive/omit-when-empty rule as the todo keys, and for
     # the same reason: a task that has never had a file uploaded serialises exactly as
     # it did before file sharing, so an older on-disk `ui.html` sees nothing new. A
@@ -858,6 +968,32 @@ def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
         task_activity = _activity_for(conn, tid)
         if task_activity:
             fingerprint["activity"] = len(task_activity)
+        # The engagement panel moves on the two moments that matter most and are the
+        # slowest to notice by hand: a BUILDER ACCEPTING the scope (which is what locks
+        # the list and opens the gate — everyone is watching for it) and a VERIFICATION
+        # RESULT landing (the owner is sitting in front of the dashboard waiting for it).
+        # Neither touches messages, events, contracts or todos, so without this the panel
+        # would sit stale through precisely the changes it exists to show.
+        #
+        # Added as a key only on an engagement, so every `contract`/`debug` task's token
+        # is byte-identical to before — the same rule the todos/activity keys follow.
+        eng = _engagement_for(conn, tid)
+        if eng:
+            scope = eng["deliverables"]
+            fingerprint["engagement"] = [
+                scope["version"], scope["locked"], scope["accepted_by"], scope["awaiting"],
+                [
+                    [r["id"], r["withdrawn"], [s["staleness"] for s in r["specs"]],
+                     r["result"]]
+                    for r in scope["rows"]
+                ],
+                (eng["verification"]["run"] or {}).get("id"),
+                eng["verification"]["coverage"],
+                # Rule TEXT, never the must_mention keys: this token is opaque to the
+                # client, but it is still a string built from stored rows, and the answer
+                # key does not belong in one that crosses the wire.
+                {rt: [r["rule"] for r in rs] for rt, rs in eng.get("guidelines", {}).items()},
+            ]
         task_tokens[tid] = json.dumps(fingerprint, sort_keys=True)
 
     return json.dumps(sorted(list_parts)), task_tokens

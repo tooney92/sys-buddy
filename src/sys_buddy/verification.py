@@ -354,6 +354,54 @@ def _spec_row(conn, spec_id: int):
 # --------------------------------------------------------------------------- #
 # runs
 # --------------------------------------------------------------------------- #
+def _assert_the_work_is_finished(conn, task_id: str) -> None:
+    """Refuse a run while the team is still building.
+
+    THERE ARE TWO LEVELS OF DONE, and conflating them is what this guards.
+
+    * A **todo** reaches ``verified`` when the BUILDERS agree it is finished — one dev
+      builds, another checks, peer to peer. That is the team saying "we're done".
+    * A **deliverable** is verified when the OWNER's agent goes and looks. That is the
+      client saying "this is what I asked for".
+
+    The second must follow the first. `docs/enhancements.md` item 4 puts it as *devs
+    finish → owner is notified → owner decides when to look*, and starting a run before
+    the devs have finished inverts it: the owner tests half-built work, gets failures
+    that are nobody's fault, and either loses confidence in the team or in the checking.
+    Both are worse than waiting.
+
+    A deliverable with NO todos does not block — there is nothing to wait for, and the
+    report already says out loud that no work names it. Withdrawn deliverables are out
+    of scope entirely.
+    """
+    rows = conn.execute(
+        """
+        SELECT d.number AS number, t.number AS todo_number, t.title AS title, t.state AS state
+          FROM deliverables d
+          JOIN todo_deliverables td ON td.deliverable_id = d.id
+          JOIN todos t              ON t.id = td.todo_id
+         WHERE d.task_id = ?
+           AND d.withdrawn_at IS NULL
+           AND t.dropped_at IS NULL
+           AND t.state != 'verified'
+      ORDER BY d.number, t.number
+        """,
+        (task_id,),
+    ).fetchall()
+    if not rows:
+        return
+    unfinished = ", ".join(
+        f"#{r['todo_number']} '{r['title']}' ({r['state']}) on deliverable #{r['number']}"
+        for r in rows
+    )
+    raise ValueError(
+        f"the team has not finished yet, so there is nothing to check: {unfinished}. "
+        f"A todo reaches 'verified' when the BUILDERS agree it is done — that is what "
+        f"tells you there is something to look at. Wait for them to say so, then start "
+        f"the run. Checking half-built work produces failures that are nobody's fault."
+    )
+
+
 def start_run(conn, identity: Identity, staging_url: str | None) -> int:
     """Open one sitting of checking, and return its id.
 
@@ -377,6 +425,8 @@ def start_run(conn, identity: Identity, staging_url: str | None) -> int:
             "Report what you built (report_status) and leave a spec (submit_spec); the "
             "owner decides when to check."
         )
+
+    _assert_the_work_is_finished(conn, identity.task_id)
 
     url = staging_url.strip() if isinstance(staging_url, str) else None
     if url is not None and len(url) > MAX_STAGING_URL:

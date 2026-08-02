@@ -80,9 +80,20 @@ def lock_contract(conn, task_id, todo_id, version) -> int:
     return cur.lastrowid
 
 
+def set_todo_state(conn, todo_id, state) -> None:
+    conn.execute("UPDATE todos SET state = ? WHERE id = ?", (state, todo_id))
+    conn.commit()
+
+
 @pytest.fixture
 def engagement(conn):
-    """One engagement, one deliverable, one linked todo whose contract is locked at v1."""
+    """One engagement, one deliverable, one linked todo whose contract is locked at v1.
+
+    The todo is left **verified**, because that is the state an engagement is in when
+    anybody starts a verification run: the builders finish first (todo `verified`, agreed
+    peer to peer), and only then does the owner go and look. Tests that need the
+    unfinished case walk it back with `set_todo_state`.
+    """
     task_id = engagement_task(conn)
     owner = seat(conn, task_id, "owner", "owner", "Anna")
     james = seat(conn, task_id, "frontend", "frontend", "James")
@@ -91,6 +102,7 @@ def engagement(conn):
     t2 = add_todo(conn, task_id, 2)
     link(conn, t2, d1)
     lock_contract(conn, task_id, t2, 1)
+    set_todo_state(conn, t2, "verified")
     return {
         "task_id": task_id,
         "owner": owner,
@@ -556,3 +568,59 @@ def test_every_run_and_result_lands_in_the_event_log(conn, engagement):
     ).fetchall()
     actions = [json.loads(row["detail_json"])["action"] for row in rows]
     assert actions == ["spec_submitted", "run_started", "result_recorded"]
+
+
+# --------------------------------------------------------------------------- #
+# two levels of done: the builders finish, THEN the owner checks
+# --------------------------------------------------------------------------- #
+def test_a_run_is_refused_while_the_team_is_still_building(conn, engagement):
+    """The owner must not test work the devs have not finished.
+
+    A todo reaches `verified` when the BUILDERS agree it is done — peer to peer, one
+    builds and another checks. A deliverable is verified when the OWNER goes and looks.
+    The second follows the first, per `docs/enhancements.md` item 4: *devs finish →
+    owner is notified → owner decides when to look*.
+
+    Inverted, the owner tests half-built work and collects failures that are nobody's
+    fault, costing him either confidence in the team or confidence in the checking.
+
+    Caught on the live dashboard, which read "0 of 3 verified" across the todos while
+    the owner's register already claimed "Verified — this ran" on two deliverables.
+    """
+    set_todo_state(conn, engagement["t2"], "building")
+    with pytest.raises(ValueError) as e:
+        verification.start_run(conn, engagement["owner"], "https://staging.example.com")
+    msg = str(e.value)
+    assert "not finished" in msg
+    # It must name WHICH todo and what state it is in, so the owner can go and ask
+    # rather than being told only that he may not look.
+    assert "#2" in msg and "building" in msg
+
+
+def test_a_run_opens_once_the_builders_have_verified(conn, engagement):
+    run = verification.start_run(conn, engagement["owner"], "https://staging.example.com")
+    assert isinstance(run, int)
+
+
+def test_a_deliverable_with_no_todos_does_not_block_the_run(conn, engagement):
+    """There is nothing to wait for, and the report already says out loud that no work
+    names it — so blocking here would strand the owner with no way forward."""
+    add_deliverable(conn, engagement["task_id"], 2, "Something nobody picked up")
+    assert isinstance(
+        verification.start_run(conn, engagement["owner"], "https://staging.example.com"),
+        int,
+    )
+
+
+def test_a_dropped_todo_does_not_block_the_run(conn, engagement):
+    """Abandoned work is not unfinished work — it is gone, and waiting on it forever
+    would make a dropped todo a permanent hostage to the whole engagement."""
+    t3 = add_todo(conn, engagement["task_id"], 3, "abandoned")
+    link(conn, t3, engagement["d1"])
+    set_todo_state(conn, t3, "building")
+    conn.execute("UPDATE todos SET dropped_at = ? WHERE id = ?", (time.time(), t3))
+    conn.commit()
+    assert isinstance(
+        verification.start_run(conn, engagement["owner"], "https://staging.example.com"),
+        int,
+    )
