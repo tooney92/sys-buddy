@@ -748,3 +748,55 @@ def test_confirmation_is_idempotent(conn, engagement):
         "AND detail_json LIKE '%\"action\": \"confirmed\"%'"
     ).fetchone()[0]
     assert confirms == 1
+
+
+def test_a_later_failing_run_un_confirms(conn, engagement):
+    """Confirmation is a fact about the product, not a memory of an earlier day.
+
+    Watched live: a confirmed engagement had a button quietly deleted from staging, the
+    next run rejected that deliverable, and the task still read `confirmed` — the record
+    said the client was happy with something that no longer existed. A state nobody can
+    leave is not a fact.
+    """
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+    later = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, later, engagement["d1"], "rejected", "verified",
+                               "the Contact button is gone")
+    assert _task_state(conn, engagement["task_id"]) != "confirmed"
+
+
+def test_the_earlier_acceptance_survives_in_the_log(conn, engagement):
+    """Un-confirming does not erase what the client once accepted — that is history, and
+    history lives in the append-only log with the run id that produced it."""
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    later = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, later, engagement["d1"], "rejected", "verified", "gone")
+
+    actions = [
+        json.loads(r["detail_json"])["action"]
+        for r in conn.execute(
+            "SELECT detail_json FROM events WHERE kind = 'verification' ORDER BY id"
+        )
+    ]
+    assert "confirmed" in actions and "unconfirmed" in actions
+    assert actions.index("confirmed") < actions.index("unconfirmed")
+
+
+def test_fixing_it_confirms_again(conn, engagement):
+    """The round trip: accepted, regressed, fixed, accepted again."""
+    for verdict in ("accepted", "rejected", "accepted"):
+        run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+        verification.record_result(conn, run, engagement["d1"], verdict, "verified", verdict)
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_a_run_that_fails_a_never_confirmed_task_changes_nothing(conn, engagement):
+    """The un-confirm path must not fire on a task that was never confirmed."""
+    before = _task_state(conn, engagement["task_id"])
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "rejected", "verified", "broken")
+    assert _task_state(conn, engagement["task_id"]) == before

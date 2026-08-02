@@ -631,32 +631,69 @@ def accepted_everything(conn, task_id: str, run_id: int) -> bool:
 
 
 def _maybe_confirm(conn, task_id: str, run_id: int) -> None:
-    """Move the task to ``confirmed`` once this run has accepted everything.
+    """Recompute confirmation from THIS run — in both directions.
 
     THIS IS THE COMMERCIAL END OF AN ENGAGEMENT — the client saying "this is what I asked
-    for", which is a different claim from `verified` ("the builders are done"). It is
-    computed rather than reported: no agent may declare it, because the whole point is
-    that it follows from what the owner's agent actually found.
+    for", a different claim from `verified` ("the builders are done"). It is computed
+    rather than reported: no agent may declare it, because the whole point is that it
+    follows from what the owner's agent actually found.
 
-    Idempotent and quiet. A run that accepts two of three deliverables simply leaves the
-    task where it was, and the third landing later is what tips it — so the order results
-    are filed in does not matter.
+    **And it is not latched.** An earlier version only ever moved INTO `confirmed`, which
+    made the state a claim about the past rather than about the product. Watched live: a
+    confirmed engagement had a button quietly deleted from staging, the next run rejected
+    that deliverable, and the task still read `confirmed` — the record said the client was
+    happy with something that no longer existed. A state nobody can leave is not a fact,
+    it is a memory.
+
+    So a run that fails anything RETURNS the task to the builders' own rollup (normally
+    `verified`), and says so in the log. The client's earlier acceptance is not erased —
+    it is in the event log with its run id, which is where history belongs.
+
+    Filing order still does not matter: two of three accepted leaves the task alone, and
+    the third landing later is what tips it either way.
     """
-    if not accepted_everything(conn, task_id, run_id):
-        return
     from . import state as _state
+    from . import todos as _todos
 
     row = conn.execute("SELECT state FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    if row is None or row["state"] == _state.CONFIRMED:
+    if row is None:
         return
-    _state._transition(conn, task_id, _state.CONFIRMED)
-    _event(conn, task_id, "confirmed", {
+    current = row["state"]
+    everything_ok = accepted_everything(conn, task_id, run_id)
+
+    if everything_ok:
+        if current == _state.CONFIRMED:
+            return
+        _state._transition(conn, task_id, _state.CONFIRMED)
+        _event(conn, task_id, "confirmed", {
+            "run_id": run_id,
+            "text": "the client accepted every deliverable — this engagement is confirmed",
+        })
+        _state._notify(
+            conn, task_id,
+            f"[{task_id}] CONFIRMED: the client accepted every deliverable on this engagement",
+        )
+        return
+
+    if current != _state.CONFIRMED:
+        return
+
+    # Confirmed, and this run found something wrong. Hand the task back to the rollup —
+    # `apply_rollup` refuses to overwrite `confirmed`, so it has to be cleared here first,
+    # which is also what makes this the ONE place confirmation is decided.
+    rolled = _todos.rollup(conn, task_id)
+    conn.execute(
+        "UPDATE tasks SET state = ? WHERE id = ?",
+        ((rolled or {}).get("state") or _state.VERIFIED, task_id),
+    )
+    _event(conn, task_id, "unconfirmed", {
         "run_id": run_id,
-        "text": "the client accepted every deliverable — this engagement is confirmed",
+        "text": "a later check found a deliverable no longer acceptable — "
+                "this engagement is no longer confirmed",
     })
     _state._notify(
         conn, task_id,
-        f"[{task_id}] CONFIRMED: the client accepted every deliverable on this engagement",
+        f"[{task_id}] NO LONGER CONFIRMED: a later check found a deliverable failing",
     )
 
 
