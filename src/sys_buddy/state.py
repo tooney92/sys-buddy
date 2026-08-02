@@ -1172,6 +1172,24 @@ def lock_contract(conn, identity: Identity, version: int, number: int | None = N
             f"Propose a new version with propose_contract(spec, todo={todo['number']}) that "
             f"addresses the objection — get_contract shows who declined it and why."
         )
+    # A SUPERSEDED draft cannot be signed. Proposing v2 does not mark v1 as anything —
+    # it stays `draft` forever — so without this both parties could sign the OLD shape
+    # while v2 was the live proposal, and the deliverable would end up contracted
+    # against something nobody was discussing. Observed on a real task whose picker
+    # offered v1 and v2 as equals.
+    #
+    # Only DRAFTS are superseded this way. A LOCKED v1 followed by a v2 is the ordinary
+    # renegotiation flow and is already refused above by the immutability check.
+    newest = conn.execute(
+        "SELECT MAX(version) AS v FROM contracts WHERE todo_id = ?", (todo["id"],)
+    ).fetchone()["v"]
+    if newest is not None and version < newest:
+        raise ValueError(
+            f"contract version {version}{scope_note} has been superseded by v{newest}, "
+            f"so it cannot be signed — signing it would agree a shape that was already "
+            f"replaced. Read the current one with get_contract(todo={todo['number']}) "
+            f"and sign that: lock_contract({newest}, todo={todo['number']})."
+        )
 
     # Record this signature (idempotent — signing twice is a no-op, not an error).
     conn.execute(

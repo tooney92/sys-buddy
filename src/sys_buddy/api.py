@@ -339,10 +339,23 @@ def _contract_for(conn, task_id: str, *, todo_id: int | None = None, is_host: bo
     data: dict = {}
     latest_vid = None
     latest_locked_vid = None
+    # The highest version in this chain. Anything below it that is still a DRAFT was
+    # superseded by a later proposal — nobody may sign it (state.lock_contract refuses),
+    # so the picker must not offer it as an equal tab beside the live one. A locked or
+    # declined version is a different thing: those are decided, and worth reading back.
+    newest_version = max(c["version"] for c in contracts)
     for c in contracts:
         vid = f"v{c['version']}"
         locked = c["status"] == "locked"
-        versions.append({"id": vid, "locked": locked})
+        superseded = (
+            c["status"] == "draft" and c["version"] < newest_version
+        )
+        versions.append({
+            "id": vid,
+            "locked": locked,
+            "status": c["status"],
+            "superseded": superseded,
+        })
         latest_vid = vid
         if locked:
             latest_locked_vid = vid

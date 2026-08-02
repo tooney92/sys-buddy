@@ -757,3 +757,68 @@ def test_criteria_are_not_pluralised_into_criterions(conn):
     ).fetchone()["body_json"]
     assert "(2 criteria)" in body
     assert "criterions" not in body
+
+
+# --------------------------------------------------------------------------- #
+# a superseded draft cannot be signed
+# --------------------------------------------------------------------------- #
+def test_signing_a_superseded_draft_is_refused(conn):
+    """Proposing v2 does NOT mark v1 as anything — it stays `draft` forever.
+
+    So without this guard both parties could sign the OLD shape while v2 was the live
+    proposal, and the deliverable would end up contracted against something nobody was
+    discussing. Found on a real task whose dashboard offered v1 and v2 as equal tabs;
+    reproduced by signing v1 to completion and watching it lock.
+
+    Only DRAFTS supersede this way. A LOCKED v1 followed by a v2 is the ordinary
+    renegotiation flow, and signing v1 again is already refused as immutable.
+    """
+    ag = _agents(conn)
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v1"), num)
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v2"), num)
+
+    with pytest.raises(ValueError, match="superseded by v2") as e:
+        state.lock_contract(conn, ag["backend"], 1, num)
+    # It must name the version to sign INSTEAD, or the agent has to go looking.
+    assert "lock_contract(2" in str(e.value)
+
+
+def test_the_current_version_still_signs(conn):
+    ag = _agents(conn)
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v1"), num)
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v2"), num)
+    state.lock_contract(conn, ag["backend"], 2, num)
+    r = state.lock_contract(conn, ag["mobile"], 2, num)
+    assert r["locked"] is True
+
+
+def test_a_locked_v1_under_a_v2_still_reports_immutable_not_superseded(conn):
+    """The renegotiation flow keeps its own, better-targeted message: v1 is not dead
+    scope, it is a decided agreement, and the advice differs."""
+    ag = _agents(conn)
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v1"), num)
+    state.lock_contract(conn, ag["backend"], 1, num)
+    state.lock_contract(conn, ag["mobile"], 1, num)
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v2"), num)
+
+    with pytest.raises(ValueError, match="already locked and immutable"):
+        state.lock_contract(conn, ag["backend"], 1, num)
+
+
+def test_the_dashboard_marks_a_superseded_draft(conn):
+    """It must not be offered as an equal tab beside the live one — nobody can sign it."""
+    from sys_buddy import api
+
+    ag = _agents(conn)
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v1"), num)
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v2"), num)
+
+    todo_id = todos.get_row(conn, "signin", num)["id"]
+    versions = api._contract_for(conn, "signin", todo_id=todo_id)["versions"]
+    by_id = {v["id"]: v for v in versions}
+    assert by_id["v1"]["superseded"] is True
+    assert by_id["v2"]["superseded"] is False
