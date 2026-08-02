@@ -360,3 +360,40 @@ def test_short_needles_go_through_the_word_boundary_floor():
     evasive = "I will finish the task on that device"
     assert readiness._grade_deliverable(evasive, OWNER_ROLE, "acme-site", "engagement")[0] is False
     assert readiness._grade_url(evasive, OWNER_ROLE, "acme-site", "engagement")[0] is False
+
+
+# --------------------------------------------------------------------------- #
+# the cache trap — a picture of the app as it used to be
+# --------------------------------------------------------------------------- #
+def test_the_owner_briefing_warns_about_cached_pages():
+    """A browser will serve a cached copy, and a cached page verifies an app that no
+    longer exists.
+
+    Found live: a check passed against a page whose button had already been deleted on
+    disk. This is worse than an ordinary flake because it fails in BOTH directions —
+    accepting work that is already broken, and rejecting a fix that already shipped —
+    and the agent is about to tell somebody their work is broken either way.
+    """
+    p = onboarding.owner_prompt("acme", staging_url="https://staging.example.com",
+                                handle="owner").lower()
+    assert "cach" in p
+    assert "fresh" in p
+    # It must give the actual technique, not just a warning: a query string the site
+    # ignores is the one thing that reliably defeats it.
+    assert "?fresh=1" in p or "query string" in p
+
+
+def test_the_owner_briefing_says_re_check_a_surprising_result():
+    """The specific moment the trap bites: something that worked yesterday is suddenly
+    gone. That is exactly when a stale page is most likely and most costly."""
+    p = onboarding.owner_prompt("acme", staging_url="https://staging.example.com",
+                                handle="owner").lower()
+    assert "surprise" in p or "surprises" in p
+    assert "before you report" in p
+
+
+def test_the_builders_briefing_is_not_given_the_cache_note():
+    """Devs are not the ones doing browser verification, and every line in a briefing
+    costs attention. Guidance goes where it is acted on."""
+    dev = onboarding.role_prompt("frontend", "acme", staging_url=None, mode="engagement")
+    assert "?fresh=1" not in dev

@@ -592,12 +592,21 @@ def record_result(
     )
     _maybe_confirm(conn, run["task_id"], run_id)
     conn.commit()
-    return _result_dict(
+    out = _result_dict(
         conn,
         conn.execute(
             "SELECT * FROM verification_results WHERE id = ?", (cur.lastrowid,)
         ).fetchone(),
     )
+    # What this result DID to the engagement, so no caller has to infer it.
+    # Filing a verdict can confirm the task, un-confirm it, or leave it alone, and
+    # which of the three happened is not derivable from the result row. Reporting it
+    # here is how a summary says "and the engagement is now X" without guessing —
+    # a guess that was wrong by one line the first time this was demoed live.
+    out["task_state"] = conn.execute(
+        "SELECT state FROM tasks WHERE id = ?", (run["task_id"],)
+    ).fetchone()["state"]
+    return out
 
 
 def accepted_everything(conn, task_id: str, run_id: int) -> bool:
