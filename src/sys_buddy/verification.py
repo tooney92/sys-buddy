@@ -590,12 +590,73 @@ def record_result(
             "strength": strength,
         },
     )
+    _maybe_confirm(conn, run["task_id"], run_id)
     conn.commit()
     return _result_dict(
         conn,
         conn.execute(
             "SELECT * FROM verification_results WHERE id = ?", (cur.lastrowid,)
         ).fetchone(),
+    )
+
+
+def accepted_everything(conn, task_id: str, run_id: int) -> bool:
+    """Has this run accepted EVERY live deliverable?
+
+    Deliberately not ``coverage()``: that counts *presence* — whether a result exists —
+    and its own docstring warns it is not a judgement. This asks the harder question, and
+    it is the one the client's acceptance turns on.
+
+    A deliverable counts as accepted when the run filed an ``accepted`` verdict for the
+    DELIVERABLE ITSELF (``spec_id IS NULL``) or for any claim made about it. One rejected
+    verdict anywhere is enough to withhold confirmation — a client does not accept four
+    fifths of what he asked for.
+    """
+    rows = conn.execute(
+        """
+        SELECT d.id AS id,
+               SUM(CASE WHEN r.verdict = ? THEN 1 ELSE 0 END) AS ok,
+               SUM(CASE WHEN r.verdict = ? THEN 1 ELSE 0 END) AS bad
+          FROM deliverables d
+     LEFT JOIN verification_results r
+            ON r.deliverable_id = d.id AND r.run_id = ?
+         WHERE d.task_id = ? AND d.withdrawn_at IS NULL
+      GROUP BY d.id
+        """,
+        (ACCEPTED, REJECTED, run_id, task_id),
+    ).fetchall()
+    if not rows:
+        return False          # nothing commissioned is not the same as everything accepted
+    return all((r["ok"] or 0) > 0 and (r["bad"] or 0) == 0 for r in rows)
+
+
+def _maybe_confirm(conn, task_id: str, run_id: int) -> None:
+    """Move the task to ``confirmed`` once this run has accepted everything.
+
+    THIS IS THE COMMERCIAL END OF AN ENGAGEMENT — the client saying "this is what I asked
+    for", which is a different claim from `verified` ("the builders are done"). It is
+    computed rather than reported: no agent may declare it, because the whole point is
+    that it follows from what the owner's agent actually found.
+
+    Idempotent and quiet. A run that accepts two of three deliverables simply leaves the
+    task where it was, and the third landing later is what tips it — so the order results
+    are filed in does not matter.
+    """
+    if not accepted_everything(conn, task_id, run_id):
+        return
+    from . import state as _state
+
+    row = conn.execute("SELECT state FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or row["state"] == _state.CONFIRMED:
+        return
+    _state._transition(conn, task_id, _state.CONFIRMED)
+    _event(conn, task_id, "confirmed", {
+        "run_id": run_id,
+        "text": "the client accepted every deliverable — this engagement is confirmed",
+    })
+    _state._notify(
+        conn, task_id,
+        f"[{task_id}] CONFIRMED: the client accepted every deliverable on this engagement",
     )
 
 

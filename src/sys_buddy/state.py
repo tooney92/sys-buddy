@@ -52,8 +52,14 @@ TESTING = "testing"
 VERIFIED = "verified"
 STUCK = "stuck"
 RESOLVED = "resolved"  # debug tasks: terminal, reached from any non-terminal state
+# ENGAGEMENT tasks only, and strictly AFTER `verified`. There are two levels of done:
+# `verified` is the BUILDERS agreeing the work is finished, peer to peer; `confirmed` is
+# the CLIENT saying it is what he asked for, after his agent has gone and looked at every
+# deliverable. It is the commercial end of an engagement — the moment you would invoice —
+# and it is reached by a verification run, never reported by an agent.
+CONFIRMED = "confirmed"
 
-TERMINAL_STATES = frozenset({VERIFIED, STUCK, RESOLVED})
+TERMINAL_STATES = frozenset({VERIFIED, STUCK, RESOLVED, CONFIRMED})
 
 # --- report_status vocabulary -----------------------------------------------
 # The status strings an agent may pass to report_status. Named for what the agent

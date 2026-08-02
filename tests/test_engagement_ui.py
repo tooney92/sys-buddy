@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from sys_buddy import tools, verification
+from sys_buddy import state, tools, verification
 
 UI_HTML = (Path(tools.__file__).parent / "ui.html").read_text()
 
@@ -431,3 +431,177 @@ def test_no_engagement_key_is_read_outside_a_guarded_renderer(key):
             f"d.{key} is read outside a guarded engagement renderer: "
             f"{UI_HTML[at - 80: at + 80]!r}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# `confirmed` — the commercial end of an engagement
+# --------------------------------------------------------------------------- #
+# A task reaches `confirmed` when the owner's agent has run a verification and every
+# live deliverable came back accepted: the client saying "this is what I asked for".
+# It is strictly AFTER `verified` (the builders are done) and engagement-only — a
+# `contract` or `debug` task can never get there.
+#
+# Every check below is a rendering the state would otherwise get WRONG rather than
+# merely miss, because each one fails quietly: a raw key printed as a label, a
+# finished task sitting at step one, a node pulsing forever on delivered work. Spelled
+# as the literal string rather than read off `state`, because ui.html is the artefact
+# under test — the file has no build step and no import of the domain, so the string
+# living in it is the whole of what ships.
+CONFIRMED = "confirmed"
+
+
+def _js_map(name: str) -> str:
+    """The body of a top-level `var NAME={...};` table in ui.html."""
+    m = re.search(rf"^var {name}=\{{(.*?)\}};", UI_HTML, re.S | re.M)
+    assert m, f"ui.html has no {name} table"
+    return m.group(1)
+
+
+def _js_array(name: str) -> str:
+    """The body of a top-level `var NAME=[...];` list in ui.html."""
+    m = re.search(rf"^var {name}=\[(.*?)\];", UI_HTML, re.S | re.M)
+    assert m, f"ui.html has no {name} list"
+    return m.group(1)
+
+
+def _entry(table: str, key: str) -> str:
+    """The quoted value of one `key:'value'` pair."""
+    m = re.search(rf"\b{key}:'([^']*)'", table)
+    assert m, f"no {key} entry"
+    return m.group(1)
+
+
+def test_confirmed_has_a_chip_palette():
+    """`stateChip` builds `var(--st-<SK[state]>-…)`. With no SK row the state falls back
+    to the grey `open` palette, so the end of an engagement renders the same colour as a
+    task nobody has started."""
+    assert re.search(rf"\b{CONFIRMED}:", _js_map("SK")), "SK has no confirmed row"
+
+
+def test_confirmed_borrows_the_verified_palette_instead_of_owning_one():
+    """Green already means finished, and the two ends of an engagement differ by their
+    word, not their colour. Reuse is also the safe choice: see the theme test below."""
+    assert _entry(_js_map("SK"), CONFIRMED) == "verified"
+
+
+def test_no_confirmed_palette_variable_was_introduced():
+    assert "--st-confirmed-" not in UI_HTML, (
+        "confirmed defined its own CSS variables instead of reusing --st-verified-*"
+    )
+
+
+@pytest.mark.parametrize("part", ["bg", "fg", "dot"])
+def test_every_palette_a_state_names_is_defined_in_BOTH_themes(part):
+    """The reason a new palette key is a bigger change than it looks. `stateChip` writes
+    `var(--st-K-bg)` with NO fallback, so a triple defined in `:root` and forgotten in
+    `[data-theme="dark"]` resolves to nothing at all — a chip with no background, no
+    text colour and no dot, which is invisible rather than merely wrong, and only in the
+    theme the author was not using."""
+    for key in sorted(set(re.findall(r":'([a-z_]+)'", _js_map("SK")))):
+        assert UI_HTML.count(f"--st-{key}-{part}:") == 2, (
+            f"--st-{key}-{part} is not defined in exactly the two themes"
+        )
+
+
+def test_confirmed_prints_a_label_and_not_the_raw_state_string():
+    """`SLAB[s]||s` — a missing row prints the key itself."""
+    assert re.search(rf"\b{CONFIRMED}:", _js_map("SLAB")), "SLAB has no confirmed row"
+
+
+def test_the_confirmed_label_reads_as_the_end():
+    """`debugChip` sets the precedent with `resolved ✓`: the last word on a task carries
+    the tick, because the bare adjective reads as one more stage in a list of stages —
+    and here the stage before it is `verified`, which already sounds like the end."""
+    label = _entry(_js_map("SLAB"), CONFIRMED)
+    assert "✓" in label, f"the confirmed chip reads {label!r}, with nothing marking it final"
+    assert label != _entry(_js_map("SLAB"), "verified"), (
+        "confirmed and verified print the same word, so the owner's sign-off is invisible"
+    )
+
+
+def test_confirmed_sits_after_verified_on_the_stepper():
+    """`ORDER` is the frontier index. A state missing from it takes `realO`'s 0 fallback,
+    so the most finished task on the board renders parked at step one."""
+    order = _js_map("ORDER")
+    confirmed = re.search(rf"\b{CONFIRMED}:(\d+)", order)
+    assert confirmed, "ORDER has no confirmed index"
+    verified = re.search(r"\bverified:(\d+)", order)
+    assert int(confirmed.group(1)) > int(verified.group(1)), (
+        "confirmed does not rank after verified"
+    )
+
+
+def test_confirmed_is_a_node_on_the_stepper_and_it_is_the_last_one():
+    """Without a node the `times['confirmed']` timestamp the API already collects has
+    nowhere to print, and the stepper's final tick lands on `verified` — the builders
+    finishing, not the client accepting."""
+    steps = re.findall(r"\['([a-z_]+)','[^']*'\]", _js_array("STEPS"))
+    assert CONFIRMED in steps, "STEPS has no confirmed node"
+    assert steps[-1] == CONFIRMED, f"confirmed is not the final node: {steps}"
+    assert steps.index(CONFIRMED) > steps.index("verified")
+
+
+def test_the_confirmed_node_is_engagement_only():
+    """A `contract`/`debug` task can never reach it, and a node that can never light is
+    worse than no node — it reads as work outstanding forever. genSteps takes the flag
+    and the task view is the one that supplies it."""
+    src = _fn("genSteps")
+    assert "STEPS.slice(" in src, "genSteps renders all of STEPS regardless of mode"
+    assert "genSteps(d.state, d.times, d.agents, isEngagement(d))" in UI_HTML, (
+        "the task view never tells genSteps whether this is an engagement"
+    )
+
+
+def test_a_confirmed_task_stops_pulsing():
+    """The frontier node renders `current` — a pulsing ring — which is the dashboard's
+    one way of saying someone is working on this right now. `verified` was special-cased
+    twice to render done instead; `confirmed` is the same kind of end and needs both."""
+    src = _fn("genSteps")
+    assert "stateName==='confirmed'" in src, "genSteps does not know confirmed is finished"
+    assert "stateName==='verified'" not in re.sub(
+        r"var finished = .*", "", src
+    ), "a hardcoded verified check survives outside the finished predicate"
+    assert "(finished && i===o)" in src, "the confirmed frontier node never renders done"
+    assert "!finished" in src, "the confirmed frontier node still renders as current"
+
+
+@pytest.mark.parametrize("kind", ["confirmed", "resolved"])
+def test_the_message_that_ends_a_task_is_not_an_anonymous_grey_bubble(kind):
+    """`typeChip` falls back to `['message','open']`. The bubble that closes the whole
+    task is the last one a reader scrolls to, and unmapped it is indistinguishable from
+    chatter — which is what `resolved` has looked like since debug tasks shipped."""
+    src = _fn("typeChip")
+    assert re.search(rf"\b{kind}:\['", src), f"typeChip has no {kind} row"
+
+
+# --------------------------------------------------------------------------- #
+# "in flight" — a finished board is not a busy one
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("state_name", sorted(state.TERMINAL_STATES))
+def test_the_terminal_states_are_all_known_to_the_dashboard(state_name):
+    """Read out of `state.TERMINAL_STATES` rather than retyped, so a state that becomes
+    terminal in the domain and is forgotten here fails instead of quietly being counted
+    as live work forever."""
+    assert re.search(rf"\b{state_name}:", _js_map("TERMINAL")), (
+        f"{state_name} is not counted as terminal"
+    )
+
+
+def test_the_dashboard_invents_no_terminal_state_of_its_own():
+    """The other direction: a word the page treats as finished and the broker does not."""
+    keys = set(re.findall(r"(\w+):1", _js_map("TERMINAL")))
+    assert keys == set(state.TERMINAL_STATES), (
+        f"ui.html's TERMINAL disagrees with the domain: {keys ^ set(state.TERMINAL_STATES)}"
+    )
+
+
+def test_the_in_flight_count_excludes_finished_tasks():
+    """The header counted `state.tasks.length` — every row on the page — so a board of
+    ten finished tasks announced "10 in flight". A `confirmed` engagement is the sharpest
+    case: the client has signed it off and the invoice is out."""
+    src = _fn("listHTML")
+    assert "state.tasks.length+' in flight'" not in src, (
+        "the header still counts every task as in flight"
+    )
+    assert "TERMINAL[t.state]" in src, "the count does not consult the terminal states"
+    assert "+inFlight+' in flight" in src

@@ -581,7 +581,9 @@ def test_every_run_and_result_lands_in_the_event_log(conn, engagement):
         "SELECT detail_json FROM events WHERE kind = 'verification' ORDER BY id"
     ).fetchall()
     actions = [json.loads(row["detail_json"])["action"] for row in rows]
-    assert actions == ["spec_submitted", "run_started", "result_recorded"]
+    # `confirmed` rides along because this run accepted the only live deliverable —
+    # the client's acceptance is a fact about the engagement, so it belongs in the log.
+    assert actions == ["spec_submitted", "run_started", "result_recorded", "confirmed"]
 
 
 # --------------------------------------------------------------------------- #
@@ -664,3 +666,85 @@ def test_a_dropped_todo_does_not_block_the_run(conn, engagement):
         verification.start_run(conn, engagement["owner"], "https://staging.example.com"),
         int,
     )
+
+
+# --------------------------------------------------------------------------- #
+# `confirmed`: the client's acceptance, computed and never reported
+# --------------------------------------------------------------------------- #
+def _task_state(conn, task_id):
+    return conn.execute("SELECT state FROM tasks WHERE id = ?", (task_id,)).fetchone()["state"]
+
+
+def test_accepting_every_deliverable_confirms_the_engagement(conn, engagement):
+    """The commercial end of an engagement, and a different claim from `verified`.
+
+    `verified` is the BUILDERS saying the work is done. `confirmed` is the CLIENT saying
+    it is what he asked for, after his agent went and looked. It is computed from what
+    the run actually found — no agent may declare it.
+    """
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    assert _task_state(conn, engagement["task_id"]) != "confirmed"
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_one_rejection_withholds_confirmation(conn, engagement):
+    """A client does not accept four fifths of what he asked for."""
+    d2 = claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    verification.record_result(conn, run, d2, "rejected", "verified", "sends no email")
+    assert _task_state(conn, engagement["task_id"]) != "confirmed"
+    assert verification.accepted_everything(conn, engagement["task_id"], run) is False
+
+
+def test_a_partly_filed_run_does_not_confirm_early(conn, engagement):
+    """Order must not matter: two of three accepted leaves the task alone, and the third
+    landing later is what tips it."""
+    d2 = claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) != "confirmed"
+    verification.record_result(conn, run, d2, "accepted", "verified", "emails arrive")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_a_withdrawn_deliverable_is_not_waited_for(conn, engagement):
+    """Scope the owner dropped cannot hold his own confirmation hostage."""
+    d2 = claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    conn.execute("UPDATE deliverables SET withdrawn_at = ? WHERE id = ?", (time.time(), d2))
+    conn.commit()
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_a_confirmed_task_survives_a_rollup(conn, engagement):
+    """THE regression that makes the feature work at all.
+
+    `todos.apply_rollup` fires on every contract proposal, lock, reopen and todo report,
+    and can only ever derive one of the six march states. Without `confirmed` in its
+    do-not-overwrite tuple, the client's acceptance would be stomped back to `verified`
+    the moment anybody touched anything.
+    """
+    from sys_buddy import todos as _todos
+
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+    _todos.apply_rollup(conn, engagement["task_id"])
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_confirmation_is_idempotent(conn, engagement):
+    """A second run over already-accepted scope must not re-fire the notification."""
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    run2 = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run2, engagement["d1"], "accepted", "verified", "still")
+    confirms = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE kind = 'verification' "
+        "AND detail_json LIKE '%\"action\": \"confirmed\"%'"
+    ).fetchone()[0]
+    assert confirms == 1

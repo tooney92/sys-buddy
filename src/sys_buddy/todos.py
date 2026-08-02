@@ -391,7 +391,18 @@ def apply_rollup(conn, task_id: str) -> str | None:
     if roll is None:
         return None
     current = conn.execute("SELECT state FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    if current is not None and current["state"] in (_state.STUCK, _state.RESOLVED):
+    # THE ROLLUP DOES NOT OVERWRITE A HUMAN-LEVEL VERDICT.
+    #
+    # `stuck`/`resolved` are escalations about the whole collaboration; only a human
+    # reopens one. `confirmed` joins them for a different reason and it is the one that
+    # makes engagement mode work at all: the rollup can only ever derive one of the six
+    # march states, so a task the client has CONFIRMED would be silently stomped back to
+    # `verified` by the very next rollup pass — which fires on every contract proposal,
+    # every lock, every reopen and every todo report. The client's acceptance would
+    # evaporate the moment anyone touched anything.
+    if current is not None and current["state"] in (
+        _state.STUCK, _state.RESOLVED, _state.CONFIRMED
+    ):
         return current["state"]
     return _state._transition(conn, task_id, roll["state"])
 
