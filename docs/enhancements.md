@@ -1,4 +1,4 @@
-# Enhancements — planned, not built
+# Enhancements — items 1–4 BUILT (`feat/engagement-mode`)
 
 > We cannot eliminate 100% of issues with humans. What we offer is that the owner can now
 > have **due representation in a domain he is usually alien to.**
@@ -7,9 +7,45 @@ That is the promise everything below is measured against. Not "we catch fraud" �
 cannot be kept, and claiming it would give a non-technical owner exactly the false
 confidence he is paying to be rid of.
 
-Working list. We settle **one item at a time**: talk it through first, and only when it is
-decided does its design get written in here. Nothing in this file is implemented until it
-has a section below AND that section says so.
+Working list. We settled **one item at a time**: talk it through first, and only when it was
+decided did its design get written in here.
+
+**Items 1–4 are now built** on `feat/engagement-mode` — schema, domain, tools, API,
+dashboard and briefings — and proven live against a four-seat session. Items 5 and 6 were
+closed without building anything. What follows is still the design record; the sections
+below say what was decided and why, and the section at the very end says what the LIVE
+SESSION changed about it.
+
+## What the live session changed
+
+Five rules in this feature were not designed here. They came out of the owner watching a
+real dashboard and asking why it said what it said, and they are load-bearing enough that
+reading the design without them would mislead:
+
+1. **Two levels of done.** The dashboard read *"0 of 3 verified"* on the todos while the
+   owner's register already claimed *"Verified — this ran"*. He had tested work the devs
+   never said was finished. A run is now refused while any linked todo is unfinished:
+   todo `verified` is the BUILDERS agreeing, and only then may the client look.
+2. **An unclaimed deliverable blocks the run.** A mobile-layout deliverable passed because
+   the landing-page work happened to satisfy it — no todo named it, so no contract covered
+   it, so nothing had been agreed about HOW. It should never have been checkable, and
+   nobody had committed to keeping it working. (This REVERSES an escape hatch written a
+   few hours earlier on the reasoning that there was "nothing to wait for".)
+3. **Solo todos, engagement only.** A landing page does not need two devs. On a peer task
+   the second seat IS the accountability; an engagement has an outer ring — the deliverable
+   agreed with the client and the run that checks it — so conscripting a second dev to
+   rubber-stamp work would be worse than no signature.
+4. **The producer may check a SOLO engagement todo.** Discovered as a deadlock: "the
+   producer doesn't report checks on its own work" meant a solo todo could never reach
+   `verified`, so the run was refused forever, so nothing was ever checked by anyone. The
+   rule that exists to stop unchecked work was preventing all checking.
+5. **`confirmed` — the client's acceptance as a task state.** Suggested by the owner mid-
+   build. `verified` means the builders are done; `confirmed` means the client accepts,
+   after a run in which every live deliverable came back accepted. It is the commercial end
+   of an engagement and the moment you would invoice, and it is COMPUTED, never reported.
+
+The pattern is worth keeping: none of the five would have been found by a test, and four of
+them are refusals rather than features.
 
 ## One principle, stated once
 
@@ -91,10 +127,10 @@ up below, ready to build.
 
 | # | item | status |
 |---|---|---|
-| 1 | **Engagement mode** — a third task mode for commissioned work (client ↔ hired devs), alongside `contract` and `debug` | **settled** |
-| 2 | **Guidelines per role** — host-set rules a role's agent must work within | **settled** |
-| 3 | **Verification specs** — what a dev leaves behind so the owner's agent can check his claim: prose, bound to a deliverable, with the contract versions stamped by the broker | **settled** |
-| 4 | **Running a verification** — who starts a run, and what happens to the result: logged in full, latest shown | **settled** |
+| 1 | **Engagement mode** — a third task mode for commissioned work (client ↔ hired devs), alongside `contract` and `debug` | **BUILT** |
+| 2 | **Guidelines per role** — host-set rules a role's agent must work within | **BUILT** |
+| 3 | **Verification specs** — what a dev leaves behind so the owner's agent can check his claim: prose, bound to a deliverable, with the contract versions stamped by the broker | **BUILT** |
+| 4 | **Running a verification** — who starts a run, and what happens to the result: logged in full, latest shown | **BUILT** |
 | 5 | **Scope above the task** — where verification specs live so they outlive the task and the contractor | **closed** — not needed; the owner's receipt already does this |
 | 6 | **Start a milestone from the last one** — copy config and people into a new task | **closed** — a new milestone is new; copying carries stale config and departed people |
 
@@ -121,7 +157,7 @@ something already solved on the owner's machine.
 
 # 1 · Engagement mode
 
-**Status: settled. Not built.**
+**Status: settled and BUILT.**
 
 ## The problem
 
@@ -460,7 +496,7 @@ What is deliberately **out of scope** rather than undecided:
 
 # 2 · Guidelines per role
 
-**Status: settled. Not built.**
+**Status: settled and BUILT.**
 
 ## The problem
 
@@ -608,7 +644,7 @@ decided, and deliberately not invented here to keep this item cheap.
 
 # 3 · Verification specs
 
-**Status: settled. Not built.**
+**Status: settled and BUILT.**
 
 ## The problem
 
@@ -792,7 +828,7 @@ Two things make that stick rather than being merely hoped for:
 
 # 4 · Running a verification
 
-**Status: settled. Not built.**
+**Status: settled and BUILT.**
 
 ## What is left of this item
 
