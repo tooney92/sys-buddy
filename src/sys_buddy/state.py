@@ -40,7 +40,7 @@ import re
 import sqlite3
 import time
 
-from . import config, contracts, notify, seats, service, todos
+from . import config, contracts, deliverables, notify, seats, service, todos
 from .identity import Identity
 
 # --- states -----------------------------------------------------------------
@@ -872,6 +872,11 @@ def propose_contract(conn, identity: Identity, spec: dict, number: int | None = 
     # person on one box, where http://localhost:PORT is correct), and the GUI always
     # runs the broker in remote mode for token auth so is_remote alone cannot tell them
     # apart. See contracts.validate_staging_url.
+    # ENGAGEMENT GATE — see the matching call in `todos.propose_todo`. Gating todos
+    # already covers this transitively (no todos means no contracts), so this is the
+    # belt to that braces: a task switched to `engagement` while it already held todos
+    # would otherwise let a contract through on unagreed scope. A no-op off engagement.
+    deliverables.assert_can_build(conn, identity.task_id, "propose a contract")
     errors = contracts.validate_spec(
         spec,
         is_remote=config.get_config().is_remote,

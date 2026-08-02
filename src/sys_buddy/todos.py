@@ -47,7 +47,7 @@ import json
 import sqlite3
 import time
 
-from . import service
+from . import deliverables, service
 from .identity import Identity
 
 # --- the DERIVED agreement stage (todos.status) ------------------------------
@@ -548,6 +548,17 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
     directs it", and todos follow the identical rule.
     """
     _assert_task_usable(conn, identity.task_id)
+    # ENGAGEMENT GATE. On commissioned work nothing may be built until the client's
+    # deliverable list is agreed — an engagement with no agreed scope has nothing to
+    # build, exactly as a task with no todos has nothing to contract. A no-op on
+    # `contract`/`debug` tasks, which have no client and no list.
+    #
+    # It lives HERE, in the domain layer, and deliberately not in middleware's
+    # ACTION_TOOLS gate: that whole gate sits inside `if cfg.is_remote`, so a rule
+    # placed there would silently not apply to `sys-buddy local` — which is how this
+    # gets demoed and how CLAUDE.md says to test. It would look enforced and not be.
+    # The domain layer can also refuse USEFULLY, naming who has not accepted yet.
+    deliverables.assert_can_build(conn, identity.task_id, "propose a todo")
     title, scope = _assert_text(title, scope)
     parties = _validate_parties(conn, identity.task_id, parties)
     if identity.role not in parties:
