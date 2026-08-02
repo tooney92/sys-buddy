@@ -1373,6 +1373,16 @@ def _mint_host_seat(
     conn = connect()
     try:
         res = pairing.redeem_invite(conn, code, agent_name="host")
+        # Record WHICH SEAT the host holds, rather than leaving it to be inferred from
+        # join order. The positional rule is correct here — this redemption happens
+        # in-process, before any invite link goes out — but it is only correct by
+        # accident of timing, and it hands host authority to the first buddy on a task
+        # where the host takes no seat of his own. The handle, not the agent id, so
+        # rotating the host's token keeps the seat.
+        conn.execute(
+            "UPDATE tasks SET host_handle = ? WHERE id = ?", (res["handle"], task_id)
+        )
+        conn.commit()
     finally:
         conn.close()
     mcp_url = f"{base_url}/mcp"  # match the buddy pairing flow's mcp_url convention

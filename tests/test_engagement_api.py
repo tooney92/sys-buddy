@@ -510,3 +510,53 @@ def test_a_deliverable_nobody_has_picked_up_renders_with_no_todos(conn):
     detail = api._task_detail(conn, "acme")
     assert [r["todos"] for r in detail["deliverables"]["rows"]] == [[], [], []]
     assert detail["verification"]["run"] is None
+
+
+# --------------------------------------------------------------------------- #
+# per-dev attribution: who claimed what, and was his claim true
+# --------------------------------------------------------------------------- #
+def test_each_devs_claim_carries_its_own_verdict(conn):
+    """The attribution the whole spec model exists for.
+
+    `result` on the deliverable answers the owner's question — did I get the thing I
+    asked for. THIS answers the other one: who claimed what, and was his claim true. A
+    dev who claims work he did not do is caught at his own claim rather than hidden
+    inside a deliverable that mostly works.
+    """
+    ag = _engagement(conn, roles=("frontend", "frontend-2", "owner"))
+    deliverables.propose_deliverables(conn, ag["owner"], ["a landing page"])
+    deliverables.accept_deliverables(conn, ag["frontend"])
+    deliverables.accept_deliverables(conn, ag["frontend-2"])
+    todo_id = _todo(conn, "acme", 1)
+    deliverables.link_todo(conn, todo_id, [1])
+
+    james = verification.submit_spec(conn, ag["frontend"], 1, "added the shell", "the hero")
+    john = verification.submit_spec(conn, ag["frontend-2"], 1, "added 3 buttons", "below it")
+
+    run = verification.start_run(conn, ag["owner"], "https://staging.example.com")
+    verification.record_result(conn, run, james["deliverable_id"], "accepted", "verified",
+                               "shell renders", spec_id=james["id"])
+    verification.record_result(conn, run, john["deliverable_id"], "rejected", "verified",
+                               "found 2", spec_id=john["id"])
+
+    specs = api._task_detail(conn, "acme")["deliverables"]["rows"][0]["specs"]
+    by_role = {s["role"]: s for s in specs}
+    assert by_role["frontend"]["result"]["verdict"] == "accepted"
+    assert by_role["frontend-2"]["result"]["verdict"] == "rejected"
+    assert by_role["frontend-2"]["result"]["detail"] == "found 2"
+    # The label is computed server-side so the page never maps `evidence` itself.
+    assert by_role["frontend"]["result"]["strength_label"]
+
+
+def test_an_unjudged_claim_carries_no_result_key_at_all(conn):
+    """ABSENT, never a placeholder. An unmarked claim must not be mistakable for a
+    passed one — the same reason `not_checked` is said out loud everywhere else."""
+    ag = _engagement(conn)
+    _scope(conn, ag)
+    todo_id = _todo(conn, "acme", 1)
+    deliverables.link_todo(conn, todo_id, [1])
+    verification.submit_spec(conn, ag["frontend"], 1, "built it", "on the page")
+
+    specs = api._task_detail(conn, "acme")["deliverables"]["rows"][0]["specs"]
+    assert specs[0]["claim"] == "built it"
+    assert "result" not in specs[0]

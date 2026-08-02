@@ -84,21 +84,35 @@ def _now() -> float:
 def _host_row(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
     """The host's own agent row: the FIRST seat ever filled on the task.
 
-    THIS IS THE ONE SEAM IN THE MODULE. The schema carries no explicit "this agent is
-    the host" marker, so the host is identified positionally: ``onboarding._mint_host_seat``
-    redeems the host's invite IN-PROCESS during ``host_setup``, before any invite link
-    has been sent, let alone redeemed — so the host's agent row is the earliest one on
-    the task. Every other seat arrives later, over ``/pair``.
+    Read from ``tasks.host_handle``, which ``onboarding._mint_host_seat`` stamps when it
+    seats the host. Explicit, so it does not depend on join order.
 
-    The consequence to know: on a task where the host took NO seat of his own, the
-    first buddy to join inherits this authority. If an explicit marker is ever added
-    (``agents.is_host``, or a host seat recorded on ``tasks``), THIS FUNCTION is the
-    only thing that has to change.
+    FALLING BACK TO THE POSITIONAL RULE is deliberate and not laziness. `host_handle`
+    arrived by ALTER TABLE, so every task created before it is NULL and there is nothing
+    to backfill from except join order — which is what the old rule already used. So the
+    old behaviour is the fallback rather than a migration that would guess.
 
-    Ordering is by ``id``, over every row including revoked ones, and the HANDLE is
-    what gets compared — so rotating the host's token (revoke + re-seat) keeps the same
-    seat and does not hand the role to whoever happens to be earliest afterwards.
+    The old rule: the host's agent row is the earliest on the task, because
+    ``_mint_host_seat`` redeems his invite IN-PROCESS during ``host_setup``, before any
+    invite link has been sent. True, but only by accident of timing — and on a task where
+    the host took no seat of his own, it hands this authority (today: who may set
+    guidelines) to whichever buddy happened to join first. That is the hole the column
+    closes for every task made from here on.
+
+    Either way the HANDLE is what gets compared, never the agent id, so rotating the
+    host's token (revoke + re-seat) keeps the same seat.
     """
+    row = conn.execute(
+        "SELECT host_handle FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row is not None and row["host_handle"]:
+        seated = conn.execute(
+            "SELECT handle, role FROM agents WHERE task_id = ? AND handle = ? "
+            "ORDER BY id LIMIT 1",
+            (task_id, row["host_handle"]),
+        ).fetchone()
+        if seated is not None:
+            return seated
     return conn.execute(
         "SELECT handle, role FROM agents WHERE task_id = ? ORDER BY id LIMIT 1",
         (task_id,),
@@ -353,9 +367,14 @@ def set_guidelines(
             [(aid,) for aid, _h in affected],
         )
 
+    # Its OWN kind, matching `deliverables` and `verification`. It first borrowed `task`
+    # to avoid touching the dashboard's kind vocabulary — but that buried a change to the
+    # standards people are graded on among task chatter, unfilterable and uncoloured. A
+    # guideline edit re-triggers an assessment for everyone in that role; it is exactly
+    # the kind of thing someone scrolls the log looking for.
     conn.execute(
         "INSERT INTO events (task_id, kind, detail_json, created_at) VALUES (?,?,?,?)",
-        (task_id, "task",
+        (task_id, "guidelines",
          json.dumps({
              "action": "guidelines_set",
              "role_type": role_type,

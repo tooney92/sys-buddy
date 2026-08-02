@@ -1408,6 +1408,15 @@ def init_db(db_path: Path | str | None = None) -> Path:
         # no constraint); the BACKFILL needs JSON, so it lives in `_migrate_seat_roles`.
         if "seat_roles_json" not in task_cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN seat_roles_json TEXT")
+        # Migration: which SEAT the host holds, recorded explicitly instead of inferred.
+        # The host used to be identified positionally — the earliest agent row on the
+        # task, which is true because `onboarding._mint_host_seat` redeems his invite
+        # in-process before any link goes out. That holds until it doesn't: on a task
+        # where the host takes no seat, the first buddy to join silently inherits host
+        # authority (today: who may set guidelines). Nullable, and readers fall back to
+        # the positional rule, so every existing task keeps behaving exactly as it does.
+        if "host_handle" not in task_cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN host_handle TEXT")
         # Migration: key contracts to a todo. Added nullable because ALTER TABLE cannot
         # add a NOT NULL column without a default; the rows it creates are adopted by a
         # todo in `_migrate_contracts_onto_todos` below, and the column becomes NOT NULL

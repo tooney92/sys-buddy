@@ -434,3 +434,45 @@ def test_a_refused_write_logs_nothing(conn):
     assert conn.execute(
         "SELECT COUNT(*) c FROM events WHERE task_id = 'signin'"
     ).fetchone()["c"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# the host is recorded, not inferred from join order
+# --------------------------------------------------------------------------- #
+def test_the_recorded_host_wins_over_join_order(conn):
+    """`tasks.host_handle` is explicit; join order was only ever correct by accident.
+
+    The old rule took the earliest agent row, which holds because the host's invite is
+    redeemed in-process before any link goes out. But on a task where the host takes no
+    seat of his own, it silently hands host authority to whichever buddy joined first.
+    """
+    agents = _seed_cast(conn)                       # backend seated FIRST
+    conn.execute("UPDATE tasks SET host_handle = 'frontend' WHERE id = 'signin'")
+    conn.commit()
+    assert guidelines.host_seat(conn, "signin") == "frontend"
+
+    guidelines.set_guidelines(conn, agents["frontend"], "backend", [TAILWIND])
+    with pytest.raises(ValueError, match="host"):
+        guidelines.set_guidelines(conn, agents["backend"], "frontend", [TAILWIND])
+
+
+def test_join_order_still_decides_when_no_host_was_recorded(conn):
+    """`host_handle` arrived by ALTER TABLE, so every pre-existing task is NULL and there
+    is nothing to backfill from except join order — which is what the old rule used. The
+    fallback keeps those tasks behaving exactly as they did."""
+    agents = _seed_cast(conn)
+    assert conn.execute(
+        "SELECT host_handle FROM tasks WHERE id = 'signin'"
+    ).fetchone()["host_handle"] is None
+    assert guidelines.host_seat(conn, "signin") == "backend"
+    guidelines.set_guidelines(conn, agents["backend"], "frontend", [TAILWIND])
+
+
+def test_a_recorded_host_who_never_seated_falls_back(conn):
+    """A handle naming a seat nobody filled must not lock the task out of guidelines
+    entirely — better the old behaviour than no behaviour."""
+    agents = _seed_cast(conn)
+    conn.execute("UPDATE tasks SET host_handle = 'nobody' WHERE id = 'signin'")
+    conn.commit()
+    assert guidelines.host_seat(conn, "signin") == "backend"
+    guidelines.set_guidelines(conn, agents["backend"], "frontend", [TAILWIND])

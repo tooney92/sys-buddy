@@ -709,6 +709,43 @@ def _result_for(results: list[dict]) -> dict | None:
     return {k: row[k] for k in ("verdict", "strength", "strength_label", "detail")}
 
 
+def _specs_with_verdicts(specs: list[dict], results: list[dict]) -> list[dict]:
+    """Each dev's claim, carrying the verdict on THAT claim — or none at all.
+
+    This is the half of the register :func:`_result_for` deliberately does not answer.
+    That one says *did the owner get the thing he asked for*; this says **who claimed
+    what, and was his claim true** — which is the attribution the whole spec model
+    exists for. A dev who claims work he did not do is caught at his own claim, rather
+    than hidden inside a deliverable that mostly works:
+
+        James  "added the shell"      ✓
+        John   "added 3 buttons"      ✗ found 2
+
+    ``result`` is ABSENT, never a placeholder, when the latest run filed nothing against
+    that claim. The renderer draws no mark in that case, because an unmarked claim must
+    never be mistakable for a passed one — the same reason `not_checked` is said out loud
+    rather than left blank everywhere else in this feature.
+
+    Only the newest row per spec is used: `record_result` allows one verdict per claim
+    per run, so a second would mean the log had stopped saying what a run concluded.
+    """
+    by_spec: dict[int, dict] = {}
+    for r in results:
+        if r["spec_id"] is not None:
+            by_spec[r["spec_id"]] = r
+
+    out = []
+    for s in specs:
+        projected = {k: s[k] for k in ("role", "name", "claim", "how", "staleness")}
+        verdict = by_spec.get(s["id"])
+        if verdict is not None:
+            projected["result"] = {
+                k: verdict[k] for k in ("verdict", "strength", "strength_label", "detail")
+            }
+        out.append(projected)
+    return out
+
+
 def _engagement_for(conn, task_id: str, *, is_host: bool = True) -> dict:
     """The engagement keys for ``_task_detail`` — or ``{}`` for every other task.
 
@@ -750,10 +787,10 @@ def _engagement_for(conn, task_id: str, *, is_host: bool = True) -> dict:
             # The translation back into the team's register: the work that serves this
             # outcome, by the `#N` a human types.
             "todos": d["todos"],
-            "specs": [
-                {k: s[k] for k in ("role", "name", "claim", "how", "staleness")}
-                for s in verification.specs_for(conn, d["id"])
-            ],
+            "specs": _specs_with_verdicts(
+                verification.specs_for(conn, d["id"]),
+                latest["by_deliverable"].get(d["id"], []),
+            ),
             "result": _result_for(latest["by_deliverable"].get(d["id"], [])),
         })
 

@@ -237,7 +237,11 @@ function typeChip(type,pass){
 /* `todo` is ONE event kind carrying the specific action inside (api._event), so this
    vocabulary stays fixed as the todo actions grow. Every other palette dot is already
    spoken for, hence accent-2 — distinct from slack's accent, and not a role colour. */
-function eventColor(kind){ return ({transition:'var(--st-proposed-dot)',lock:'var(--st-locked-dot)',deploy:'var(--st-live-dot)',test:'var(--st-testing-dot)',slack:'var(--accent)',token:'var(--st-open-dot)',task:'var(--st-open-dot)',todo:'var(--accent-2)'})[kind]||'var(--st-open-dot)'; }
+/* Every kind the broker actually writes needs a row here, or it renders in the
+   fallback grey and reads as background noise. `deliverable`, `verification` and
+   `guidelines` are the engagement kinds; `resolved` is a pre-existing gap — a debug
+   task's terminal event was uncoloured and unfilterable. */
+function eventColor(kind){ return ({transition:'var(--st-proposed-dot)',lock:'var(--st-locked-dot)',deploy:'var(--st-live-dot)',test:'var(--st-testing-dot)',slack:'var(--accent)',token:'var(--st-open-dot)',task:'var(--st-open-dot)',todo:'var(--accent-2)',deliverable:'var(--accent)',verification:'var(--st-verified-dot)',guidelines:'var(--st-locked-dot)',resolved:'var(--st-verified-dot)'})[kind]||'var(--st-open-dot)'; }
 
 /* small inline SVGs */
 function svg(w,inner){ return '<svg width="'+w+'" height="'+w+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'+inner+'</svg>'; }
@@ -2000,7 +2004,9 @@ function reviewAsideHTML(d, t){
 function eventLogHTML(d){
   /* `slack` stays for events written before notifications went multi-channel; new rows
    are `notify`. Dropping it would make old rows unfilterable. */
-  var FILTERS=['all','transition','lock','deploy','test','notify','slack','token'];
+  /* The engagement kinds are appended rather than woven in, so a peer task's filter
+   row is unchanged in both content and order. */
+  var FILTERS=['all','transition','lock','deploy','test','notify','slack','token','todo','deliverable','verification','guidelines'];
   /* `todo` joins the vocabulary only for a task that HAS todos (incl. one whose todos
      were all dropped — its log still carries them), so a pre-todo task's filter row is
      exactly the row that shipped. */
