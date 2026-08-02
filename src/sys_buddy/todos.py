@@ -451,10 +451,28 @@ def _validate_parties(conn, task_id: str, parties: object) -> list[str]:
     ]
     if len(cleaned) != len(set(cleaned)):
         raise ValueError("parties must be unique (no duplicates)")
-    if len(cleaned) < 2:
+    # A SOLO todo is legitimate on an engagement, and only there.
+    #
+    # On a peer task the second seat IS the accountability: a contract with one
+    # signatory is not an agreement, it is a note to self, and nobody is positioned to
+    # say the work was actually done.
+    #
+    # An engagement has an outer ring a peer task does not — the deliverable list agreed
+    # with the client, and a verification run that checks it. One dev building a landing
+    # page alone still had to agree the deliverable with the owner, still locks a
+    # contract saying what he will build, and still gets checked against it by the
+    # owner's agent. The invariant holds ("we said we will build like this, and this is
+    # how we have built"); the counterparty is the client rather than a peer. Requiring a
+    # second dev there would just be conscripting somebody to rubber-stamp work they had
+    # nothing to do with, which is worse than no signature at all.
+    if len(cleaned) < 2 and not deliverables.is_engagement(conn, task_id):
         raise ValueError(
             "a todo binds at least TWO of the task's seats — one to produce the "
             "deliverable and one to build against it (same rule as a contract task's cast)"
+        )
+    if not cleaned:
+        raise ValueError(
+            "a todo binds at least one of the task's seats — name who is doing the work"
         )
     _assert_parties_ready(conn, task_id, cleaned)
     return cleaned

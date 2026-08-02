@@ -79,6 +79,32 @@ def _locked(conn, ag):
     return tools._op_accept_deliverables(ag["frontend"])
 
 
+def _claim_everything(conn, ag, task="acme"):
+    """Raise a finished todo against EVERY deliverable.
+
+    A verification run is refused while any live deliverable is unclaimed (no todo
+    means no contract, so nothing was agreed about how it gets built) or while any
+    linked todo is unfinished. Tests that just need to reach a run want this; the tests
+    that are ABOUT those two refusals build their own state.
+    """
+    import json as _json
+    import time as _time
+    for number in range(1, len(SCOPE) + 1):
+        d = conn.execute(
+            "SELECT id FROM deliverables WHERE task_id = ? AND number = ?", (task, number)
+        ).fetchone()["id"]
+        t = conn.execute(
+            "INSERT INTO todos (task_id, number, title, scope, parties_json, "
+            "proposed_role, state, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (task, number, f"work {number}", "scope", _json.dumps(["frontend"]),
+             "frontend", "verified", _time.time()),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO todo_deliverables (todo_id, deliverable_id) VALUES (?,?)", (t, d)
+        )
+    conn.commit()
+
+
 def _schemas(mode, tmp_path) -> dict:
     mcp = FastMCP("t")
     cfg = Config(mode=mode, db_path=tmp_path / f"{mode}.db")
@@ -347,6 +373,7 @@ def test_an_absolute_url_in_a_spec_is_refused_with_the_fix(conn):
 def test_only_the_owner_starts_a_run_and_it_covers_everything(conn):
     ag = _agents(conn)
     _locked(conn, ag)
+    _claim_everything(conn, ag)
     with pytest.raises(ValueError, match="only the owner starts a verification run"):
         tools._op_start_verification(ag["frontend"], "https://staging.example.com")
 
@@ -361,6 +388,7 @@ def test_only_the_owner_starts_a_run_and_it_covers_everything(conn):
 def test_a_result_files_against_the_open_run_and_can_name_one_devs_claim(conn):
     ag = _agents(conn)
     _locked(conn, ag)
+    _claim_everything(conn, ag)
     spec = tools._op_submit_spec(
         ag["frontend"], 1, "added 3 buttons", "below the hero on /"
     )
@@ -393,6 +421,7 @@ def test_recording_before_a_run_exists_says_what_to_do(conn):
 def test_a_made_up_strength_is_refused_and_teaches_the_three(conn):
     ag = _agents(conn)
     _locked(conn, ag)
+    _claim_everything(conn, ag)
     tools._op_start_verification(ag["owner"], "https://staging.example.com")
     with pytest.raises(ValueError) as e:
         tools._op_record_verification(ag["owner"], 1, "accepted", "looks_good", "fine")

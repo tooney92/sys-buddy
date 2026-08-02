@@ -638,10 +638,17 @@ function castChips(t, size, fs){
    UNJOINED SEATS ARE LISTED. A roster built only from joined agents cannot answer "who
    never accepted their invite?", which is precisely the state that silently stalls a
    task — and "4 of 5 joined" is the headline for exactly that reason. */
+/* A joined seat that is not currently parked in wait_for_message renders BLANK, not
+   "idle". We do not track whether a person is at their desk, and "idle" claimed we did
+   — it reads as a status about the human ("Kola is slacking") when all it ever meant was
+   "no agent is blocked on a read right this second", which is the normal state of an
+   agent that is busy working. The column still earns its place: a listening pill is a
+   real live signal, and the UNJOINED strings are the whole reason the roster lists seats
+   nobody has filled. */
 function rosterPresence(row){
   if(!row.joined) return row.invite_pending ? 'invite sent' : 'not invited yet';
   if(row.listening) return listenLabel(row);
-  return 'idle';
+  return '';
 }
 function rosterPanel(d){
   var r=d&&d.roster;

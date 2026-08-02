@@ -192,3 +192,49 @@ def test_the_gate_holds_in_local_mode(conn, tmp_path):
                            ["backend", "frontend"])
     finally:
         set_config(Config(mode="local", db_path=tmp_path / "x.db", port=8787))
+
+
+# --------------------------------------------------------------------------- #
+# solo todos: legitimate on an engagement, refused on a peer task
+# --------------------------------------------------------------------------- #
+def test_a_solo_todo_is_allowed_on_an_engagement(conn):
+    """One dev building a landing page alone does not need a second dev conscripted to
+    rubber-stamp it.
+
+    An engagement has an outer ring a peer task does not: the deliverable list agreed
+    with the client, and a verification run that checks it. Tony still agreed deliverable
+    #1 with the owner, still locks a contract saying what he will build, and still gets
+    checked against it by the owner's agent. The invariant holds — the counterparty is
+    the client instead of a peer.
+    """
+    ag = _agents(conn)
+    _agree_the_scope(conn, ag)
+    made = todos.propose_todo(conn, ag["frontend"], "Landing page", "shell + buttons",
+                              ["frontend"])
+    assert made["number"] == 1
+    # …and a solo contract locks on the one signature, because there is nobody else bound.
+    state.propose_contract(conn, ag["frontend"],
+                           {"screens": [{"name": "Landing", "states": ["default"]}]},
+                           made["number"])
+    state.lock_contract(conn, ag["frontend"], 1, made["number"])
+    row = todos.get_row(conn, "acme", made["number"])
+    assert row["state"] == "contract_locked"
+
+
+@pytest.mark.parametrize("mode", ["contract", "debug"])
+def test_a_solo_todo_is_still_refused_on_a_peer_task(conn, mode):
+    """On a peer task the second seat IS the accountability — a contract with one
+    signatory is a note to self, and nobody is positioned to say the work was done.
+    Nothing about engagement mode may loosen that."""
+    ag = _agents(conn, roles=("backend", "frontend"), mode=mode)
+    with pytest.raises(ValueError) as e:
+        todos.propose_todo(conn, ag["backend"], "Solo work", "scope", ["backend"])
+    assert "TWO" in str(e.value) or "debug tasks don't carry todos" in str(e.value)
+
+
+def test_a_todo_with_no_parties_is_refused_even_on_an_engagement(conn):
+    """Relaxing "at least two" must not become "none" — somebody has to be doing it."""
+    ag = _agents(conn)
+    _agree_the_scope(conn, ag)
+    with pytest.raises(ValueError, match="at least one"):
+        todos.propose_todo(conn, ag["frontend"], "Nobody's work", "scope", [])

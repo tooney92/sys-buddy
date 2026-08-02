@@ -94,6 +94,31 @@ def _todo(conn, task_id, number, title="the landing page", state="verified"):
     return cur.lastrowid
 
 
+def _claim_everything(conn, task_id="acme"):
+    """Raise a finished todo against EVERY deliverable.
+
+    A verification run is refused while any live deliverable is unclaimed (no todo means
+    no contract, so nothing was agreed about how it gets built) or while a linked todo is
+    unfinished. Tests that just need to REACH a run want this; the tests about those two
+    refusals live in `tests/test_verification.py` and build their own state.
+    """
+    unclaimed = conn.execute(
+        """
+        SELECT d.id, d.number FROM deliverables d
+         WHERE d.task_id = ? AND d.withdrawn_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM todo_deliverables td WHERE td.deliverable_id = d.id)
+        """,
+        (task_id,),
+    ).fetchall()
+    for row in unclaimed:
+        t = _todo(conn, task_id, 100 + row["number"], f"work {row['number']}")
+        conn.execute(
+            "INSERT INTO todo_deliverables (todo_id, deliverable_id) VALUES (?,?)",
+            (t, row["id"]),
+        )
+    conn.commit()
+
+
 def _viewer(conn, token="sbv_host"):
     seed_viewer(conn, "host", token, task_id=None)
     return resolve_viewer_token(conn, token)
@@ -161,6 +186,7 @@ def test_engagement_task_carries_the_full_shape(conn):
     spec = verification.submit_spec(
         conn, ag["frontend"], 1, "added the four buttons", "the landing page hero"
     )
+    _claim_everything(conn)
     run_id = verification.start_run(conn, ag["owner"], "https://staging.example.com")
     verification.record_result(
         conn, run_id, spec["deliverable_id"], "accepted", "verified", "clicked all four"
@@ -187,7 +213,10 @@ def test_engagement_task_carries_the_full_shape(conn):
     assert rows[0]["withdraw_reason"] is None
     # The two registers of one record: the owner's outcome, and the team's work for it.
     assert rows[0]["todos"] == [1]
-    assert rows[1]["todos"] == []
+    # Every live deliverable is claimed here because an UNCLAIMED one blocks the run —
+    # no todo means no contract, so nothing was agreed about how it gets built. The
+    # empty-todos rendering is asserted below, on a task with no run.
+    assert rows[1]["todos"] == [102]
 
     assert set(rows[0]["specs"][0]) == {"role", "name", "claim", "how", "staleness"}
     assert rows[0]["specs"][0]["role"] == "frontend"
@@ -259,6 +288,7 @@ def test_the_deliverable_level_verdict_wins_over_the_per_claim_ones(conn):
     _scope(conn, ag)
     james = verification.submit_spec(conn, ag["frontend"], 1, "added the shell", "the page")
     john = verification.submit_spec(conn, ag["backend"], 1, "added 3 buttons", "below hero")
+    _claim_everything(conn)
     run_id = verification.start_run(conn, ag["owner"], None)
     verification.record_result(
         conn, run_id, james["deliverable_id"], "accepted", "verified", None,
@@ -282,6 +312,7 @@ def test_per_claim_verdicts_alone_still_show_a_result(conn):
     ag = _engagement(conn)
     _scope(conn, ag)
     spec = verification.submit_spec(conn, ag["frontend"], 2, "wired the form", "the form")
+    _claim_everything(conn)
     run_id = verification.start_run(conn, ag["owner"], None)
     verification.record_result(
         conn, run_id, spec["deliverable_id"], "rejected", "evidence", "no email sent",
@@ -297,9 +328,11 @@ def test_only_the_latest_run_is_shown(conn):
     """Every run checks everything, so the latest run IS the answer — no stale ticks."""
     ag = _engagement(conn)
     _scope(conn, ag)
+    _claim_everything(conn)
     first = verification.start_run(conn, ag["owner"], None)
     d1 = api._task_detail(conn, "acme")["deliverables"]["rows"][0]["id"]
     verification.record_result(conn, first, d1, "rejected", "verified", "nothing there")
+    _claim_everything(conn)
     second = verification.start_run(conn, ag["owner"], None)
     verification.record_result(conn, second, d1, "accepted", "verified", "all four")
 
@@ -389,6 +422,7 @@ def test_the_change_token_moves_when_a_result_lands(conn):
     _viewer(conn)
 
     before = _detail_token(conn)
+    _claim_everything(conn)
     run_id = verification.start_run(conn, ag["owner"], None)
     started = _detail_token(conn)
     assert started != before, "the run itself is news — the owner is waiting on it"
@@ -438,6 +472,7 @@ def test_a_buddy_sees_the_engagement_block(conn):
     ag = _engagement(conn)
     _scope(conn, ag)
     spec = verification.submit_spec(conn, ag["frontend"], 1, "added the buttons", "the hero")
+    _claim_everything(conn)
     run_id = verification.start_run(conn, ag["owner"], None)
     verification.record_result(
         conn, run_id, spec["deliverable_id"], "accepted", "verified", None
@@ -461,3 +496,17 @@ def test_the_task_list_row_is_untouched(conn):
         "id", "title", "state", "mode", "roles", "seat_roles", "last", "strikes"
     }
     assert row["mode"] == "engagement"
+
+
+def test_a_deliverable_nobody_has_picked_up_renders_with_no_todos(conn):
+    """The empty case, on a task with no verification run.
+
+    It cannot be shown alongside a run any more: an unclaimed deliverable refuses the
+    run outright. But the dashboard still has to render the state — "No todo names this
+    yet" is how the owner learns nobody has taken his scope on.
+    """
+    ag = _engagement(conn)
+    _scope(conn, ag)
+    detail = api._task_detail(conn, "acme")
+    assert [r["todos"] for r in detail["deliverables"]["rows"]] == [[], [], []]
+    assert detail["verification"]["run"] is None

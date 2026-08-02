@@ -370,10 +370,43 @@ def _assert_the_work_is_finished(conn, task_id: str) -> None:
     that are nobody's fault, and either loses confidence in the team or in the checking.
     Both are worse than waiting.
 
-    A deliverable with NO todos does not block — there is nothing to wait for, and the
-    report already says out loud that no work names it. Withdrawn deliverables are out
-    of scope entirely.
+    A deliverable that NO todo claims also blocks, and that is the less obvious half.
+    It looks like there is nothing to wait for — but no todo means no contract, so
+    nothing was ever agreed about HOW it gets built. The invariant is "we said we will
+    build like this, and this is how we have built"; an unclaimed deliverable skips the
+    first half and then gets checked as though it had not. Observed live: the owner's
+    agent verified a mobile-layout deliverable that no todo named, purely because the
+    landing-page work happened to satisfy it. It passed, and it should never have been
+    checkable — the team had not agreed to build it at all.
+
+    The fix is a person's, and the refusal says which: raise a todo for it, or withdraw
+    it. Withdrawn deliverables are out of scope entirely.
     """
+    unclaimed = conn.execute(
+        """
+        SELECT d.number AS number, d.text AS text
+          FROM deliverables d
+         WHERE d.task_id = ?
+           AND d.withdrawn_at IS NULL
+           AND NOT EXISTS (
+                 SELECT 1 FROM todo_deliverables td
+                   JOIN todos t ON t.id = td.todo_id
+                  WHERE td.deliverable_id = d.id
+                    AND t.dropped_at IS NULL
+               )
+      ORDER BY d.number
+        """,
+        (task_id,),
+    ).fetchall()
+    if unclaimed:
+        named = ", ".join(f"#{r['number']} '{r['text']}'" for r in unclaimed)
+        raise ValueError(
+            f"nobody has taken this on yet: {named}. No todo names it, so no contract "
+            f"covers it and nothing was agreed about HOW it gets built — checking it "
+            f"would confirm work the team never agreed to do. Raise a todo naming the "
+            f"deliverable, or withdraw it if it is no longer wanted."
+        )
+
     rows = conn.execute(
         """
         SELECT d.number AS number, t.number AS todo_number, t.title AS title, t.state AS state
