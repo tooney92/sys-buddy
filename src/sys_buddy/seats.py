@@ -624,3 +624,55 @@ def roster_summary(conn: sqlite3.Connection, task_id: str) -> dict:
         "joined": sum(1 for r in rows if r["joined"]),
         "rows": rows,
     }
+
+
+# --- the owner seat (engagement mode) ---------------------------------------
+# One role type is special, and only in `engagement` tasks: the person who
+# commissioned the work. He is an ORDINARY seat — same invite, same pre-flight,
+# same roster row — and the asymmetry is only in what he does: he authors the
+# deliverables, he does not build, and he verifies at the end.
+#
+# It lives here, beside `cast_of`, because three separate modules need the same
+# answer to "is this seat a builder?" and three copies of that question is how
+# they drift apart. See docs/enhancements.md item 1.
+OWNER_ROLE = "owner"
+
+
+def is_owner(conn: sqlite3.Connection, task_id: str, handle: str) -> bool:
+    """Does this SEAT hold the owner role type?
+
+    Keyed on the role TYPE, not the handle, so an engagement whose owner seat is called
+    ``@client`` is answered correctly, and so a task that ever declares two owner seats
+    (``owner-1``, ``owner-2``) needs no special case. Compared through :func:`slug` for
+    the same reason handles are derived through it — ``"Owner"`` and ``"owner"`` are the
+    same role type, and a host typing the capital should not silently get a builder.
+    """
+    return slug(seat_roles_of(conn, task_id).get(handle, handle)) == OWNER_ROLE
+
+
+def owner_handles(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    """Every declared seat whose role type is ``owner`` — normally exactly one."""
+    handles, seat_roles = cast_of(conn, task_id)
+    return [h for h in handles if slug(seat_roles.get(h, h)) == OWNER_ROLE]
+
+
+def builder_handles(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    """Every DECLARED seat that is not the owner — the people who build, and therefore
+    the people whose acceptance the deliverable list waits on.
+
+    The owner is excluded because he WROTE the list; asking an author to accept his own
+    words is the same theatre as quizzing the host on guidelines he authored himself.
+
+    **Declared, not merely joined** — the same reading ``roles_json`` gets everywhere
+    else. A seat nobody ever paired into therefore blocks the lock rather than being
+    silently written out of the agreement, and the fix is a human removing it from the
+    cast. That is the stricter of the two readings and it is deliberate here: this is a
+    SCOPE agreement at the very start of an engagement, when everyone is onboarding
+    anyway, not a mid-flight gate. (Pre-flight took the looser reading in 2.0.1 for the
+    opposite reason — an unready seat there froze a session already in progress.)
+
+    On a non-engagement task there is no owner seat, so this is simply the whole cast —
+    which is why callers can use it without first asking what mode they are in.
+    """
+    handles, seat_roles = cast_of(conn, task_id)
+    return [h for h in handles if slug(seat_roles.get(h, h)) != OWNER_ROLE]
