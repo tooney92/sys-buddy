@@ -1393,6 +1393,14 @@ def init_db(db_path: Path | str | None = None) -> Path:
         todo_cols = {r["name"] for r in conn.execute("PRAGMA table_info(todos)").fetchall()}
         if "internal" not in todo_cols:
             conn.execute("ALTER TABLE todos ADD COLUMN internal INTEGER NOT NULL DEFAULT 0")
+        # Migration: a one-or-two-sentence SUMMARY of the todo, in plain language, for the
+        # humans reading the board. `scope` is written for the agent that has to build the
+        # thing and grows to a wall of text — in-scope, out-of-scope, constraints, open
+        # questions, all of it — which is correct for its job and unreadable at a glance.
+        # Nullable: every existing todo has none, and the card says so out loud rather than
+        # rendering an empty line, so a missing summary is visible instead of silent.
+        if "summary" not in todo_cols:
+            conn.execute("ALTER TABLE todos ADD COLUMN summary TEXT")
         # Migration: add tasks.mode to a db created before debug tasks existed.
         task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "mode" not in task_cols:

@@ -102,6 +102,20 @@ def parties_of(row) -> list[str]:
     return json.loads(row["parties_json"])
 
 
+def _row_get(row, key: str, default=None):
+    """``row[key]`` that tolerates the column being absent.
+
+    ``sqlite3.Row`` raises ``IndexError`` for a key it does not have, and a row can
+    legitimately lack a young column: a caller holding a row read before this process
+    ran the migration, or a test constructing one by hand. Every read of a column added
+    by ALTER goes through here so a stale row degrades to ``None`` instead of a crash.
+    """
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
 def _rows(conn, task_id: str, *, live_only: bool = False) -> list:
     sql = "SELECT * FROM todos WHERE task_id = ?"
     if live_only:
@@ -283,6 +297,10 @@ def to_dict(conn, row) -> dict:
         "id": row["id"],
         "number": row["number"],
         "title": row["title"],
+        # The human's one-liner, and `None` when nobody wrote one — never "" and never
+        # a slice of scope. A surface renders the absence out loud ("no summary yet")
+        # rather than an empty line, so a missing one is visible instead of silent.
+        "summary": _row_get(row, "summary"),
         "scope": row["scope"],
         "parties": parties,
         "status": status_of(conn, row),
@@ -542,6 +560,44 @@ def _assert_text(title: str, scope: str) -> tuple[str, str]:
     return title, scope
 
 
+MAX_SUMMARY = 240
+
+
+def _assert_summary(summary: object, scope: str) -> str | None:
+    """The human-facing one-liner. Returns the cleaned text, or ``None`` if omitted.
+
+    `scope` is written for the agent that has to BUILD the thing, and it grows to a wall
+    of text — in scope, out of scope, constraints, open questions — which is right for
+    its job and unreadable at a glance. The summary is the other audience: a person
+    scanning the board who wants to know what is being built without reading a spec.
+
+    **A copy-paste of the scope is refused.** That is the failure mode: an agent asked
+    for a summary hands back the first N characters of what it already wrote, which
+    costs the reader a truncated spec instead of buying them a sentence. The broker
+    cannot check that a summary is ACCURATE — that is guidance, and the briefing carries
+    it — but it can check that somebody actually wrote one.
+    """
+    if summary is None:
+        return None
+    summary = str(summary).strip()
+    if not summary:
+        return None
+    if len(summary) > MAX_SUMMARY:
+        raise ValueError(
+            f"summary must be at most {MAX_SUMMARY} characters (got {len(summary)}) — "
+            f"it is the one line a human reads to know what you are building. The detail "
+            f"belongs in scope, which has room for it."
+        )
+    normalise = lambda s: " ".join(s.split()).lower()
+    if normalise(summary) and normalise(scope).startswith(normalise(summary)[:80]):
+        raise ValueError(
+            "summary must not be the opening of scope — a truncated spec is harder to "
+            "read than the spec. Say what this deliverable IS, in a sentence somebody "
+            "who has not read the scope would understand."
+        )
+    return summary
+
+
 def _assert_task_usable(conn, task_id: str) -> None:
     from . import state as _state
 
@@ -566,7 +622,8 @@ def _assert_task_usable(conn, task_id: str) -> None:
 # --------------------------------------------------------------------------- #
 # writes
 # --------------------------------------------------------------------------- #
-def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list[str]) -> dict:
+def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list[str],
+                 summary: str | None = None) -> dict:
     """Propose a deliverable. **Proposing IS the creator's own consent**; the other
     named parties must accept before the todo is `accepted`.
 
@@ -589,6 +646,7 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
     # The domain layer can also refuse USEFULLY, naming who has not accepted yet.
     deliverables.assert_can_build(conn, identity.task_id, "propose a todo")
     title, scope = _assert_text(title, scope)
+    summary = _assert_summary(summary, scope)
     parties = _validate_parties(conn, identity.task_id, parties)
     if identity.role not in parties:
         raise ValueError(
@@ -605,10 +663,10 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
         number = next_number(conn, identity.task_id)
         try:
             cur = conn.execute(
-                "INSERT INTO todos (task_id, number, title, scope, parties_json, version, "
-                "state, proposed_by, proposed_role, created_at) "
-                "VALUES (?,?,?,?,?,1,'open',?,?,?)",
-                (identity.task_id, number, title, scope, json.dumps(parties),
+                "INSERT INTO todos (task_id, number, title, scope, summary, parties_json, "
+                "version, state, proposed_by, proposed_role, created_at) "
+                "VALUES (?,?,?,?,?,?,1,'open',?,?,?)",
+                (identity.task_id, number, title, scope, summary, json.dumps(parties),
                  identity.agent_id, identity.role, now),
             )
             break
@@ -706,6 +764,7 @@ def repropose_todo(
     title: str | None = None,
     scope: str | None = None,
     parties: list[str] | None = None,
+    summary: str | None = None,
 ) -> dict:
     """Issue a NEW VERSION of a todo and reset every acceptance.
 
@@ -744,6 +803,14 @@ def repropose_todo(
         title if title is not None else row["title"],
         scope if scope is not None else row["scope"],
     )
+    # An omitted summary KEEPS the existing one rather than clearing it — same rule as
+    # title/scope above. Reproposing to change the party list should not silently strip
+    # the sentence the humans have been reading.
+    new_summary = (
+        _assert_summary(summary, new_scope)
+        if summary is not None
+        else _row_get(row, "summary")
+    )
     new_parties = (
         _validate_parties(conn, identity.task_id, parties)
         if parties is not None
@@ -758,8 +825,9 @@ def repropose_todo(
 
     version = row["version"] + 1
     conn.execute(
-        "UPDATE todos SET title = ?, scope = ?, parties_json = ?, version = ? WHERE id = ?",
-        (new_title, new_scope, json.dumps(new_parties), version, row["id"]),
+        "UPDATE todos SET title = ?, scope = ?, summary = ?, parties_json = ?, "
+        "version = ? WHERE id = ?",
+        (new_title, new_scope, new_summary, json.dumps(new_parties), version, row["id"]),
     )
     # A draft contract's signatures no longer mean what they meant.
     reset = 0

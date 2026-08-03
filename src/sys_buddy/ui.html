@@ -1325,6 +1325,56 @@ function todoNo(t){ return t && t.number!=null ? t.number : (t ? t.id : ''); }
                     so it overrides the label wherever it appears.
    Everything else returns ''. */
 var TODO_STATUS_SHOWN = {pending:1, dropped:1};
+/* ---------- scope: readable without a markup parser ----------------------
+   `scope` is prose written for the agent that has to BUILD the thing, and it grows
+   into a wall of text — in scope, out of scope, constraints, open questions. Correct
+   for its job, unreadable at a glance.
+
+   We do NOT parse markdown, deliberately. Everything an agent writes is DATA
+   (charter rule 1), and turning untrusted text into HTML is exactly what escaping is
+   here to prevent — a markdown renderer would buy nicer bullets and hand back links,
+   images and a much larger surface. Instead we split on shapes that carry no markup
+   at all, and every fragment still goes through esc():
+
+     blank line          -> a new paragraph
+     line starting '- '  -> a list item
+     ALL-CAPS line, or a line ending ':'  -> a heading
+
+   That is a convention agents already follow, because the briefing teaches
+   "Out of scope:" — so this renders todos that were written months ago, which an
+   array-of-paragraphs field could never do. */
+function scopeHTML(text){
+  var out=[], list=[];
+  function flushList(){
+    if(!list.length) return;
+    out.push('<ul style="margin:4px 0 8px;padding-left:17px;color:var(--text-2);font-size:11.5px;line-height:1.55">'+
+      list.map(function(li){ return '<li style="margin:2px 0">'+esc(li)+'</li>'; }).join('')+'</ul>');
+    list=[];
+  }
+  String(text||'').split(/\n/).forEach(function(raw){
+    var line=raw.trim();
+    if(!line){ flushList(); return; }
+    if(/^[-*\u2022]\s+/.test(line)){ list.push(line.replace(/^[-*\u2022]\s+/,'')); return; }
+    flushList();
+    var heading = (line.length<60 && (/:$/.test(line) || (line===line.toUpperCase() && /[A-Z]{3}/.test(line))));
+    if(heading){
+      out.push('<div style="margin:10px 0 3px;font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">'+esc(line.replace(/:$/,''))+'</div>');
+    } else {
+      out.push('<p style="margin:4px 0;font-size:11.5px;color:var(--text-2);line-height:1.55">'+esc(line)+'</p>');
+    }
+  });
+  flushList();
+  return out.join('');
+}
+
+/* The headline a human actually reads. A todo with no summary says so rather than
+   rendering an empty line — a missing one should be visible, not silent, or nobody
+   ever notices the board stopped being readable. */
+function summaryHTML(t){
+  if(t.summary) return '<p style="margin:6px 0 0;font-size:12.5px;color:var(--text);line-height:1.5">'+esc(t.summary)+'</p>';
+  return '<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-3);font-style:italic">no summary — ask them for one sentence on what this is</p>';
+}
+
 function todoStatusChip(t){
   if(!t.stuck && !TODO_STATUS_SHOWN[t.status]) return '';
   var k = t.stuck ? 'stuck' : (TODO_STATUS[t.status]||'open');
@@ -1396,7 +1446,7 @@ function todoListHTML(d){
     var note = dropped ? ('dropped'+(t.drop_reason?' — '+t.drop_reason:''))
              : t.stuck ? (t.stuck_reason||'stuck — humans notified')
              : pending ? ('awaiting '+(awaitingLabel||'acceptance'))
-             : t.scope;
+             : (t.summary || t.scope);
     var warn = pending ? '<span title="awaiting acceptance — this one is asking you for something" style="color:var(--st-testing-fg);font-size:13px;line-height:1;flex:none;padding-top:2px">⚠</span>' : '';
     return '<button data-todo="'+t.id+'" style="width:100%;display:flex;align-items:flex-start;gap:9px;padding:10px 13px;background:transparent;border:none;border-top:1px solid var(--border);cursor:pointer;text-align:left;font-family:inherit;opacity:'+(dropped?'.55':'1')+'">'+
       warn+
@@ -1587,7 +1637,10 @@ function todoDetailHTML(d,t){
           '<span style="font-size:13.5px;font-weight:600;color:var(--text)">'+esc(t.title)+'</span>'+
           '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+esc(todoNo(t))+' v'+esc(t.version)+'</span>'+
           todoStatusChip(t)+'</div>'+
-        '<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-2);line-height:1.5">'+esc(t.scope)+'</p>'+
+        summaryHTML(t)+
+        '<details style="margin:8px 0 0"><summary style="cursor:pointer;font-size:11px;color:var(--text-3);list-style:none">Full scope</summary>'+
+          '<div style="margin-top:4px;padding-left:2px;border-left:2px solid var(--border)">'+scopeHTML(t.scope)+'</div>'+
+        '</details>'+
       '</div></div>'+
     todoMiniStepperHTML(t)+
     /* Directly under the stepper: the stepper says WHERE it is, this says what moves it. */

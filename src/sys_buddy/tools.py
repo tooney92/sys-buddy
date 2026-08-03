@@ -277,10 +277,13 @@ def _op_get_todos(task_id: str) -> list[dict]:
         conn.close()
 
 
-def _op_propose_todo(ident: Identity, title: str, scope: str, parties: list[str]) -> dict:
+def _op_propose_todo(ident: Identity, title: str, scope: str, parties: list[str],
+                     summary: str = "") -> dict:
     conn = connect()
     try:
-        return _agent_view(todos.propose_todo(conn, ident, title, scope, parties))
+        return _agent_view(
+            todos.propose_todo(conn, ident, title, scope, parties, summary=summary or None)
+        )
     finally:
         conn.close()
 
@@ -946,7 +949,8 @@ def _register_remote(mcp: FastMCP) -> None:
         return _op_get_todos(require_current().task_id)
 
     @mcp.tool
-    def propose_todo(title: str, scope: str, parties: list[str]) -> dict:
+    def propose_todo(title: str, scope: str, parties: list[str],
+                     summary: str = "") -> dict:
         """Propose a DELIVERABLE under your task: "we also need api123".
 
         `parties` names which of the task's existing seats this binds (at least two,
@@ -955,12 +959,19 @@ def _register_remote(mcp: FastMCP) -> None:
         its contract. `scope` is what's in and out; the others accept the SCOPE, not
         the title.
 
+        `summary` is ONE SENTENCE in plain language, for the humans reading the
+        board — "sign-in for staff, so everything else has an identity to hang
+        off". Scope is written for the agent that has to build the thing and
+        grows into a wall of text; nobody scanning the dashboard reads it.
+        Always write one. Copying the opening of `scope` is refused — a
+        truncated spec is harder to read than the spec.
+
         Proposing IS your own consent, so it starts with you accepted and the others
         pending. Propose only when your human directs it — same rule as a contract.
         Then talk it through with send_message; once every party has accept_todo'd it,
         one of you proposes the contract with propose_contract(spec, todo=<N>), where N
         is the new todo's `number` from the reply."""
-        return _op_propose_todo(require_current(), title, scope, parties)
+        return _op_propose_todo(require_current(), title, scope, parties, summary)
 
     @mcp.tool
     def accept_todo(todo: int) -> dict:
@@ -1517,14 +1528,16 @@ def _register_local(mcp: FastMCP) -> None:
         return _op_get_todos(task)
 
     @mcp.tool
-    def propose_todo(task: str, agent: str, title: str, scope: str, parties: list[str]) -> dict:
+    def propose_todo(task: str, agent: str, title: str, scope: str,
+                     parties: list[str], summary: str = "") -> dict:
         """Propose a DELIVERABLE under `task`. `agent` is your name. `parties` names
         which of the task's existing seats it binds (at least two, including you) — a
         seat you leave out can read it but is not bound and won't sign its contract.
         `scope` is what's in and out; the others accept the SCOPE, not the title.
         Proposing IS your consent; the other parties then accept_todo. Propose only
         when your human directs it."""
-        return _op_propose_todo(_local_identity(task, agent), title, scope, parties)
+        return _op_propose_todo(_local_identity(task, agent), title, scope, parties,
+                                summary)
 
     @mcp.tool
     def accept_todo(task: str, agent: str, todo: int) -> dict:
