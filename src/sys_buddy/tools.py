@@ -1088,16 +1088,29 @@ def _register_remote(mcp: FastMCP) -> None:
         name: str, content_base64: str, content_type: str, kind: str = ""
     ) -> dict:
         """Share a file with the other agents on your task — a screenshot, a design
-        bundle, a spec.
+        bundle, a report.
 
-        Put the file's bytes in `content_base64` (base64-encoded — JSON can't carry raw
-        bytes) with its `content_type`. Allowed types: PNG or JPG images
-        (image/png, image/jpeg), PDF (application/pdf), and ZIP (application/zip) — NO
-        video. The file must be under 8 MB. `kind` is optional (screenshot / design /
-        other); left blank it's inferred from the content type. Returns a receipt with
-        the stored file's `id`, which your peer passes to get_file. The file is stored
-        by the broker and fetched THROUGH it — never share a download URL in a chat
-        message (Rules of Engagement)."""
+        PREFER THE HTTP ROUTE for anything but a tiny file. Base64 in a tool argument means
+        YOU generate the whole encoding: a 328 KB screenshot is ~128,000 tokens, and an 8 MB
+        one will not fit in your context at all. Instead POST the raw bytes, which costs you
+        one command:
+
+            curl -sS -X POST "<broker>/files/<your-task-id>?name=shot.png" \\
+              -H "Authorization: Bearer <your token>" \\
+              -H "Content-Type: image/png" --data-binary @shot.png
+
+        Your task id goes in the PATH: if it does not match your token the broker refuses,
+        so a file cannot land on the wrong task. Add `&kind=screenshot|design|other` to
+        override the bucket. It answers with the same receipt this tool returns.
+
+        Use this tool when you cannot run a shell. Put the bytes in `content_base64`
+        (base64-encoded — JSON can't carry raw bytes) with its `content_type`. Allowed
+        types either way: PNG or JPG images (image/png, image/jpeg), HTML (text/html), PDF
+        (application/pdf), and ZIP (application/zip) — NO video. Under 8 MB. `kind` is
+        optional (screenshot / design / other); left blank it's inferred from the content
+        type. Returns a receipt with the stored file's `id`, which your peer passes to
+        get_file. The file is stored by the broker and fetched THROUGH it — never share a
+        download URL in a chat message (Rules of Engagement)."""
         return _op_upload_file(
             require_current(), name, content_base64, content_type, kind or None
         )
@@ -1624,12 +1637,23 @@ def _register_local(mcp: FastMCP) -> None:
         task: str, agent: str, name: str, content_base64: str,
         content_type: str, kind: str = "",
     ) -> dict:
-        """Share a file with the other agents on `task`. `agent` is your own name. Put
-        the bytes in `content_base64` (base64-encoded) with its `content_type`. Allowed:
-        PNG/JPG (image/png, image/jpeg), PDF (application/pdf), ZIP (application/zip) —
-        NO video; under 8 MB. `kind` is optional (screenshot/design/other; inferred from
-        the type if blank). Returns a receipt with the file's `id` for get_file. Files
-        are shared THROUGH the broker, never via a chat URL."""
+        """Share a file with the other agents on `task`. `agent` is your own name.
+
+        PREFER THE HTTP ROUTE for anything but a tiny file — base64 here means YOU generate
+        the whole encoding (~128,000 tokens for a 328 KB screenshot):
+
+            curl -sS -X POST "http://127.0.0.1:8787/files/<task>?agent=<you>&name=shot.png" \\
+              -H "Content-Type: image/png" --data-binary @shot.png
+
+        Locally there is no token, so `agent=` names your seat the way every tool here does,
+        and the task id in the path is what keeps the file on the right task.
+
+        Otherwise put the bytes in `content_base64` (base64-encoded) with its
+        `content_type`. Allowed: PNG/JPG (image/png, image/jpeg), HTML (text/html), PDF
+        (application/pdf), ZIP (application/zip) — NO video; under 8 MB. `kind` is optional
+        (screenshot/design/other; inferred from the type if blank). Returns a receipt with
+        the file's `id` for get_file. Files are shared THROUGH the broker, never via a chat
+        URL."""
         return _op_upload_file(
             _local_identity(task, agent), name, content_base64, content_type, kind or None
         )
