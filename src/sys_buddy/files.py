@@ -20,6 +20,7 @@ dir with a path column; the public functions here don't change shape.
 
 from __future__ import annotations
 
+import re
 import time
 
 from . import service
@@ -137,32 +138,115 @@ def get_file(conn, task_id: str, file_id: int) -> dict | None:
     }
 
 
+def safe_filename(name: str) -> str:
+    """A filename safe to drop into a quoted ``Content-Disposition``. The suggested download
+    name is cosmetic — the file is identified by id — so we simply strip the characters that
+    would break the header or inject one (double-quote, backslash, CR/LF), never trusting the
+    stored name to be header-clean."""
+    return re.sub(r'[\r\n"\\]', "", name or "").strip() or "download"
+
+
+def file_response(f: dict):
+    """A file's raw bytes as an HTTP response, hardened the same way for EVERY caller.
+
+    Both byte-serving routes come through here — the dashboard's ``GET /api/file/{id}`` under
+    a viewer token, and an agent's ``GET /files/{task}/{id}`` under its own. One
+    implementation on purpose: the HTML rule below is a security property, and a second copy
+    of it is a second chance to get it wrong.
+
+    Images render ``inline`` so the dashboard can point an ``<img src>`` at the URL;
+    everything else (zip/pdf/html) is an ``attachment`` so the browser downloads it under its
+    original name.
+
+    ONLY images may be ``inline``, and the allow-list is positive for a reason. ``text/html``
+    is an accepted upload type, and an HTML file rendered inline would execute on the broker's
+    OWN origin — the origin that serves the dashboard and holds the viewer cookie. That is
+    stored XSS with a credential attached, uploadable by any agent on the task. Two things
+    stop it, both here: the disposition forces a download, and the CSP neuters the document if
+    anything ever manages to render it anyway. ``X-Content-Type-Options: nosniff`` (set
+    globally by SecurityHeadersMiddleware) is the third leg — without it a browser could sniff
+    HTML out of a file uploaded as something else.
+    """
+    from starlette.responses import Response
+
+    if f["content_type"].startswith("image/"):
+        disposition = "inline"
+    else:
+        disposition = f'attachment; filename="{safe_filename(f["name"])}"'
+    return Response(
+        content=f["data"],
+        media_type=f["content_type"],
+        headers={
+            "Content-Disposition": disposition,
+            # Belt to the disposition's braces: nothing loads, nothing executes, nothing
+            # phones home, even if this document somehow gets rendered as a page.
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        },
+    )
+
+
 # --------------------------------------------------------------------------- #
-# the raw-bytes upload route
+# the raw-bytes routes
 # --------------------------------------------------------------------------- #
-# WHY THIS EXISTS. The MCP `upload_file` tool carries the file as a base64 STRING argument,
+# WHY THESE EXIST. The MCP `upload_file` tool carries the file as a base64 STRING argument,
 # which means the uploading agent has to *generate* the whole encoding token by token. That
 # is the entire cost of sharing a file: storing a 328 KB screenshot takes the broker ~1.3 ms,
 # and encoding it into a tool call costs the agent ~128,000 tokens. At the 8 MB cap it is
 # ~3.2M tokens — more than a context window, so the documented limit was unreachable through
-# the only path that existed. `get_file` is symmetrical: the reading agent pulls the same
-# volume INTO its context.
+# the only path that existed.
 #
-# So bytes get their own door. An agent PUTs the file with `curl --data-binary`, the broker
-# stores it, and nothing larger than a receipt passes through a model. Raw body rather than
-# multipart: multipart needs `python-multipart` and gives an agent one more thing to get
-# wrong, whereas `--data-binary @file` is a single obvious line.
+# `get_file` has exactly the same disease pointing the other way: it returns the bytes as
+# `content_base64`, so the READING agent pays the same ~128,000 tokens to pull a screenshot
+# INTO its context — and a file it cannot fit is a file it cannot read at all. Fixing only
+# the upload half would have left every shared file writable-but-unreadable at size.
+#
+# So bytes get their own door in both directions. An agent POSTs with `curl --data-binary`
+# and GETs with `curl -o`, and nothing larger than a receipt passes through a model. Raw body
+# rather than multipart on the way in: multipart needs `python-multipart` and gives an agent
+# one more thing to get wrong, whereas `--data-binary @file` is a single obvious line.
 #
 # THE TASK ID IS IN THE PATH, and that is the point of the design rather than decoration.
-# The token says who you are; the path says where you MEANT to write. When they disagree the
+# The token says who you are; the path says which task you MEANT. When they disagree the
 # broker refuses (403) instead of quietly following the token — so a misconfigured agent
 # holding task A's token cannot land a file on task B, and cannot land it on A "by accident"
 # either. Same rule the contract tools follow with `todo=N`: name the target, and be told
-# when you named the wrong one.
+# when you named the wrong one. It holds on the way OUT too, where it is also the scoping
+# rule: an agent may only read files on the task its own token belongs to.
 def _bare_content_type(header: str) -> str:
     """``text/html; charset=utf-8`` → ``text/html``. Callers set charsets and boundaries and
     are not wrong to; the allow-list is about the type, not its parameters."""
     return (header or "").split(";")[0].strip().lower()
+
+
+def _agent_for(conn, *, is_remote: bool, task_id: str, token: str, agent: str, verb: str):
+    """Resolve the acting agent for a ``/files`` request, or ``(body, status)`` to return.
+
+    Shared by both directions so the task-match rule is written ONCE — the guarantee is only
+    worth as much as its least careful copy. Answers ``(Identity, None)`` on success and
+    ``(None, (body, status))`` on refusal.
+    """
+    if is_remote:
+        ident = resolve_agent_token(conn, token)
+        if ident is None:
+            return None, ({"error": "unauthorized"}, 401)
+        # THE refusal that makes the path meaningful. Not a 404: the caller is a known agent
+        # asking for something it may not do, and saying so plainly is what lets it fix its
+        # own configuration instead of silently acting somewhere it did not intend.
+        if ident.task_id != task_id:
+            return None, ({
+                "error": f"your token belongs to task '{ident.task_id}', not '{task_id}' — "
+                         f"{verb} your own task"
+            }, 403)
+        return ident, None
+
+    # Local mode has no tokens at all (the middleware auth gate is remote-only), so the seat
+    # is NAMED, exactly as every local MCP tool names it.
+    if not agent.strip():
+        return None, ({"error": "local mode: name your seat with ?agent=<your agent name>"}, 400)
+    try:
+        return service.ensure_local_identity(conn, task_id, agent.strip()), None
+    except ValueError as e:
+        return None, ({"error": str(e)}, 400)
 
 
 def handle_upload(
@@ -175,28 +259,12 @@ def handle_upload(
     the way every other helper in this package is, and so the route below stays a thin
     adapter that only knows how to read a Request.
     """
-    if is_remote:
-        ident = resolve_agent_token(conn, token)
-        if ident is None:
-            return {"error": "unauthorized"}, 401
-        # THE refusal that makes the path meaningful. Not a 404: the caller is a known agent
-        # asking for something it may not do, and saying so plainly is what lets it fix its
-        # own configuration instead of silently writing somewhere it did not intend.
-        if ident.task_id != task_id:
-            return {
-                "error": f"your token belongs to task '{ident.task_id}', not '{task_id}' — "
-                         f"upload to your own task"
-            }, 403
-    else:
-        # Local mode has no tokens at all (the middleware auth gate is remote-only), so the
-        # seat is NAMED, exactly as every local MCP tool names it. Without it there is no
-        # identity to attribute the file to.
-        if not agent.strip():
-            return {"error": "local mode: name your seat with ?agent=<your agent name>"}, 400
-        try:
-            ident = service.ensure_local_identity(conn, task_id, agent.strip())
-        except ValueError as e:
-            return {"error": str(e)}, 400
+    ident, refusal = _agent_for(
+        conn, is_remote=is_remote, task_id=task_id, token=token, agent=agent,
+        verb="upload to",
+    )
+    if refusal is not None:
+        return refusal
 
     try:
         return upload_file(conn, ident, name, data, content_type, kind), 201
@@ -207,28 +275,69 @@ def handle_upload(
         return {"error": str(e)}, 400
 
 
-def register_upload_route(mcp, cfg) -> None:
-    """Mount ``POST /files/{task_id}`` — the one route on this broker that takes bytes IN.
+def handle_download(
+    conn, *, is_remote: bool, task_id: str, file_id, token: str = "", agent: str = "",
+) -> tuple[dict, int] | dict:
+    """Resolve one file's bytes for an AGENT, or ``(body, status)`` to refuse.
 
-    Deliberately NOT under ``/api/*``: that surface is GET-only by D11 and stays that way.
-    This is its own door on the agent side of the house, authenticated the way ``/mcp`` is
-    (the agent's own bearer token) rather than with a dashboard viewer token — a viewer is a
-    human watching, and must not be able to write files into a task.
+    Returns the file record on success (the caller turns it into a response) and an error
+    tuple otherwise, so the auth decision stays testable without HTTP.
+
+    A file that does not exist and a file on another task are both **404**, deliberately
+    indistinguishable — the same rule ``api._file_for`` follows for viewers, and for the same
+    reason: a distinguishable 403 would let an agent probe another task's file ids. Note the
+    two 404 paths cannot even be reached from different tasks here, because the task match
+    above has already refused a foreign task outright; the id scoping is the second lock on
+    the same door.
+    """
+    ident, refusal = _agent_for(
+        conn, is_remote=is_remote, task_id=task_id, token=token, agent=agent,
+        verb="read files on",
+    )
+    if refusal is not None:
+        return refusal
+    try:
+        fid = int(file_id)
+    except (TypeError, ValueError):
+        return {"error": "not found"}, 404
+    rec = get_file(conn, ident.task_id, fid)
+    if rec is None:
+        return {"error": "not found"}, 404
+    return rec
+
+
+def register_upload_route(mcp, cfg) -> None:
+    """Mount the two ``/files`` routes — the only ones that move raw bytes for an AGENT.
+
+    Deliberately NOT under ``/api/*``: that surface is GET-only by D11 and, more to the point,
+    authenticates VIEWERS. These are the agent side of the house, authenticated the way
+    ``/mcp`` is — with the agent's own bearer token. A viewer must not be able to write files
+    into a task (every buddy is issued one when they pair), and an agent should not have to
+    borrow a human's credential to read one.
+
+        POST /files/{task_id}            store bytes, receipt back
+        GET  /files/{task_id}/{file_id}  read bytes back
+
+    The dashboard keeps its own reader at ``GET /api/file/{id}`` under a viewer token; both
+    serve through ``file_response`` so the HTML hardening is written once.
     """
     from starlette.responses import JSONResponse
 
     from .db import connect
 
+    def _token(request) -> str:
+        auth = request.headers.get("authorization", "")
+        return auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+
     @mcp.custom_route("/files/{task_id}", methods=["POST"])
     async def upload(request):
-        auth = request.headers.get("authorization", "")
         conn = connect()
         try:
             body, status = handle_upload(
                 conn,
                 is_remote=cfg.is_remote,
                 task_id=request.path_params["task_id"],
-                token=auth[7:].strip() if auth[:7].lower() == "bearer " else "",
+                token=_token(request),
                 agent=request.query_params.get("agent", ""),
                 name=request.query_params.get("name", ""),
                 kind=request.query_params.get("kind") or None,
@@ -236,5 +345,24 @@ def register_upload_route(mcp, cfg) -> None:
                 data=await request.body(),
             )
             return JSONResponse(body, status_code=status)
+        finally:
+            conn.close()
+
+    @mcp.custom_route("/files/{task_id}/{file_id}", methods=["GET"])
+    async def download(request):
+        conn = connect()
+        try:
+            result = handle_download(
+                conn,
+                is_remote=cfg.is_remote,
+                task_id=request.path_params["task_id"],
+                file_id=request.path_params["file_id"],
+                token=_token(request),
+                agent=request.query_params.get("agent", ""),
+            )
+            if isinstance(result, tuple):
+                body, status = result
+                return JSONResponse(body, status_code=status)
+            return file_response(result)
         finally:
             conn.close()

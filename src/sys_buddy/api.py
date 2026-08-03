@@ -1206,45 +1206,20 @@ def _file_for(conn, viewer: ViewerIdentity, file_id) -> dict | None:
 
 
 def _safe_filename(name: str) -> str:
-    """A filename safe to drop into a quoted ``Content-Disposition``. The suggested
-    download name is cosmetic — the file is identified by id — so we simply strip the
-    characters that would break the header or inject one (double-quote, backslash,
-    CR/LF), never trusting the stored name to be header-clean."""
-    return re.sub(r'[\r\n"\\]', "", name or "").strip() or "download"
+    """Kept as this module's name for ``files.safe_filename``; see there."""
+    return files.safe_filename(name)
 
 
 def _file_response(f: dict) -> Response:
-    """Serve a file's raw bytes with its stored Content-Type. Images render ``inline``
-    so the dashboard can point an ``<img src>`` at this URL; everything else (zip/pdf/html)
-    is an ``attachment`` so the browser downloads it under its original name.
+    """Serve a file's raw bytes — ``files.file_response``, which both byte-serving routes
+    share so the HTML hardening has exactly one implementation. See its docstring for why
+    only images may be ``inline``.
 
-    This route hands bytes OUT and never takes them IN — that is still true of the whole
-    ``/api/*`` surface (D11). Bytes come in through ``POST /files/{task_id}``, which is a
-    different surface with a different credential: an AGENT's token, never a viewer's.
-
-    ONLY images may be ``inline``, and the allow-list is positive for a reason. ``text/html``
-    is an accepted upload type, and an HTML file rendered inline would execute on the broker's
-    OWN origin — the origin that serves the dashboard and holds the viewer cookie. That is
-    stored XSS with a credential attached, uploadable by any agent on the task. Two things
-    stop it, both here: the disposition forces a download, and the CSP neuters the document
-    if anything ever manages to render it anyway. `X-Content-Type-Options: nosniff` (set
-    globally by SecurityHeadersMiddleware) is the third leg — without it a browser could
-    sniff HTML out of a file uploaded as something else.
+    This route hands bytes OUT and never takes them IN — still true of the whole ``/api/*``
+    surface (D11). Bytes come in through ``POST /files/{task_id}``, a different surface with a
+    different credential: an AGENT's token, never a viewer's.
     """
-    if f["content_type"].startswith("image/"):
-        disposition = "inline"
-    else:
-        disposition = f'attachment; filename="{_safe_filename(f["name"])}"'
-    return Response(
-        content=f["data"],
-        media_type=f["content_type"],
-        headers={
-            "Content-Disposition": disposition,
-            # Belt to the disposition's braces: nothing loads, nothing executes, nothing
-            # phones home, even if this document somehow gets rendered as a page.
-            "Content-Security-Policy": "default-src 'none'; sandbox",
-        },
-    )
+    return files.file_response(f)
 
 
 # --------------------------------------------------------------------------- #
