@@ -1065,7 +1065,10 @@ function threadHTML(d){
       '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+lps+
         '<div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;gap:4px">'+avs+'</div></div></div>'+
     threadLegendHTML()+
-    '<div style="padding:20px 18px;display:flex;flex-direction:column;gap:17px;max-height:640px;overflow-y:auto">'+inner+'</div></div>';
+    /* The id is what lets render() keep this box pinned to its newest message — see
+       THREAD_ID. Both task views call threadHTML, but taskHTML picks ONE of them, so the id
+       is never on the page twice. */
+    '<div id="'+THREAD_ID+'" style="padding:20px 18px;display:flex;flex-direction:column;gap:17px;max-height:640px;overflow-y:auto">'+inner+'</div></div>';
 }
 
 /* ---------- thread legend (the old "Tips" items, rehomed) ----------
@@ -2115,7 +2118,15 @@ function eventLogHTML(d){
   if(d && (d.todos||[]).length) FILTERS=FILTERS.concat(['todo']);
   var filter=state.eventFilter;
   var fbtns=FILTERS.map(function(f){ return '<button data-filter="'+f+'" style="'+filterStyle(filter===f)+'">'+f+'</button>'; }).join('');
-  var evs=(d.events||[]).filter(function(e){ return filter==='all'||e[1]===filter; });
+  /* NEWEST-FIRST, matching the activity strip. The API hands events back oldest-first
+     (api.py `ORDER BY id`) and this box is 320px tall, so rendering them in that order put
+     the newest event permanently below the fold on any task with more than a handful — and
+     the newest event is the entire reason anyone opens a log. Unlike the message thread
+     there is no conversation to read top-down here: each row stands alone.
+     Reversing AFTER `.filter()` is what keeps this safe: filter returns a fresh array, so
+     the live `d.events` payload is never reversed in place — which would flip the order on
+     every poll and make it oscillate. */
+  var evs=(d.events||[]).filter(function(e){ return filter==='all'||e[1]===filter; }).reverse();
   var rows;
   if(evs.length){
     rows=evs.map(function(ev){
@@ -2792,10 +2803,45 @@ function render(){
        screens, whose header carries the same two buttons. Never on the mobile gate,
        which has no header at all. */
     if(!state.isMobile) html+=panelHTML();
+    /* Captured BEFORE innerHTML is replaced, restored after — see THREAD_ID. */
+    var prevThread=threadScroll();
     app.innerHTML=html;
     bind();
+    restoreThreadScroll(prevThread);
   }
   patchVolatile();
+}
+
+/* ---------- thread scroll ----------
+   The newest message is at the BOTTOM of the thread, because a conversation reads top-down
+   and reversing it would mean reading replies before the things they reply to. That only
+   works if the newest one is actually reachable, and it was not: the box is 640px tall and
+   `render()` replaces `app.innerHTML` wholesale whenever `sig()` changes — and a new message
+   IS a sig change. So the arrival of a message scrolled the reader away from the message
+   that had just arrived, back to the top of the thread.
+
+   Pinned to the bottom instead, UNLESS the reader has deliberately scrolled up to read
+   history — their position is theirs to keep, and yanking someone out of what they are
+   reading because a peer said something is the same defect pointing the other way.
+
+   The event log needs none of this: it is newest-first, so its newest row is already the one
+   you see. */
+var THREAD_ID='sb-thread-scroll';
+function threadScroll(){
+  var el=document.getElementById(THREAD_ID);
+  if(!el) return null;
+  /* 40px of slack. "At the bottom" has to survive fractional scrollHeight and the browser's
+     own rounding, or the pin quietly stops engaging for readers who are, visibly, at the
+     bottom. */
+  return {top:el.scrollTop, atBottom:(el.scrollHeight-el.scrollTop-el.clientHeight)<=40};
+}
+function restoreThreadScroll(prev){
+  var el=document.getElementById(THREAD_ID);
+  if(!el) return;
+  /* No previous box means this is the thread's first paint — opening a task, or coming back
+     to one. Open on the newest message, which is what someone checking in wants to see. */
+  if(!prev || prev.atBottom) el.scrollTop=el.scrollHeight;
+  else el.scrollTop=prev.top;
 }
 function messageBody(title,body){
   return '<div style="max-width:520px;margin:12vh auto 0;padding:40px 24px;text-align:center">'+
