@@ -531,8 +531,6 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   color:var(--text-3);font-size:1rem;line-height:1;padding:2px 4px}
 .vbanner .vclose:hover{color:var(--text)}
 /* opt-in toggle in the footer */
-.updchk{display:inline-flex;align-items:center;gap:7px;font-size:.82rem;color:var(--text-3);cursor:pointer}
-.updchk input{accent-color:var(--accent);cursor:pointer}
 
 /* ---------- footer bridge check ---------- */
 .foot{
@@ -837,9 +835,11 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       <span class="pip" aria-hidden="true"></span>
       <span id="check-text">Bridge not checked.</span>
     </span>
-    <label class="updchk" title="When on, sys-buddy checks GitHub for newer releases on launch.">
-      <input type="checkbox" id="upd-optin"> Check GitHub for updates
-    </label>
+    <!-- The "Check GitHub for updates" checkbox lived here and is gone. It defaulted to
+         off, so the update banner was unreachable unless somebody found a checkbox in the
+         footer — which is why four releases went by unnoticed. A control that has to be
+         discovered before the app will tell you it is out of date is not a setting, it is
+         a way of never mentioning it. -->
   </footer>
 </main>
 
@@ -1792,16 +1792,15 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   // The opt-in lives in localStorage; the GitHub call only happens when it's on, so
   // the app never phones out unless the user allowed it. The RESTART-NEEDED case needs
   // no opt-in — it only asks the local broker what it's running.
-  var OPTIN_KEY = 'sysbuddy.checkUpdates';
-  var optedIn = false;
-  try { optedIn = localStorage.getItem(OPTIN_KEY) === '1'; } catch(e){}
-
+  /* The version check is UNCONDITIONAL. It used to sit behind a footer checkbox that
+     defaulted to off, and the result was that it told nobody anything — the owner ran
+     1.4.0 for four releases while the site advertised 2.2.0, and hit two bugs live that
+     were already fixed upstream. Saying "a newer version exists" needs no permission.
+     One 4s GET on launch, silent when it fails, never blocks the app. */
   var vb = document.getElementById('version-banner');
   var vbTitle = document.getElementById('vb-title');
   var vbNotes = document.getElementById('vb-notes');
   var vbMeta = document.getElementById('vb-meta');
-  var optChk = document.getElementById('upd-optin');
-  if (optChk) optChk.checked = optedIn;
 
   function renderVersion(s){
     if (!s || s.error) { vb.hidden = true; return; }   // never nag on failure
@@ -1820,11 +1819,17 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       vb.classList.remove('warn');
       vbTitle.textContent = (s.release_name || ('v' + s.published)) + ' is available';
       if (s.notes) { vbNotes.textContent = s.notes; vbNotes.hidden = false; }
-      // Build the meta line safely (no innerHTML with remote content).
+      // Build the meta line safely (no innerHTML — `notes` and `release_name` are remote
+      // content, so nothing here is ever parsed as markup).
       vbMeta.textContent = "You're on " + s.installed + '. ';
-      if (s.release_url) {
+      // Link to the SITE's releases page, not the GitHub tag: it is the same history in
+      // prose, newest first, with breaking changes called out — which is what somebody
+      // deciding whether to upgrade actually needs to read. Falls back to the GitHub
+      // release only if the payload predates `releases_url`.
+      var href = s.releases_url || s.release_url;
+      if (href) {
         var a = document.createElement('a');
-        a.href = s.release_url; a.textContent = 'View release ↗';
+        a.href = href; a.textContent = "See what's changed ↗";
         a.target = '_blank'; a.rel = 'noopener';
         vbMeta.appendChild(a);
       }
@@ -1837,18 +1842,13 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   function runVersionCheck(){
     var api = window.pywebview && window.pywebview.api;
     if (!api || typeof api.check_version !== 'function') return;  // plain browser
-    Promise.resolve(api.check_version(optedIn)).then(renderVersion).catch(function(){});
+    /* No argument: `updates.status` decides, and it checks. Passing a flag from here is
+       what made this opt-out-able in the first place. */
+    Promise.resolve(api.check_version()).then(renderVersion).catch(function(){});
   }
 
   if (document.getElementById('vb-close')) {
     document.getElementById('vb-close').addEventListener('click', function(){ vb.hidden = true; });
-  }
-  if (optChk) {
-    optChk.addEventListener('change', function(){
-      optedIn = optChk.checked;
-      try { localStorage.setItem(OPTIN_KEY, optedIn ? '1' : '0'); } catch(e){}
-      runVersionCheck();   // re-check immediately so toggling on surfaces a release now
-    });
   }
   // Run once the native bridge is ready (and once now, in case it already is).
   window.addEventListener('pywebviewready', runVersionCheck);

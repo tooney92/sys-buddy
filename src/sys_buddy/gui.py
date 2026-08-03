@@ -105,18 +105,21 @@ class GuiApi:
         """Liveness probe used by the page to prove the bridge is wired up."""
         return "pong"
 
-    def check_version(self, check_github: bool = False) -> dict:
+    def check_version(self) -> dict:
         """Version-awareness banner data (see :mod:`sys_buddy.updates`).
 
-        ``check_github`` is passed by the page from the user's opt-in toggle — the
-        GitHub call happens ONLY when it is true, so the app never phones out unless
-        the user allowed it. Always returns a dict; network failures degrade to
-        ``None`` fields rather than raising across the bridge.
+        Takes NO argument, deliberately. It used to take the page's opt-in toggle and
+        default to False, so a caller that simply asked "what's my version situation"
+        got the local-only answer and the update banner never appeared. There is no flag
+        to forget now: `updates.status` decides, and it checks.
+
+        Always returns a dict; network failures degrade to ``None`` fields rather than
+        raising across the bridge.
         """
         try:
             from . import updates
 
-            return updates.status(BASE_URL, check_github=bool(check_github))
+            return updates.status(BASE_URL)
         except Exception as exc:  # never raise across the bridge
             return {"error": str(exc)}
 
