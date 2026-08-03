@@ -486,6 +486,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
 # parser
 # --------------------------------------------------------------------------- #
 def build_parser() -> argparse.ArgumentParser:
+    # The one module-level need for `admin` in this file: `--mode`'s choices come from
+    # `admin.MODES` rather than being retyped here, which is how the CLI stopped being a
+    # third place that could disagree about which workflows exist. Imported inside the
+    # function like every other use, so `--help` stays cheap to reach.
+    from . import admin
+
     p = argparse.ArgumentParser(prog="sys-buddy", description="Broker for cross-human AI agent collaboration.")
     p.add_argument("--version", action="version", version=f"sys-buddy {__version__}")
     p.add_argument("--db", help=f"SQLite path (default: {DEFAULT_DB_PATH})")
@@ -529,9 +535,11 @@ def build_parser() -> argparse.ArgumentParser:
     tc.add_argument("--title", help="Human title (defaults to the id)")
     tc.add_argument(
         "--mode",
-        choices=["contract", "debug"],
+        # From admin.MODES so a new workflow cannot ship with no way to select it.
+        choices=list(admin.MODES),
         default="contract",
-        help="'contract' (full workflow) or 'debug' (collaborate then mark resolved)",
+        help="'contract' (full workflow), 'debug' (collaborate then mark resolved), or "
+             "'engagement' (contract flow plus a client — needs an 'owner' seat in the cast)",
     )
     tc.set_defaults(func=cmd_task_create)
 

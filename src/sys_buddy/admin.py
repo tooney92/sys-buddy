@@ -24,6 +24,14 @@ from . import audit, seats, service, todos
 from .db import connect
 from .identity import new_invite_code, new_viewer_token, sha256_hex
 
+# The workflows a task can run. ONE list, because this used to be spelled out
+# independently in `create_task`, in the CLI's `--mode` choices and in the desktop app's
+# radio group — and when `engagement` shipped in v2.1.0 all three kept the old pair. The
+# schema, domain layer, tools, dashboard and briefings supported engagements; the only
+# function that creates a task refused the mode, so the feature had no door for two
+# releases. A single tuple the surfaces read from is what makes that unrepeatable.
+MODES = ("contract", "debug", "engagement")
+
 # Single-use invites live 15 minutes (SPEC §9). Short enough that a code lingering
 # in a Slack scrollback is dead by the time anyone scans for it.
 INVITE_TTL_SECONDS = 15 * 60
@@ -79,7 +87,15 @@ def create_task(
 
     ``mode`` selects the workflow: ``'contract'`` (the default) runs the full
     propose/lock/deploy state machine; ``'debug'`` is a lightweight mode where two
-    buddies just fix a problem and mark it resolved, with no contract required.
+    buddies just fix a problem and mark it resolved, with no contract required;
+    ``'engagement'`` is the contract flow plus a client — an ``owner`` seat whose
+    deliverables the team accepts before anything may be built, and whose agent
+    verifies the result (see ``deliverables.py``).
+
+    An engagement wants an ``owner`` seat in its cast, but that is NOT enforced here.
+    The cast is deliberately not frozen at setup (``add_seat`` exists), so a host may
+    create the engagement and invite the client afterwards; ``deliverables._assert_owner``
+    is where the absence is caught, and it says exactly what to add.
 
     ``same_machine`` records the task's CONNECTIVITY (not the broker's auth mode):
     True only when the host proved everything lives on one box. It relaxes the
@@ -92,8 +108,10 @@ def create_task(
     used verbatim, and a duplicate explicit id is rejected explicitly (rather than
     surfacing a raw sqlite IntegrityError) so the CLI can print an actionable message.
     """
-    if mode not in ("contract", "debug"):
-        raise ValueError(f"unknown mode {mode!r}; expected 'contract' or 'debug'")
+    if mode not in MODES:
+        raise ValueError(
+            f"unknown mode {mode!r}; expected one of {', '.join(repr(m) for m in MODES)}"
+        )
     # Normalise the cast into (handles, {handle: role_type}). Repeating a role type is
     # now MEANINGFUL — it is how you say "two frontend developers" — and the derivation
     # gives the second one `frontend-2` with no thought from the host. What must still

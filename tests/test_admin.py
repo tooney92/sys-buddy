@@ -62,3 +62,38 @@ def test_create_task_rejects_the_reserved_broker_role(conn):
 
     with pytest.raises(ValueError, match="reserved"):
         admin.create_task("signin", title="Sign in", roles=["backend", "Broker"])
+
+
+# --- modes ------------------------------------------------------------------
+def test_create_task_accepts_every_declared_mode(conn):
+    """The regression that matters. `engagement` shipped in v2.1.0 — schema, domain layer,
+    tools, dashboard and briefings — but `create_task` still validated against the old pair,
+    and it is the ONLY path that creates a task (the CLI and the desktop app both funnel
+    here). So the feature had no door for two releases: everything downstream of creation
+    worked and nobody could create one.
+
+    Parametrised over `admin.MODES` rather than a literal list, so a workflow added later
+    fails here until it is actually creatable."""
+    import pytest
+
+    for mode in admin.MODES:
+        t = admin.create_task(
+            None, title=f"task {mode}", roles=["backend", "frontend"], mode=mode
+        )
+        assert t["mode"] == mode, mode
+
+
+def test_create_task_still_rejects_an_unknown_mode(conn):
+    import pytest
+
+    with pytest.raises(ValueError, match="unknown mode"):
+        admin.create_task("signin", title="Sign in", roles=["backend"], mode="supervisor")
+
+
+def test_engagement_is_creatable_without_an_owner_seat(conn):
+    """Deliberately NOT refused here. The cast is not frozen at setup (`add_seat` exists),
+    so a host may create the engagement and invite the client afterwards — and
+    `deliverables._assert_owner` is where the absence is caught, with a message that names
+    the fix. Enforcing it at creation would break the add-the-client-later flow."""
+    t = admin.create_task(None, title="No client yet", roles=["backend"], mode="engagement")
+    assert t["mode"] == "engagement"

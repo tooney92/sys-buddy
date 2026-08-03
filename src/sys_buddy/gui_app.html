@@ -29,6 +29,11 @@ html,body{margin:0;padding:0}
   --role-backend:#5468C9;
   --role-frontend:#C0568C;
   --role-mobile:#3F9DA8;
+  /* `designer` shipped in v2.0.0 and `owner` in v2.1.0; neither was ever offered on this
+     screen, so neither had a colour here either. Owner is deliberately the warm accent —
+     on an engagement that seat is the client, and it should not read as one more dev. */
+  --role-designer:#8B5CF6;
+  --role-owner:#E0693F;
   --ok:#33A852;
   --err:#DE5B4A;
   --amber:#E0A83F;
@@ -636,6 +641,10 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
             <input type="radio" name="session-mode" id="mode-debug" value="debug">
             <span class="seg-tag">Debug</span>
           </label>
+          <label>
+            <input type="radio" name="session-mode" id="mode-engagement" value="engagement">
+            <span class="seg-tag">Engagement</span>
+          </label>
         </div>
         <p class="hint" id="mode-hint">Contract = plan → lock → build → verify. Agents agree a shared interface, sign it, then build against it.</p>
       </div>
@@ -1141,7 +1150,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var ROLE_COLORS = {
     backend:  'var(--role-backend)',
     frontend: 'var(--role-frontend)',
-    mobile:   'var(--role-mobile)'
+    mobile:   'var(--role-mobile)',
+    designer: 'var(--role-designer)',
+    owner:    'var(--role-owner)'
   };
 
   function roleColor(role){
@@ -1349,8 +1360,23 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
   // ---- host start flow -------------------------------------------------
   var titleEl    = document.getElementById('in-title');
-  var modeContract = document.getElementById('mode-contract');
-  var modeDebug    = document.getElementById('mode-debug');
+  var modeContract   = document.getElementById('mode-contract');
+  var modeDebug      = document.getElementById('mode-debug');
+  var modeEngagement = document.getElementById('mode-engagement');
+  var modeHint       = document.getElementById('mode-hint');
+
+  // One place the three workflows are described, so the hint cannot drift from the radio
+  // it explains. Keyed by the same strings `admin.MODES` holds.
+  var MODE_HINTS = {
+    contract: 'Contract = plan → lock → build → verify. Agents agree a shared interface, sign it, then build against it.',
+    debug: 'Debug = no contract to plan. Collaborate on a problem, then mark it resolved.',
+    engagement: 'Engagement = the contract flow plus a client. The owner seat lists what was commissioned, the team accepts that list before anything is built, and the owner’s agent verifies the result. Needs an owner seat — that is the client, not you.'
+  };
+  function currentMode(){
+    if (modeDebug.checked) return 'debug';
+    if (modeEngagement && modeEngagement.checked) return 'engagement';
+    return 'contract';
+  }
   var rolesRow   = document.getElementById('roles-row');
   var rolesNote  = document.getElementById('roles-note');
   var connRadios   = Array.prototype.slice.call(document.querySelectorAll('input[name="conn-mode"]'));
@@ -1420,15 +1446,22 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   // --- role model: which roles are ON the task + which one is "you" (the host's seat).
   // No role is special (model B: producer = whoever proposes). One control does both:
   // tap a role to add/remove it; tap "you" on the one you'll drive.
-  var ALL_ROLES = ['backend','frontend','mobile'];
+  // `designer` has been a real role type since v2.0.0 and was never offered here.
+  var BUILD_ROLES = ['backend','frontend','mobile','designer'];
+  // `owner` is the CLIENT's seat and only exists on an engagement, so it is offered only
+  // when that mode is picked — on a contract or debug task it would be a seat with no
+  // meaning, and `guidelines` explicitly refuses to let anyone set standards for it.
+  var OWNER_ROLE = 'owner';
+  function allRoles(){ return isEngagement() ? BUILD_ROLES.concat([OWNER_ROLE]) : BUILD_ROLES; }
+
   var cast = { backend:true };   // roles on the task; user adds more
   var youRole = 'backend';       // the seat the host takes
 
-  function castRoles(){ return ALL_ROLES.filter(function(r){ return cast[r]; }); }
+  function castRoles(){ return allRoles().filter(function(r){ return cast[r]; }); }
 
   function renderRoles(){
     rolesRow.innerHTML = '';
-    ALL_ROLES.forEach(function(role){
+    allRoles().forEach(function(role){
       var on = !!cast[role];
       var isYou = on && youRole === role;
       var combo = document.createElement('div');
@@ -1455,30 +1488,60 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   }
   function setYou(role){ youRole = role; renderRoles(); }
 
-  // session type only changes the min-role rule (contract needs 2, debug needs 1).
-  function applyMode(){ refreshGate(); }
+  function isEngagement(){ return !!(modeEngagement && modeEngagement.checked); }
+
+  // Session type changes the min-role rule (contract needs 2, debug needs 1) and, on an
+  // engagement, whether the `owner` seat is on offer at all — so the role row is re-rendered
+  // rather than just re-gated. Leaving an engagement drops the owner from the cast: keeping
+  // it would ship a contract task carrying a seat only an engagement gives meaning to.
+  function applyMode(){
+    if (!isEngagement() && cast[OWNER_ROLE]) {
+      delete cast[OWNER_ROLE];
+      if (youRole === OWNER_ROLE) youRole = castRoles()[0] || null;
+    }
+    if (modeHint) modeHint.textContent = MODE_HINTS[currentMode()] || '';
+    renderRoles();   // calls refreshGate()
+  }
   modeContract.addEventListener('change', applyMode);
   modeDebug.addEventListener('change', applyMode);
+  if (modeEngagement) modeEngagement.addEventListener('change', applyMode);
 
   // Gate the Create button on a valid form, and say what's still missing.
   function refreshGate(){
     var title = (titleEl.value || '').trim();
     var roles = castRoles();
+    // An engagement runs the contract flow, so it shares the two-agent minimum.
     var contract = !modeDebug.checked;
     var minRoles = contract ? 2 : 1;
+    // An engagement with no owner seat can be created, but nothing can then be built on
+    // it: only the owner may write the deliverable list, and the list must be accepted
+    // before any todo or contract exists (`deliverables._assert_owner`). The broker
+    // deliberately does not refuse it — the cast is not frozen at setup — so this screen
+    // is the right place to stop somebody walking into a dead end.
+    var needsOwner = isEngagement() && !cast[OWNER_ROLE];
+    // The host runs the broker and is a dev; the owner is the client, joining by invite.
+    // Taking that seat yourself would make you the party you are supposed to be reporting
+    // to, which is the one arrangement engagement mode exists to prevent.
+    var youAreOwner = isEngagement() && youRole === OWNER_ROLE;
     if (roles.length < minRoles) {
       rolesNote.textContent = contract
         ? 'Add at least one more role — a contract needs two agents.'
         : 'Add at least one role.';
+    } else if (needsOwner) {
+      rolesNote.textContent = 'Add the owner seat — that is your client, and only they can list what was commissioned.';
     } else if (!youRole) {
       rolesNote.textContent = 'Tap “you” on the role you’ll drive.';
+    } else if (youAreOwner) {
+      rolesNote.textContent = 'The owner is your client, not you — mark “you” on the role you’ll actually build in.';
     } else {
       rolesNote.textContent = '';
     }
     var msg = '';
     if (!title) msg = 'Add a title to continue.';
     else if (roles.length < minRoles) msg = 'Add ' + (roles.length ? 'another' : 'a') + ' role to continue.';
+    else if (needsOwner) msg = 'An engagement needs an owner seat — that is the client.';
     else if (!youRole) msg = 'Mark which role is you.';
+    else if (youAreOwner) msg = 'Mark “you” on a role you build in, not the owner.';
     hostGate.textContent = msg;
     hostBtn.disabled = !!msg;
   }
@@ -1534,7 +1597,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
     // The button is gated on a valid form (see refreshGate), so just read the model.
     var title = (titleEl.value || '').trim();
-    var mode = modeDebug.checked ? 'debug' : 'contract';
+    var mode = currentMode();
     var roles = castRoles();
     var hostRole = youRole || '';
 
