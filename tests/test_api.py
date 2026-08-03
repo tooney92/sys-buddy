@@ -255,8 +255,15 @@ def test_contract_block_versions_and_default(conn):
 
     block = api._contract_for(conn, "signin", todo_id=tid)
     assert block["exists"] is True
-    assert block["versions"] == [{"id": "v1", "locked": True, "status": "locked", "superseded": False},
-        {"id": "v2", "locked": False, "status": "draft", "superseded": False}]
+    # A locked v1 under a DRAFT v2 is still the agreement in force — a proposal supersedes
+    # nothing, only a later LOCK does (state._reopen_todo keeps the last lock serving until
+    # the new version is signed by everyone).
+    assert block["versions"] == [
+        {"id": "v1", "locked": True, "status": "locked", "superseded": False,
+         "superseded_by": None},
+        {"id": "v2", "locked": False, "status": "draft", "superseded": False,
+         "superseded_by": None},
+    ]
     # default = latest *locked* version, not merely the latest.
     assert block["default"] == "v1"
     assert block["data"]["v1"]["endpoints"] == spec1["endpoints"]
