@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.2.0](https://github.com/tooney92/sys-buddy/compare/v2.1.0...v2.2.0) (2026-08-03)
+
+
+### Added
+
+* files get their own door (both ways), plus two dashboard fixes ([2018b2f](https://github.com/tooney92/sys-buddy/commit/2018b2f08184700cfb3eb9e2ca7bc9f7db0641ef))
+
 ## [2.1.0](https://github.com/tooney92/sys-buddy/compare/v2.0.1...v2.1.0) (2026-08-03)
 
 
