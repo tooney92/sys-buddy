@@ -40,7 +40,7 @@ import re
 import sqlite3
 import time
 
-from . import config, contracts, notify, seats, service, todos
+from . import config, contracts, deliverables, notify, seats, service, todos
 from .identity import Identity
 
 # --- states -----------------------------------------------------------------
@@ -52,8 +52,14 @@ TESTING = "testing"
 VERIFIED = "verified"
 STUCK = "stuck"
 RESOLVED = "resolved"  # debug tasks: terminal, reached from any non-terminal state
+# ENGAGEMENT tasks only, and strictly AFTER `verified`. There are two levels of done:
+# `verified` is the BUILDERS agreeing the work is finished, peer to peer; `confirmed` is
+# the CLIENT saying it is what he asked for, after his agent has gone and looked at every
+# deliverable. It is the commercial end of an engagement — the moment you would invoice —
+# and it is reached by a verification run, never reported by an agent.
+CONFIRMED = "confirmed"
 
-TERMINAL_STATES = frozenset({VERIFIED, STUCK, RESOLVED})
+TERMINAL_STATES = frozenset({VERIFIED, STUCK, RESOLVED, CONFIRMED})
 
 # --- report_status vocabulary -----------------------------------------------
 # The status strings an agent may pass to report_status. Named for what the agent
@@ -398,6 +404,28 @@ def _signatures_for(conn, contract_id: int) -> list[str]:
             (contract_id,),
         ).fetchall()
     ]
+
+
+def _is_solo_engagement_todo(conn, identity: Identity, row) -> bool:
+    """A one-party todo on an engagement — where the producer MAY check their own work.
+
+    "The producer does not check their own work" is right whenever there is somebody
+    else to do it. On a solo engagement todo there is not, and the rule becomes a
+    deadlock rather than a safeguard: the todo can never reach `verified`, so the
+    owner's verification run is refused forever, so nothing is ever checked by anyone.
+
+    Letting the producer through grants nothing, because it is not the real check. The
+    engagement's outer ring is: the client's agent goes to the deployed app and looks,
+    and the task only reaches `confirmed` if every deliverable comes back accepted. Tony
+    marking his own todo done merely says "I have finished" — Ada's agent still decides
+    whether it works, and a false claim is caught there.
+
+    Deliberately narrow. Two parties means somebody else can check, so they must; a peer
+    task has no outer ring at all, so the original rule stands unconditionally there.
+    """
+    if len(todos.parties_of(row)) != 1:
+        return False
+    return deliverables.is_engagement(conn, identity.task_id)
 
 
 def _producer_role(conn, task_id: str, todo_id: int | None = None) -> str | None:
@@ -872,6 +900,11 @@ def propose_contract(conn, identity: Identity, spec: dict, number: int | None = 
     # person on one box, where http://localhost:PORT is correct), and the GUI always
     # runs the broker in remote mode for token auth so is_remote alone cannot tell them
     # apart. See contracts.validate_staging_url.
+    # ENGAGEMENT GATE — see the matching call in `todos.propose_todo`. Gating todos
+    # already covers this transitively (no todos means no contracts), so this is the
+    # belt to that braces: a task switched to `engagement` while it already held todos
+    # would otherwise let a contract through on unagreed scope. A no-op off engagement.
+    deliverables.assert_can_build(conn, identity.task_id, "propose a contract")
     errors = contracts.validate_spec(
         spec,
         is_remote=config.get_config().is_remote,
@@ -1138,6 +1171,24 @@ def lock_contract(conn, identity: Identity, version: int, number: int | None = N
             f"contract version {version}{scope_note} was declined and cannot be signed. "
             f"Propose a new version with propose_contract(spec, todo={todo['number']}) that "
             f"addresses the objection — get_contract shows who declined it and why."
+        )
+    # A SUPERSEDED draft cannot be signed. Proposing v2 does not mark v1 as anything —
+    # it stays `draft` forever — so without this both parties could sign the OLD shape
+    # while v2 was the live proposal, and the deliverable would end up contracted
+    # against something nobody was discussing. Observed on a real task whose picker
+    # offered v1 and v2 as equals.
+    #
+    # Only DRAFTS are superseded this way. A LOCKED v1 followed by a v2 is the ordinary
+    # renegotiation flow and is already refused above by the immutability check.
+    newest = conn.execute(
+        "SELECT MAX(version) AS v FROM contracts WHERE todo_id = ?", (todo["id"],)
+    ).fetchone()["v"]
+    if newest is not None and version < newest:
+        raise ValueError(
+            f"contract version {version}{scope_note} has been superseded by v{newest}, "
+            f"so it cannot be signed — signing it would agree a shape that was already "
+            f"replaced. Read the current one with get_contract(todo={todo['number']}) "
+            f"and sign that: lock_contract({newest}, todo={todo['number']})."
         )
 
     # Record this signature (idempotent — signing twice is a no-op, not an error).
@@ -1842,7 +1893,7 @@ def _report_todo_test(conn, identity: Identity, row, status: str, detail: str) -
             f"(the todo is '{row['state']}', need '{BACKEND_LIVE}')"
         )
     producer = _producer_role(conn, identity.task_id, todo_id=row["id"])
-    if identity.role == producer:
+    if identity.role == producer and not _is_solo_engagement_todo(conn, identity, row):
         raise ValueError(
             f"the producer ('{producer}') doesn't report checks on its own work; the "
             f"consuming party/parties on todo #{row['number']} do"

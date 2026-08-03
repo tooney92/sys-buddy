@@ -1,0 +1,802 @@
+"""Verification specs and runs (``docs/enhancements.md`` items 3–4).
+
+The load-bearing tests here are the two that make the feature honest rather than
+merely present:
+
+* **the stamp is written by the BROKER** — the party being audited never supplies
+  the evidence that says whether his own check is current, and
+* **an absolute URL is refused** — the entire mechanical safety story, because the
+  testing agent's only base URL is the one the host provided.
+
+Rows are inserted with plain SQL rather than through the deliverable/todo ops on
+purpose: this module is about specs and results, and building its fixtures out of
+another module's flow would make these tests fail for reasons that have nothing to
+do with verification.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+
+import pytest
+
+from sys_buddy import verification
+from sys_buddy.identity import Identity
+
+from tests.conftest import seed_agent, seed_task
+
+
+# --- fixtures ---------------------------------------------------------------
+def engagement_task(conn, task_id="landing", roles=("owner", "frontend", "frontend-2")):
+    seed_task(conn, task_id, roles=roles)
+    conn.execute("UPDATE tasks SET mode = 'engagement' WHERE id = ?", (task_id,))
+    conn.commit()
+    return task_id
+
+
+def seat(conn, task_id, handle, role_type, name=None) -> Identity:
+    agent_id = seed_agent(
+        conn, task_id, role_type, name or handle, f"sbk_{handle}", handle=handle
+    )
+    return Identity(agent_id, task_id, name or handle, handle, role_type)
+
+
+def add_deliverable(conn, task_id, number, text) -> int:
+    cur = conn.execute(
+        "INSERT INTO deliverables (task_id, number, text, created_at) VALUES (?,?,?,?)",
+        (task_id, number, text, time.time()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def add_todo(conn, task_id, number, title="work", parties=("frontend",)) -> int:
+    cur = conn.execute(
+        "INSERT INTO todos (task_id, number, title, scope, parties_json, "
+        "proposed_role, created_at) VALUES (?,?,?,?,?,?,?)",
+        (task_id, number, title, title, json.dumps(list(parties)), "frontend",
+         time.time()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def link(conn, todo_id, deliverable_id) -> None:
+    conn.execute(
+        "INSERT INTO todo_deliverables (todo_id, deliverable_id) VALUES (?,?)",
+        (todo_id, deliverable_id),
+    )
+    conn.commit()
+
+
+def lock_contract(conn, task_id, todo_id, version) -> int:
+    cur = conn.execute(
+        "INSERT INTO contracts (task_id, version, spec_json, status, todo_id, "
+        "locked_at, created_at) VALUES (?,?,?,?,?,?,?)",
+        (task_id, version, "{}", "locked", todo_id, time.time(), time.time()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def set_todo_state(conn, todo_id, state) -> None:
+    conn.execute("UPDATE todos SET state = ? WHERE id = ?", (state, todo_id))
+    conn.commit()
+
+
+def claimed_deliverable(conn, task_id, number, text, todo_number):
+    """A deliverable WITH a todo on it, verified — i.e. one a run may legitimately reach.
+
+    A bare `add_deliverable` leaves it unclaimed, and an unclaimed deliverable blocks the
+    run by design: no todo means no contract, so nothing was agreed about how it gets
+    built. Tests that only need a second deliverable to exist want this, not the bare one.
+    """
+    d = add_deliverable(conn, task_id, number, text)
+    t = add_todo(conn, task_id, todo_number, text)
+    link(conn, t, d)
+    set_todo_state(conn, t, "verified")
+    return d
+
+
+@pytest.fixture
+def engagement(conn):
+    """One engagement, one deliverable, one linked todo whose contract is locked at v1.
+
+    The todo is left **verified**, because that is the state an engagement is in when
+    anybody starts a verification run: the builders finish first (todo `verified`, agreed
+    peer to peer), and only then does the owner go and look. Tests that need the
+    unfinished case walk it back with `set_todo_state`.
+    """
+    task_id = engagement_task(conn)
+    owner = seat(conn, task_id, "owner", "owner", "Anna")
+    james = seat(conn, task_id, "frontend", "frontend", "James")
+    john = seat(conn, task_id, "frontend-2", "frontend", "John")
+    d1 = add_deliverable(conn, task_id, 1, "Landing page")
+    t2 = add_todo(conn, task_id, 2)
+    link(conn, t2, d1)
+    lock_contract(conn, task_id, t2, 1)
+    set_todo_state(conn, t2, "verified")
+    return {
+        "task_id": task_id,
+        "owner": owner,
+        "james": james,
+        "john": john,
+        "d1": d1,
+        "t2": t2,
+    }
+
+
+# --- the stamp is broker-written, and correct -------------------------------
+def test_the_broker_stamps_the_locked_contract_versions(conn, engagement):
+    """The dev supplies ONE binding — the deliverable. Everything else is derived."""
+    spec = verification.submit_spec(
+        conn, engagement["john"], 1, "added 3 buttons", "below the hero on /"
+    )
+    assert spec["stamped"] == {"2": 1}
+
+
+def test_the_stamp_covers_every_linked_todo(conn, engagement):
+    """deliverable #1 → todos #2 and #5 → their locked versions → {2: 1, 5: 2}."""
+    t5 = add_todo(conn, engagement["task_id"], 5)
+    link(conn, t5, engagement["d1"])
+    lock_contract(conn, engagement["task_id"], t5, 1)
+    lock_contract(conn, engagement["task_id"], t5, 2)
+
+    spec = verification.submit_spec(
+        conn, engagement["john"], 1, "added 3 buttons", "below the hero"
+    )
+    assert spec["stamped"] == {"2": 1, "5": 2}
+
+
+def test_the_dev_cannot_supply_the_stamp(conn, engagement):
+    """There is no parameter for it, and that is the point: if the party being audited
+    chooses the stamp, the stamp proves nothing."""
+    with pytest.raises(TypeError):
+        verification.submit_spec(
+            conn, engagement["john"], 1, "claim", "how", stamped={"2": 99}
+        )
+
+
+def test_a_deliverable_with_no_linked_todos_stamps_empty_and_reads_unknown(conn):
+    """Not 'current' — there is nothing to compare against, and saying current would
+    imply a freshness check that never happened."""
+    task_id = engagement_task(conn, "orphan")
+    dev = seat(conn, task_id, "frontend", "frontend", "James")
+    add_deliverable(conn, task_id, 1, "Set up the database")
+
+    spec = verification.submit_spec(conn, dev, 1, "ran the migrations", "see /admin")
+    assert spec["stamped"] == {}
+    assert spec["staleness"] == verification.UNKNOWN
+    assert verification.staleness(conn, spec["id"]) == verification.UNKNOWN
+    assert verification.is_stale(conn, spec["id"]) is False
+
+
+def test_a_todo_with_no_locked_contract_contributes_nothing(conn, engagement):
+    """A draft is not an agreement, so there is no version to snapshot."""
+    t7 = add_todo(conn, engagement["task_id"], 7)
+    link(conn, t7, engagement["d1"])
+    conn.execute(
+        "INSERT INTO contracts (task_id, version, spec_json, status, todo_id, created_at)"
+        " VALUES (?,?,?,?,?,?)",
+        (engagement["task_id"], 1, "{}", "draft", t7, time.time()),
+    )
+    conn.commit()
+
+    spec = verification.submit_spec(conn, engagement["john"], 1, "claim", "/how")
+    assert spec["stamped"] == {"2": 1}
+
+
+# --- staleness: "the work is broken" vs "the check is out of date" -----------
+def test_is_stale_flips_when_a_linked_contract_moves_to_a_new_version(conn, engagement):
+    spec = verification.submit_spec(
+        conn, engagement["john"], 1, "added 3 buttons", "below the hero"
+    )
+    assert verification.is_stale(conn, spec["id"]) is False
+    assert verification.staleness(conn, spec["id"]) == verification.CURRENT
+
+    # The owner later asks for a fourth button; the contract is renegotiated and
+    # re-locked. John's note is now describing an older agreement.
+    lock_contract(conn, engagement["task_id"], engagement["t2"], 2)
+
+    assert verification.is_stale(conn, spec["id"]) is True
+    assert verification.staleness(conn, spec["id"]) == verification.STALE
+    assert verification.specs_for(conn, engagement["d1"])[0]["stale"] is True
+
+
+def test_a_new_linked_todo_also_makes_a_spec_stale(conn, engagement):
+    """Scope arriving under the deliverable is the same class of drift."""
+    spec = verification.submit_spec(conn, engagement["john"], 1, "claim", "/how")
+    t9 = add_todo(conn, engagement["task_id"], 9)
+    link(conn, t9, engagement["d1"])
+    lock_contract(conn, engagement["task_id"], t9, 1)
+
+    assert verification.is_stale(conn, spec["id"]) is True
+
+
+# --- paths, never URLs ------------------------------------------------------
+def test_a_plain_path_is_accepted(conn, engagement):
+    spec = verification.submit_spec(
+        conn,
+        engagement["john"],
+        1,
+        "added 3 buttons to the landing page",
+        "they're at /pricing, below the hero — pricing, features, contact",
+    )
+    assert spec["how"].startswith("they're at /pricing")
+
+
+def test_an_absolute_url_in_how_is_refused(conn, engagement):
+    with pytest.raises(ValueError) as excinfo:
+        verification.submit_spec(
+            conn, engagement["john"], 1, "added 3 buttons",
+            "they're at https://evil.com/pricing",
+        )
+    assert "'how'" in str(excinfo.value)
+    assert "PATHS" in str(excinfo.value)
+
+
+def test_an_absolute_url_in_claim_is_refused(conn, engagement):
+    with pytest.raises(ValueError) as excinfo:
+        verification.submit_spec(
+            conn, engagement["john"], 1, "shipped https://evil.com", "below the hero"
+        )
+    assert "'claim'" in str(excinfo.value)
+
+
+def test_a_refused_url_writes_no_spec(conn, engagement):
+    """Refused, never silently stripped — and nothing lands in the table either."""
+    with pytest.raises(ValueError):
+        verification.submit_spec(
+            conn, engagement["john"], 1, "claim", "go to https://evil.com"
+        )
+    assert verification.specs_for(conn, engagement["d1"]) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://evil.com/pricing",
+        "http://evil.com",
+        "//evil.com/pricing",
+        "www.evil.com",
+        "evil.com/pricing",
+        "javascript:alert(1)",
+        "data:text/html,<script>",
+        "FTP://files.example.org",
+    ],
+)
+def test_absolute_targets_are_caught(text):
+    assert verification.has_absolute_url(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "they're at /pricing, below the hero",
+        "open the home page and scroll",
+        "see src/components/Hero.tsx and vite.config.dev",
+        "the file is README.md in the repo root",
+        "/api/v1/contact accepts a POST",
+    ],
+)
+def test_ordinary_prose_and_paths_are_not_caught(text):
+    assert verification.has_absolute_url(text) is False
+
+
+def test_both_fields_are_reported_in_one_refusal(conn, engagement):
+    """Every fix in one shot, like contracts.validate_spec — not one round trip each."""
+    errors = verification.validate_claim("see https://a.com", "and //b.com/x")
+    assert len(errors) == 2
+
+
+# --- one spec per dev per deliverable, and both are kept --------------------
+def test_two_devs_may_each_leave_a_spec_on_one_deliverable(conn, engagement):
+    """They do not conflict: each asserts what THAT dev added, and both are evaluated."""
+    verification.submit_spec(conn, engagement["james"], 1, "added the shell", "on /")
+    verification.submit_spec(conn, engagement["john"], 1, "added 3 buttons", "below hero")
+
+    specs = verification.specs_for(conn, engagement["d1"])
+    assert [(s["role"], s["name"], s["claim"]) for s in specs] == [
+        ("frontend", "James", "added the shell"),
+        ("frontend-2", "John", "added 3 buttons"),
+    ]
+
+
+def test_the_same_dev_twice_on_one_deliverable_is_refused_with_a_useful_message(
+    conn, engagement
+):
+    verification.submit_spec(conn, engagement["john"], 1, "added 3 buttons", "below hero")
+    with pytest.raises(ValueError) as excinfo:
+        verification.submit_spec(conn, engagement["john"], 1, "added 4 buttons", "hero")
+    message = str(excinfo.value)
+    assert "already left a spec" in message
+    assert "frontend-2" in message and "#1" in message
+
+
+def test_one_dev_may_spec_two_different_deliverables(conn, engagement):
+    claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    verification.submit_spec(conn, engagement["john"], 1, "added 3 buttons", "below hero")
+    verification.submit_spec(conn, engagement["john"], 2, "added the form", "on /contact")
+    assert len(verification.specs_for(conn, engagement["d1"])) == 1
+
+
+def test_an_unknown_deliverable_number_is_refused(conn, engagement):
+    with pytest.raises(ValueError, match="no deliverable #9"):
+        verification.submit_spec(conn, engagement["john"], 9, "claim", "/how")
+
+
+def test_a_withdrawn_deliverable_takes_no_spec(conn, engagement):
+    conn.execute(
+        "UPDATE deliverables SET withdrawn_at = ?, withdraw_reason = ? WHERE id = ?",
+        (time.time(), "not this milestone", engagement["d1"]),
+    )
+    conn.commit()
+    with pytest.raises(ValueError, match="withdrawn"):
+        verification.submit_spec(conn, engagement["john"], 1, "claim", "/how")
+
+
+def test_empty_claim_or_how_is_refused(conn, engagement):
+    with pytest.raises(ValueError, match="'claim'"):
+        verification.submit_spec(conn, engagement["john"], 1, "   ", "/how")
+    with pytest.raises(ValueError, match="'how'"):
+        verification.submit_spec(conn, engagement["john"], 1, "claim", "")
+
+
+# --- engagement mode only ---------------------------------------------------
+def test_a_peer_task_never_reaches_verification(conn):
+    task_id = seed_task(conn, "signin")
+    dev = seat(conn, task_id, "frontend", "frontend", "James")
+    with pytest.raises(ValueError, match="engagement"):
+        verification.submit_spec(conn, dev, 1, "claim", "/how")
+    with pytest.raises(ValueError, match="engagement"):
+        verification.start_run(conn, dev, "https://staging.example.com")
+
+
+# --- runs -------------------------------------------------------------------
+def test_the_owner_starts_a_run_and_the_target_is_recorded(conn, engagement):
+    run_id = verification.start_run(
+        conn, engagement["owner"], "https://random-app.vercel.dev"
+    )
+    run = verification.latest_run(conn, engagement["task_id"])
+    assert run["id"] == run_id
+    # Disclosure, not permission: a record that does not say where it looked is
+    # unfalsifiable, so the value is stored verbatim.
+    assert run["staging_url"] == "https://random-app.vercel.dev"
+    assert run["by"] == "owner"
+
+
+def test_a_dev_cannot_start_a_run(conn, engagement):
+    """A run started by the party being audited proves nothing."""
+    with pytest.raises(ValueError, match="only the owner"):
+        verification.start_run(conn, engagement["john"], "https://staging.example.com")
+
+
+def test_a_run_with_no_target_is_allowed(conn, engagement):
+    run_id = verification.start_run(conn, engagement["owner"], None)
+    assert verification.latest_run(conn, engagement["task_id"])["staging_url"] is None
+    assert isinstance(run_id, int)
+
+
+def test_every_run_is_appended_never_replaced(conn, engagement):
+    """'You said it was done and it wasn't, twice' is the evidence an owner needs."""
+    first = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(
+        conn, first, engagement["d1"], "rejected", "verified", "found 2 buttons"
+    )
+    second = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(
+        conn, second, engagement["d1"], "accepted", "verified", "all 3 present"
+    )
+
+    rows = conn.execute("SELECT COUNT(*) AS n FROM verification_results").fetchone()
+    assert rows["n"] == 2
+
+    latest = verification.latest_results(conn, engagement["task_id"])
+    assert latest["run"]["id"] == second
+    assert [r["verdict"] for r in latest["by_deliverable"][engagement["d1"]]] == [
+        "accepted"
+    ]
+
+
+# --- results ----------------------------------------------------------------
+def test_a_result_can_judge_one_devs_claim(conn, engagement):
+    james = verification.submit_spec(
+        conn, engagement["james"], 1, "added the shell", "on /"
+    )
+    john = verification.submit_spec(
+        conn, engagement["john"], 1, "added 3 buttons", "below hero"
+    )
+    run_id = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(
+        conn, run_id, engagement["d1"], "accepted", "verified", None, spec_id=james["id"]
+    )
+    verification.record_result(
+        conn, run_id, engagement["d1"], "rejected", "verified", "found 2",
+        spec_id=john["id"],
+    )
+
+    results = verification.latest_results(conn, engagement["task_id"])
+    per_spec = {
+        r["spec_id"]: r["verdict"] for r in results["by_deliverable"][engagement["d1"]]
+    }
+    assert per_spec == {james["id"]: "accepted", john["id"]: "rejected"}
+
+
+@pytest.mark.parametrize("strength", ["verified", "evidence", "not_checked"])
+def test_every_strength_is_accepted(conn, engagement, strength):
+    run_id = verification.start_run(conn, engagement["owner"], None)
+    result = verification.record_result(
+        conn, run_id, engagement["d1"], "accepted", strength, None
+    )
+    assert result["strength"] == strength
+    assert result["strength_label"] == verification.STRENGTH_LABELS[strength]
+
+
+def test_a_bad_strength_is_refused_and_the_three_are_named(conn, engagement):
+    run_id = verification.start_run(conn, engagement["owner"], None)
+    with pytest.raises(ValueError) as excinfo:
+        verification.record_result(
+            conn, run_id, engagement["d1"], "accepted", "probably_fine", "looks ok"
+        )
+    message = str(excinfo.value)
+    assert "'strength'" in message and "probably_fine" in message
+    for strength in verification.STRENGTHS:
+        assert strength in message
+
+
+def test_a_bad_verdict_is_refused(conn, engagement):
+    run_id = verification.start_run(conn, engagement["owner"], None)
+    with pytest.raises(ValueError, match="'verdict'"):
+        verification.record_result(
+            conn, run_id, engagement["d1"], "sort_of", "verified", None
+        )
+
+
+def test_a_bad_verdict_and_a_bad_strength_come_back_together(conn, engagement):
+    run_id = verification.start_run(conn, engagement["owner"], None)
+    with pytest.raises(ValueError) as excinfo:
+        verification.record_result(conn, run_id, engagement["d1"], "nope", "maybe", None)
+    assert "'verdict'" in str(excinfo.value) and "'strength'" in str(excinfo.value)
+
+
+def test_a_spec_from_another_deliverable_cannot_be_judged_here(conn, engagement):
+    d2 = claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    spec = verification.submit_spec(conn, engagement["john"], 1, "buttons", "below hero")
+    run_id = verification.start_run(conn, engagement["owner"], None)
+    with pytest.raises(ValueError, match="claim about deliverable"):
+        verification.record_result(
+            conn, run_id, d2, "accepted", "verified", None, spec_id=spec["id"]
+        )
+
+
+def test_one_verdict_per_claim_per_run(conn, engagement):
+    """The NULL-distinct trap: the schema deliberately has no unique index here, so
+    the domain layer is the only thing standing between a run and two answers."""
+    run_id = verification.start_run(conn, engagement["owner"], None)
+    verification.record_result(conn, run_id, engagement["d1"], "accepted", "verified", None)
+    with pytest.raises(ValueError, match="already recorded"):
+        verification.record_result(
+            conn, run_id, engagement["d1"], "rejected", "verified", None
+        )
+
+
+def test_a_deliverable_from_another_task_is_refused(conn, engagement):
+    other = engagement_task(conn, "other", roles=("owner",))
+    stray = add_deliverable(conn, other, 1, "Something else")
+    run_id = verification.start_run(conn, engagement["owner"], None)
+    with pytest.raises(ValueError, match="not to this run's task"):
+        verification.record_result(conn, run_id, stray, "accepted", "verified", None)
+
+
+def test_latest_results_is_empty_before_anyone_checks(conn, engagement):
+    assert verification.latest_results(conn, engagement["task_id"]) == {
+        "run": None,
+        "by_deliverable": {},
+    }
+
+
+# --- coverage: two counts, both mechanical ----------------------------------
+def test_coverage_counts_a_deliverable_with_no_spec(conn, engagement):
+    claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    add_deliverable(conn, engagement["task_id"], 3, "Pricing page")
+    add_deliverable(conn, engagement["task_id"], 4, "Set up the database")
+    for number in (1, 2, 3):
+        verification.submit_spec(conn, engagement["james"], number, "built it", "/there")
+
+    assert verification.coverage(conn, engagement["task_id"]) == {
+        "deliverables": 4,
+        "with_spec": 3,   # #4: nobody left a check
+        "with_result": 0,  # nothing has run
+    }
+
+
+def test_coverage_counts_a_deliverable_with_no_result(conn, engagement):
+    """'Everything passed' must not be able to hide a deliverable nobody looked at."""
+    d2 = claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    verification.submit_spec(conn, engagement["james"], 1, "built it", "/there")
+    verification.submit_spec(conn, engagement["james"], 2, "built it", "/contact")
+    run_id = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run_id, engagement["d1"], "accepted", "verified", None)
+
+    assert verification.coverage(conn, engagement["task_id"]) == {
+        "deliverables": 2,
+        "with_spec": 2,
+        "with_result": 1,
+    }
+    assert d2 not in verification.latest_results(conn, engagement["task_id"])[
+        "by_deliverable"
+    ]
+
+
+def test_two_specs_on_one_deliverable_count_once(conn, engagement):
+    """Coverage measures PRESENCE per deliverable, not how many people wrote notes."""
+    verification.submit_spec(conn, engagement["james"], 1, "added the shell", "on /")
+    verification.submit_spec(conn, engagement["john"], 1, "added 3 buttons", "below hero")
+    assert verification.coverage(conn, engagement["task_id"])["with_spec"] == 1
+
+
+def test_coverage_counts_only_the_latest_run(conn, engagement):
+    """A run covers everything, so results from an older run describe another build."""
+    claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    d2 = conn.execute(
+        "SELECT id FROM deliverables WHERE task_id = ? AND number = 2",
+        (engagement["task_id"],),
+    ).fetchone()["id"]
+
+    first = verification.start_run(conn, engagement["owner"], None)
+    verification.record_result(conn, first, engagement["d1"], "accepted", "verified", None)
+    verification.record_result(conn, first, d2, "accepted", "verified", None)
+    assert verification.coverage(conn, engagement["task_id"])["with_result"] == 2
+
+    verification.start_run(conn, engagement["owner"], None)
+    assert verification.coverage(conn, engagement["task_id"])["with_result"] == 0
+
+
+def test_a_withdrawn_deliverable_leaves_coverage(conn, engagement):
+    d2 = claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    conn.execute(
+        "UPDATE deliverables SET withdrawn_at = ? WHERE id = ?", (time.time(), d2)
+    )
+    conn.commit()
+    assert verification.coverage(conn, engagement["task_id"])["deliverables"] == 1
+
+
+def test_coverage_on_an_engagement_with_nothing_agreed_yet(conn):
+    task_id = engagement_task(conn, "fresh", roles=("owner",))
+    assert verification.coverage(conn, task_id) == {
+        "deliverables": 0,
+        "with_spec": 0,
+        "with_result": 0,
+    }
+
+
+# --- the event log ----------------------------------------------------------
+def test_every_run_and_result_lands_in_the_event_log(conn, engagement):
+    verification.submit_spec(conn, engagement["john"], 1, "added 3 buttons", "below hero")
+    run_id = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run_id, engagement["d1"], "accepted", "verified", None)
+
+    rows = conn.execute(
+        "SELECT detail_json FROM events WHERE kind = 'verification' ORDER BY id"
+    ).fetchall()
+    actions = [json.loads(row["detail_json"])["action"] for row in rows]
+    # `confirmed` rides along because this run accepted the only live deliverable —
+    # the client's acceptance is a fact about the engagement, so it belongs in the log.
+    assert actions == ["spec_submitted", "run_started", "result_recorded", "confirmed"]
+
+
+# --------------------------------------------------------------------------- #
+# two levels of done: the builders finish, THEN the owner checks
+# --------------------------------------------------------------------------- #
+def test_a_run_is_refused_while_the_team_is_still_building(conn, engagement):
+    """The owner must not test work the devs have not finished.
+
+    A todo reaches `verified` when the BUILDERS agree it is done — peer to peer, one
+    builds and another checks. A deliverable is verified when the OWNER goes and looks.
+    The second follows the first, per `docs/enhancements.md` item 4: *devs finish →
+    owner is notified → owner decides when to look*.
+
+    Inverted, the owner tests half-built work and collects failures that are nobody's
+    fault, costing him either confidence in the team or confidence in the checking.
+
+    Caught on the live dashboard, which read "0 of 3 verified" across the todos while
+    the owner's register already claimed "Verified — this ran" on two deliverables.
+    """
+    set_todo_state(conn, engagement["t2"], "building")
+    with pytest.raises(ValueError) as e:
+        verification.start_run(conn, engagement["owner"], "https://staging.example.com")
+    msg = str(e.value)
+    assert "not finished" in msg
+    # It must name WHICH todo and what state it is in, so the owner can go and ask
+    # rather than being told only that he may not look.
+    assert "#2" in msg and "building" in msg
+
+
+def test_a_run_opens_once_the_builders_have_verified(conn, engagement):
+    run = verification.start_run(conn, engagement["owner"], "https://staging.example.com")
+    assert isinstance(run, int)
+
+
+def test_a_deliverable_no_todo_claims_blocks_the_run(conn, engagement):
+    """The less obvious half of "is the work finished".
+
+    It LOOKS like there is nothing to wait for — but no todo means no contract, so
+    nothing was agreed about HOW it gets built. The invariant is "we said we will build
+    like this, and this is how we have built", and an unclaimed deliverable skips the
+    first half and is then checked as though it had not.
+
+    Observed live: the owner's agent verified a mobile-layout deliverable that no todo
+    named, purely because the landing-page work happened to satisfy it. It passed, and
+    it should never have been checkable — the team had not agreed to build it.
+    """
+    add_deliverable(conn, engagement["task_id"], 2, "Something nobody picked up")
+    with pytest.raises(ValueError) as e:
+        verification.start_run(conn, engagement["owner"], "https://staging.example.com")
+    msg = str(e.value)
+    assert "nobody has taken this on" in msg
+    assert "#2" in msg and "Something nobody picked up" in msg
+    # The way out is a person's, and the refusal has to name both options.
+    assert "todo" in msg and "withdraw" in msg
+
+
+def test_withdrawing_an_unclaimed_deliverable_unblocks_the_run(conn, engagement):
+    """The owner's escape hatch: scope he no longer wants must not hold the run hostage."""
+    add_deliverable(conn, engagement["task_id"], 2, "Something nobody picked up")
+    conn.execute(
+        "UPDATE deliverables SET withdrawn_at = ? WHERE task_id = ? AND number = 2",
+        (time.time(), engagement["task_id"]),
+    )
+    conn.commit()
+    assert isinstance(
+        verification.start_run(conn, engagement["owner"], "https://staging.example.com"),
+        int,
+    )
+
+
+def test_a_dropped_todo_does_not_block_the_run(conn, engagement):
+    """Abandoned work is not unfinished work — it is gone, and waiting on it forever
+    would make a dropped todo a permanent hostage to the whole engagement."""
+    t3 = add_todo(conn, engagement["task_id"], 3, "abandoned")
+    link(conn, t3, engagement["d1"])
+    set_todo_state(conn, t3, "building")
+    conn.execute("UPDATE todos SET dropped_at = ? WHERE id = ?", (time.time(), t3))
+    conn.commit()
+    assert isinstance(
+        verification.start_run(conn, engagement["owner"], "https://staging.example.com"),
+        int,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# `confirmed`: the client's acceptance, computed and never reported
+# --------------------------------------------------------------------------- #
+def _task_state(conn, task_id):
+    return conn.execute("SELECT state FROM tasks WHERE id = ?", (task_id,)).fetchone()["state"]
+
+
+def test_accepting_every_deliverable_confirms_the_engagement(conn, engagement):
+    """The commercial end of an engagement, and a different claim from `verified`.
+
+    `verified` is the BUILDERS saying the work is done. `confirmed` is the CLIENT saying
+    it is what he asked for, after his agent went and looked. It is computed from what
+    the run actually found — no agent may declare it.
+    """
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    assert _task_state(conn, engagement["task_id"]) != "confirmed"
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_one_rejection_withholds_confirmation(conn, engagement):
+    """A client does not accept four fifths of what he asked for."""
+    d2 = claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    verification.record_result(conn, run, d2, "rejected", "verified", "sends no email")
+    assert _task_state(conn, engagement["task_id"]) != "confirmed"
+    assert verification.accepted_everything(conn, engagement["task_id"], run) is False
+
+
+def test_a_partly_filed_run_does_not_confirm_early(conn, engagement):
+    """Order must not matter: two of three accepted leaves the task alone, and the third
+    landing later is what tips it."""
+    d2 = claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) != "confirmed"
+    verification.record_result(conn, run, d2, "accepted", "verified", "emails arrive")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_a_withdrawn_deliverable_is_not_waited_for(conn, engagement):
+    """Scope the owner dropped cannot hold his own confirmation hostage."""
+    d2 = claimed_deliverable(conn, engagement["task_id"], 2, "Contact form", 20)
+    conn.execute("UPDATE deliverables SET withdrawn_at = ? WHERE id = ?", (time.time(), d2))
+    conn.commit()
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_a_confirmed_task_survives_a_rollup(conn, engagement):
+    """THE regression that makes the feature work at all.
+
+    `todos.apply_rollup` fires on every contract proposal, lock, reopen and todo report,
+    and can only ever derive one of the six march states. Without `confirmed` in its
+    do-not-overwrite tuple, the client's acceptance would be stomped back to `verified`
+    the moment anybody touched anything.
+    """
+    from sys_buddy import todos as _todos
+
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+    _todos.apply_rollup(conn, engagement["task_id"])
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_confirmation_is_idempotent(conn, engagement):
+    """A second run over already-accepted scope must not re-fire the notification."""
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    run2 = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run2, engagement["d1"], "accepted", "verified", "still")
+    confirms = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE kind = 'verification' "
+        "AND detail_json LIKE '%\"action\": \"confirmed\"%'"
+    ).fetchone()[0]
+    assert confirms == 1
+
+
+def test_a_later_failing_run_un_confirms(conn, engagement):
+    """Confirmation is a fact about the product, not a memory of an earlier day.
+
+    Watched live: a confirmed engagement had a button quietly deleted from staging, the
+    next run rejected that deliverable, and the task still read `confirmed` — the record
+    said the client was happy with something that no longer existed. A state nobody can
+    leave is not a fact.
+    """
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+    later = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, later, engagement["d1"], "rejected", "verified",
+                               "the Contact button is gone")
+    assert _task_state(conn, engagement["task_id"]) != "confirmed"
+
+
+def test_the_earlier_acceptance_survives_in_the_log(conn, engagement):
+    """Un-confirming does not erase what the client once accepted — that is history, and
+    history lives in the append-only log with the run id that produced it."""
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "accepted", "verified", "works")
+    later = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, later, engagement["d1"], "rejected", "verified", "gone")
+
+    actions = [
+        json.loads(r["detail_json"])["action"]
+        for r in conn.execute(
+            "SELECT detail_json FROM events WHERE kind = 'verification' ORDER BY id"
+        )
+    ]
+    assert "confirmed" in actions and "unconfirmed" in actions
+    assert actions.index("confirmed") < actions.index("unconfirmed")
+
+
+def test_fixing_it_confirms_again(conn, engagement):
+    """The round trip: accepted, regressed, fixed, accepted again."""
+    for verdict in ("accepted", "rejected", "accepted"):
+        run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+        verification.record_result(conn, run, engagement["d1"], verdict, "verified", verdict)
+    assert _task_state(conn, engagement["task_id"]) == "confirmed"
+
+
+def test_a_run_that_fails_a_never_confirmed_task_changes_nothing(conn, engagement):
+    """The un-confirm path must not fire on a task that was never confirmed."""
+    before = _task_state(conn, engagement["task_id"])
+    run = verification.start_run(conn, engagement["owner"], "https://s.example.com")
+    verification.record_result(conn, run, engagement["d1"], "rejected", "verified", "broken")
+    assert _task_state(conn, engagement["task_id"]) == before

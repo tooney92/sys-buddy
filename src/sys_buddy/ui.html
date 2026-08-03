@@ -63,13 +63,26 @@ button{font-family:inherit}
 "use strict";
 
 /* ---------- design maps (ported from the prototype Component) ---------- */
-var SK={open:'open',contract_proposed:'proposed',contract_locked:'locked',backend_live:'live',testing:'testing',verified:'verified',stuck:'stuck'};
+/* `confirmed` deliberately REUSES the `verified` palette rather than owning one. A new
+   key means six new CSS declarations across both themes, and a dark-theme triple that
+   goes missing renders a genuinely blank chip — stateChip writes its var() with no
+   fallback, so an undefined bg/fg/dot resolves to nothing at all. Green already means
+   "this is finished"; the two ends of an engagement differ by their word, not colour. */
+var SK={open:'open',contract_proposed:'proposed',contract_locked:'locked',backend_live:'live',testing:'testing',verified:'verified',confirmed:'verified',stuck:'stuck'};
 /* The chip's LABEL. `contract_locked` reads just 'locked', matching SK above and the
    `locked` node in STEPS/TODO_STEPS — it used to say 'contract locked' here alone, so the
    same state was named two different things on one screen depending on which widget drew
    it. There is only one kind of contract now, so the qualifier bought nothing. */
-var SLAB={open:'open',contract_proposed:'planning',contract_locked:'locked',backend_live:'backend live',testing:'testing',verified:'verified',stuck:'stuck'};
-var ORDER={open:0,contract_proposed:1,contract_locked:2,backend_live:3,testing:4,verified:5};
+/* `confirmed ✓` carries the tick for the same reason `resolved ✓` does (debugChip): it
+   is the LAST word on the task, and the bare adjective reads as one more stage in a list
+   of stages. `verified` means the builders are done; `confirmed` means the owner agrees
+   he got what he asked for — the end of the engagement, and the moment you invoice. */
+var SLAB={open:'open',contract_proposed:'planning',contract_locked:'locked',backend_live:'backend live',testing:'testing',verified:'verified',confirmed:'confirmed ✓',stuck:'stuck'};
+var ORDER={open:0,contract_proposed:1,contract_locked:2,backend_live:3,testing:4,verified:5,confirmed:6};
+/* Nothing is left to happen on a task in one of these — so it is NOT "in flight", and
+   the stepper stops pulsing. Keyed as an object, not an array, because every read is a
+   membership test. Mirrors `state.TERMINAL_STATES`. */
+var TERMINAL={verified:1,confirmed:1,stuck:1,resolved:1};
 // `broker` is not an agent seat — it's the broker's own voice, used for the
 // notifications it authors (e.g. contract_locked). Neutral system colour so it never
 // reads as one of the peers talking.
@@ -82,7 +95,10 @@ var ROLE_TAGS={be:'backend',fe:'frontend',mb:'mobile',de:'designer'};
 // The 'preflight' node has no matching task state — it's a sub-phase of 'open',
 // driven by per-agent readiness (see genSteps). ORDER above stays keyed on the REAL
 // task states; genSteps maps real→display indices around the inserted node.
-var STEPS=[['open','open'],['preflight','pre-flight assessments'],['contract_proposed','planning'],['contract_locked','locked'],['backend_live','backend live'],['testing','testing'],['verified','verified']];
+// The LAST node, `confirmed`, exists only in engagement mode — a contract/debug task can
+// never reach it, and a node nothing can ever light is worse than no node. genSteps drops
+// it for a peer task (STEPS.slice), so those steppers are the seven they always were.
+var STEPS=[['open','open'],['preflight','pre-flight assessments'],['contract_proposed','planning'],['contract_locked','locked'],['backend_live','backend live'],['testing','testing'],['verified','verified'],['confirmed','confirmed']];
 /* ---------- todos (v2) ----------
    When a task has todos the stepper TRUNCATES, it does not die: `open` and `pre-flight
    assessments` stay task-level (you pair once, at the task), and the five later phases
@@ -205,6 +221,10 @@ function typeChip(type,pass){
     contract_proposal:['contract proposal','locked'],contract_lock:['contract lock','locked'],
     contract_locked:['contract locked','locked'],renegotiation:['replanning','proposed'],
     deploy_confirmed:['deploy confirmed','live'],verified:['verified','verified'],stuck:['stuck','stuck'],
+    /* The two ENDINGS. Both were falling through to the default ['message','open'], so the
+       one bubble in the thread that closes the whole task rendered as an anonymous grey
+       "message" — `resolved` has done that since debug tasks shipped. */
+    confirmed:['confirmed','verified'],resolved:['resolved','verified'],
     /* the todo conversation (v2). Additive: no pre-todo task ever carries these types. */
     todo_proposal:['todo proposed','proposed'],todo_accept:['todo accepted','verified'],
     todo_decline:['todo declined','stuck'],todo_drop:['todo drop','open'],
@@ -217,7 +237,11 @@ function typeChip(type,pass){
 /* `todo` is ONE event kind carrying the specific action inside (api._event), so this
    vocabulary stays fixed as the todo actions grow. Every other palette dot is already
    spoken for, hence accent-2 — distinct from slack's accent, and not a role colour. */
-function eventColor(kind){ return ({transition:'var(--st-proposed-dot)',lock:'var(--st-locked-dot)',deploy:'var(--st-live-dot)',test:'var(--st-testing-dot)',slack:'var(--accent)',token:'var(--st-open-dot)',task:'var(--st-open-dot)',todo:'var(--accent-2)'})[kind]||'var(--st-open-dot)'; }
+/* Every kind the broker actually writes needs a row here, or it renders in the
+   fallback grey and reads as background noise. `deliverable`, `verification` and
+   `guidelines` are the engagement kinds; `resolved` is a pre-existing gap — a debug
+   task's terminal event was uncoloured and unfilterable. */
+function eventColor(kind){ return ({transition:'var(--st-proposed-dot)',lock:'var(--st-locked-dot)',deploy:'var(--st-live-dot)',test:'var(--st-testing-dot)',slack:'var(--accent)',token:'var(--st-open-dot)',task:'var(--st-open-dot)',todo:'var(--accent-2)',deliverable:'var(--accent)',verification:'var(--st-verified-dot)',guidelines:'var(--st-locked-dot)',resolved:'var(--st-verified-dot)'})[kind]||'var(--st-open-dot)'; }
 
 /* small inline SVGs */
 function svg(w,inner){ return '<svg width="'+w+'" height="'+w+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'+inner+'</svg>'; }
@@ -380,7 +404,7 @@ function stepVisual(done,current,stuckStep,size){
     labelColor:(done||current)?'var(--text)':(stuckStep?'var(--st-stuck-fg)':'var(--text-3)')};
 }
 
-function genSteps(stateName, times, agents){
+function genSteps(stateName, times, agents, engagement){
   times=times||{};
   var isStuck = stateName==='stuck';
   var realO = ORDER[stateName]!=null?ORDER[stateName]:0;   // index into REAL task states
@@ -388,10 +412,17 @@ function genSteps(stateName, times, agents){
   function disp(ri){ return ri===0?0:ri+1; }               // real index → display index
   // Display frontier (into the 7-node STEPS incl. the inserted pre-flight at index 1).
   var o = isStuck ? 5 : (stateName==='open' ? 1 : disp(realO));
-  var last = STEPS.length-1;
+  // Only an engagement gets the eighth (`confirmed`) node — see STEPS.
+  var steps = engagement ? STEPS : STEPS.slice(0, STEPS.length-1);
+  var last = steps.length-1;
+  /* Nothing is left to do AT the frontier node itself, so it renders done (a tick)
+     rather than current (a pulsing ring). `confirmed` belongs here beside `verified`:
+     without it the final node of a FINISHED engagement pulses forever, which is the
+     dashboard's one way of saying "someone is working on this right now". */
+  var finished = stateName==='verified' || stateName==='confirmed';
   // Pass 1: resolve done/current/stuck per node (the pre-flight node is special-cased
   // because it has no matching task state — it's driven by agent readiness).
-  var meta = STEPS.map(function(s,i){
+  var meta = steps.map(function(s,i){
     var key=s[0];
     var stuckStep = isStuck && i===5;
     var done, current;
@@ -399,13 +430,13 @@ function genSteps(stateName, times, agents){
       done = (stateName!=='open') || preDone;
       current = stateName==='open' && !preDone && !isStuck;
     } else {
-      done = i<o || (stateName==='verified' && i===o);
-      current = i===o && !isStuck && stateName!=='verified';
+      done = i<o || (finished && i===o);
+      current = i===o && !isStuck && !finished;
     }
     return {done:done, current:current, stuck:stuckStep};
   });
   var reached=function(m){ return m.done||m.current||m.stuck; };
-  return STEPS.map(function(s,i){
+  return steps.map(function(s,i){
     var key=s[0], m=meta[i];
     var done=m.done, current=m.current, stuckStep=m.stuck;
     var v=stepVisual(done,current,stuckStep,28);
@@ -638,10 +669,17 @@ function castChips(t, size, fs){
    UNJOINED SEATS ARE LISTED. A roster built only from joined agents cannot answer "who
    never accepted their invite?", which is precisely the state that silently stalls a
    task — and "4 of 5 joined" is the headline for exactly that reason. */
+/* A joined seat that is not currently parked in wait_for_message renders BLANK, not
+   "idle". We do not track whether a person is at their desk, and "idle" claimed we did
+   — it reads as a status about the human ("Kola is slacking") when all it ever meant was
+   "no agent is blocked on a read right this second", which is the normal state of an
+   agent that is busy working. The column still earns its place: a listening pill is a
+   real live signal, and the UNJOINED strings are the whole reason the roster lists seats
+   nobody has filled. */
 function rosterPresence(row){
   if(!row.joined) return row.invite_pending ? 'invite sent' : 'not invited yet';
   if(row.listening) return listenLabel(row);
-  return 'idle';
+  return '';
 }
 function rosterPanel(d){
   var r=d&&d.roster;
@@ -901,10 +939,15 @@ function listHTML(){
         '<span data-last="'+esc(t.id)+'" style="font-size:12.5px;color:var(--text-2);white-space:nowrap">'+esc(t.last||'')+'</span>'+strike+
       '</div>'+IC.chevR+'</div>';
   }).join('');
+  /* "in flight" means STILL RUNNING, so it counts only the tasks that are — the header
+     used to print state.tasks.length, i.e. every row on the page, so a finished board of
+     ten `verified`/`stuck`/`resolved` tasks announced "10 in flight". A `confirmed`
+     engagement is the sharpest case: the client has signed it off and you have invoiced. */
+  var inFlight = state.tasks.filter(function(t){ return !TERMINAL[t.state]; }).length;
   return '<div style="max-width:1040px;margin:0 auto;padding:30px 20px 70px">'+
     '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">'+
       '<h1 style="font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;color:var(--text)">Tasks</h1>'+
-      '<span style="font-size:13px;color:var(--text-2)">'+state.tasks.length+' in flight</span></div>'+
+      '<span style="font-size:13px;color:var(--text-2)">'+inFlight+' in flight</span></div>'+
     '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">'+TASKS_BLURB+'</p>'+
     '<div style="display:flex;flex-direction:column;gap:10px">'+rows+'</div></div>';
 }
@@ -1282,6 +1325,56 @@ function todoNo(t){ return t && t.number!=null ? t.number : (t ? t.id : ''); }
                     so it overrides the label wherever it appears.
    Everything else returns ''. */
 var TODO_STATUS_SHOWN = {pending:1, dropped:1};
+/* ---------- scope: readable without a markup parser ----------------------
+   `scope` is prose written for the agent that has to BUILD the thing, and it grows
+   into a wall of text — in scope, out of scope, constraints, open questions. Correct
+   for its job, unreadable at a glance.
+
+   We do NOT parse markdown, deliberately. Everything an agent writes is DATA
+   (charter rule 1), and turning untrusted text into HTML is exactly what escaping is
+   here to prevent — a markdown renderer would buy nicer bullets and hand back links,
+   images and a much larger surface. Instead we split on shapes that carry no markup
+   at all, and every fragment still goes through esc():
+
+     blank line          -> a new paragraph
+     line starting '- '  -> a list item
+     ALL-CAPS line, or a line ending ':'  -> a heading
+
+   That is a convention agents already follow, because the briefing teaches
+   "Out of scope:" — so this renders todos that were written months ago, which an
+   array-of-paragraphs field could never do. */
+function scopeHTML(text){
+  var out=[], list=[];
+  function flushList(){
+    if(!list.length) return;
+    out.push('<ul style="margin:4px 0 8px;padding-left:17px;color:var(--text-2);font-size:11.5px;line-height:1.55">'+
+      list.map(function(li){ return '<li style="margin:2px 0">'+esc(li)+'</li>'; }).join('')+'</ul>');
+    list=[];
+  }
+  String(text||'').split(/\n/).forEach(function(raw){
+    var line=raw.trim();
+    if(!line){ flushList(); return; }
+    if(/^[-*\u2022]\s+/.test(line)){ list.push(line.replace(/^[-*\u2022]\s+/,'')); return; }
+    flushList();
+    var heading = (line.length<60 && (/:$/.test(line) || (line===line.toUpperCase() && /[A-Z]{3}/.test(line))));
+    if(heading){
+      out.push('<div style="margin:10px 0 3px;font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">'+esc(line.replace(/:$/,''))+'</div>');
+    } else {
+      out.push('<p style="margin:4px 0;font-size:11.5px;color:var(--text-2);line-height:1.55">'+esc(line)+'</p>');
+    }
+  });
+  flushList();
+  return out.join('');
+}
+
+/* The headline a human actually reads. A todo with no summary says so rather than
+   rendering an empty line — a missing one should be visible, not silent, or nobody
+   ever notices the board stopped being readable. */
+function summaryHTML(t){
+  if(t.summary) return '<p style="margin:6px 0 0;font-size:12.5px;color:var(--text);line-height:1.5">'+esc(t.summary)+'</p>';
+  return '<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-3);font-style:italic">no summary — ask them for one sentence on what this is</p>';
+}
+
 function todoStatusChip(t){
   if(!t.stuck && !TODO_STATUS_SHOWN[t.status]) return '';
   var k = t.stuck ? 'stuck' : (TODO_STATUS[t.status]||'open');
@@ -1353,7 +1446,7 @@ function todoListHTML(d){
     var note = dropped ? ('dropped'+(t.drop_reason?' — '+t.drop_reason:''))
              : t.stuck ? (t.stuck_reason||'stuck — humans notified')
              : pending ? ('awaiting '+(awaitingLabel||'acceptance'))
-             : t.scope;
+             : (t.summary || t.scope);
     var warn = pending ? '<span title="awaiting acceptance — this one is asking you for something" style="color:var(--st-testing-fg);font-size:13px;line-height:1;flex:none;padding-top:2px">⚠</span>' : '';
     return '<button data-todo="'+t.id+'" style="width:100%;display:flex;align-items:flex-start;gap:9px;padding:10px 13px;background:transparent;border:none;border-top:1px solid var(--border);cursor:pointer;text-align:left;font-family:inherit;opacity:'+(dropped?'.55':'1')+'">'+
       warn+
@@ -1544,7 +1637,10 @@ function todoDetailHTML(d,t){
           '<span style="font-size:13.5px;font-weight:600;color:var(--text)">'+esc(t.title)+'</span>'+
           '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+esc(todoNo(t))+' v'+esc(t.version)+'</span>'+
           todoStatusChip(t)+'</div>'+
-        '<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-2);line-height:1.5">'+esc(t.scope)+'</p>'+
+        summaryHTML(t)+
+        '<details style="margin:8px 0 0"><summary style="cursor:pointer;font-size:11px;color:var(--text-3);list-style:none">Full scope</summary>'+
+          '<div style="margin-top:4px;padding-left:2px;border-left:2px solid var(--border)">'+scopeHTML(t.scope)+'</div>'+
+        '</details>'+
       '</div></div>'+
     todoMiniStepperHTML(t)+
     /* Directly under the stepper: the stepper says WHERE it is, this says what moves it. */
@@ -1553,8 +1649,11 @@ function todoDetailHTML(d,t){
     declines+stuckLine+dropLine+strikeLine+dropTodoHTML(d,t)+
     '<div style="height:14px"></div></div>';
 
-  /* the SAME contract card the task view has always rendered, scoped to this todo */
-  return head+contractHTML({id:d.id+'#'+t.id, contract:t.contract});
+  /* the SAME contract card the task view has always rendered, scoped to this todo —
+     followed, on an ENGAGEMENT task only, by what the reviewer is meant to read it
+     against: the role's guidelines and the deliverables it serves (item 2). Both render
+     '' for a contract/debug task, so that column is byte-identical to before. */
+  return head+contractHTML({id:d.id+'#'+t.id, contract:t.contract})+reviewAsideHTML(d,t);
 }
 
 function todoPanelHTML(d){
@@ -1562,11 +1661,405 @@ function todoPanelHTML(d){
   return t ? todoDetailHTML(d,t) : todoListHTML(d);
 }
 
+/* ---------- ENGAGEMENT MODE — the owner’s register (docs/enhancements.md item 1) ----------
+   A third task mode for commissioned work. The owner said what he wanted in HIS OWN
+   WORDS; the team decomposed it into todos. Both registers describe ONE record, so
+   nothing below is a second source of truth — the deliverable rows carry the same todos
+   the panel to the right already shows, one vocabulary up.
+
+   EVERY function here opens with `if(!isEngagement(d)) return ''`, and the API omits
+   `engagement`, `deliverables`, `guidelines` and `verification` entirely on a `contract`
+   or `debug` task — the same convention the todo, files and activity keys already
+   follow. So a peer task runs none of this and renders exactly as it did before.
+
+   THE WORDS ARE LOAD-BEARING and are not free to be softened. The reader is, by
+   construction, someone who cannot evaluate a technical claim; every place this page
+   could let him over-read a number is a place the feature does the opposite of its job.
+   Hence, throughout: a missing check is said OUT LOUD rather than left blank, the three
+   strengths print their whole sentence, the coverage counts name what was NOT looked at
+   at least as loudly as what was, and the address a run checked against is always on
+   screen because disclosure is the only safeguard there is. */
+function isEngagement(d){ return !!(d && d.engagement); }
+
+/* The panel shell every card below shares — the same surface/border/radius/shadow the
+   thread, contract and roster cards use, so these read as more of this dashboard rather
+   than as a bolted-on mode. */
+var ENG_CARD='background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px';
+function engHead(title, right, note){
+  return '<div style="padding:13px 16px;border-bottom:1px solid var(--border)">'+
+    '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+      '<span style="font-weight:600;font-size:14px;color:var(--text)">'+esc(title)+'</span>'+
+      '<div style="flex:1"></div>'+(right||'')+'</div>'+
+    (note?'<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-2);line-height:1.55">'+note+'</p>':'')+
+  '</div>';
+}
+
+/* ---------- how strongly a result knows what it claims ----------
+   The broker’s own three (verification.STRENGTHS), printed in the broker’s own words
+   (verification.STRENGTH_LABELS) so the dashboard, the CLI and the agent’s summary
+   cannot each invent a gentler phrasing of `not_checked`.
+
+   They must be told apart AT A GLANCE by someone who does not know what any of them
+   mean, so each differs in COLOUR, GLYPH and WORDS — never in wording alone:
+     verified     solid green ✓  — an agent went and looked. The only one that proves.
+     evidence     solid amber ◎  — something was read. Nothing was proven.
+     not_checked  dashed red ⚠  — nobody looked. A quiet grey pill would read as "fine",
+                                  and silence reads as a pass, which is the whole point. */
+var STRENGTH_VIEW={
+  verified:{label:'Verified — this ran', k:'verified', dashed:false,
+    tip:'An agent went to the running site and looked. The only strength that proves anything.'},
+  evidence:{label:'Evidence reviewed — nothing proven', k:'testing', dashed:false,
+    tip:'Something was read — a diff, a migration, the code. That proves it exists, not that it works.'},
+  not_checked:{label:'Not checked', k:'stuck', dashed:true,
+    tip:'Nobody looked at this. Said out loud, because silence reads as a pass.'}
+};
+function strengthGlyph(strength){
+  if(strength==='verified') return '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2"><path d="M20 6L9 17l-5-5"/></svg>';
+  if(strength==='evidence') return '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.4"/></svg>';
+  return '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M12 9v4M12 17h.01M10.3 3.9l-8 14A2 2 0 004 21h16a2 2 0 001.7-3l-8-14a2 2 0 00-3.4 0z"/></svg>';
+}
+/* `strength_label` is the BROKER’s wording and wins; STRENGTH_VIEW is the fallback so a
+   payload from an older broker (or a strength this page has not met) still prints a
+   sentence rather than a bare key. */
+function strengthChip(strength, strengthLabel){
+  var v=STRENGTH_VIEW[strength];
+  var label=strengthLabel || (v?v.label:strength);
+  if(!label) return '';
+  var k=v?v.k:'open', dashed=v?v.dashed:false;
+  return '<span title="'+esc((v&&v.tip)||'')+'" style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap;'+
+    (dashed
+      ? 'background:var(--surface);border:1px dashed var(--st-'+k+'-dot);color:var(--st-'+k+'-fg)'
+      : 'background:var(--st-'+k+'-bg);border:1px solid transparent;color:var(--st-'+k+'-fg)')+'">'+
+    '<span style="display:flex">'+strengthGlyph(strength)+'</span>'+esc(label)+'</span>';
+}
+
+/* The outcome, in the owner’s language: `✓ working` / `✗ broken`. It reuses the
+   deliverable’s own vocabulary (verification.VERDICTS = accepted / rejected) rather than
+   inventing a second one for "this isn’t done". */
+var VERDICT_VIEW={accepted:{word:'working',mark:'✓',k:'verified'},rejected:{word:'broken',mark:'✗',k:'stuck'}};
+function outcomeBadge(row){
+  if(row.withdrawn){
+    return '<span title="withdrawn by the owner — it is no longer part of the scope" style="display:inline-flex;align-items:center;gap:6px;padding:3px 11px;border-radius:999px;font-size:11.5px;font-weight:700;background:var(--st-open-bg);color:var(--st-open-fg);white-space:nowrap">withdrawn</span>';
+  }
+  var r=row.result;
+  /* NO RESULT AND `not_checked` RENDER THE SAME, deliberately. A verdict backed by
+     `not_checked` has looked at nothing, so printing "✓ working" over it would be the
+     precise false confidence this mode exists to remove — the strength outranks the
+     verdict here, and the row says so where the eye lands first. */
+  if(!r || r.strength==='not_checked'){
+    return '<span title="'+esc(STRENGTH_VIEW.not_checked.tip)+'" style="display:inline-flex;align-items:center;gap:6px;padding:3px 11px;border-radius:999px;font-size:11.5px;font-weight:700;background:var(--surface);border:1px dashed var(--st-stuck-dot);color:var(--st-stuck-fg);white-space:nowrap">⚠ nobody checked this</span>';
+  }
+  var v=VERDICT_VIEW[r.verdict];
+  if(!v) return '';
+  return '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 11px;border-radius:999px;font-size:11.5px;font-weight:700;background:var(--st-'+v.k+'-bg);color:var(--st-'+v.k+'-fg);white-space:nowrap">'+v.mark+' '+esc(v.word)+'</span>';
+}
+
+/* ---------- WHERE A RUN LOOKED — always on screen ----------
+   The DEV supplies the target, so disclosure is the entire safeguard: "checked against
+   https://random.vercel.dev" in front of an owner whose site is acme.com is the thing
+   that makes a wrong target catchable. A record that cannot say what it checked is
+   unfalsifiable, so a run with no target says THAT, rather than rendering nothing. */
+/* When the run happened, as the HH:MM the thread and the event log already print. The
+   domain stores an epoch (`created_at`); `time` is read first in case the API ever
+   formats one server-side, and a payload carrying neither simply prints no clock rather
+   than `undefined`. */
+function runTime(run){
+  if(run && run.time) return String(run.time);
+  var ts=run && run.created_at;
+  if(typeof ts!=='number' || !isFinite(ts)) return '';
+  var dt=new Date(ts*1000);
+  return ('0'+dt.getHours()).slice(-2)+':'+('0'+dt.getMinutes()).slice(-2);
+}
+function checkedAgainstHTML(d){
+  if(!isEngagement(d)) return '';
+  var run=(d.verification||{}).run;
+  if(!run) return '';
+  var who=run.by_name || run.by;
+  var t=runTime(run);
+  var when=t ? ' · '+esc(t) : '';
+  var by=who ? '<span style="font-size:10.5px;color:var(--text-3);white-space:nowrap">by '+esc(who)+when+'</span>' : '';
+  var target = run.staging_url
+    ? '<span style="font-family:'+MONO+';font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(run.staging_url)+'">'+esc(run.staging_url)+'</span>'
+    : '<span style="font-size:12px;font-weight:600;color:var(--st-stuck-fg)">this run did not record where it looked</span>';
+  var note = run.staging_url
+    ? 'The dev supplies this address, not the broker. If it is not the site you expect, the result is about a different site.'
+    : 'A check that cannot say what it checked cannot be argued with — treat it as unverified.';
+  return '<div style="margin:11px 16px 0;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;min-width:0">'+
+    '<div style="display:flex;align-items:center;gap:9px;min-width:0;flex-wrap:wrap">'+
+      '<span style="display:flex;color:var(--text-3);flex:none">'+IC.link+'</span>'+
+      '<span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);flex:none">Checked against</span>'+
+      target+'<div style="flex:1"></div>'+by+'</div>'+
+    '<div style="margin-top:5px;font-size:10.5px;color:var(--text-3);line-height:1.5">'+esc(note)+'</div></div>';
+}
+
+/* ---------- the scope agreement ----------
+   The LIST is the contract-shaped object, not each deliverable: every builder signs one
+   list, per version. Until it locks there are no todos and no contracts — which is why
+   an unlocked list gets the loudest card on the page and names exactly who is being
+   waited on. This is the screen a blocked team stares at. */
+function seatPill(seat, mark, k){
+  var a=avSeat(seat);
+  return '<span title="'+esc(seatIdentity(seat, true))+'" style="display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:2px 10px 2px 2px;border-radius:999px;background:var(--st-'+k+'-bg);color:var(--st-'+k+'-fg);font-size:11px;font-weight:600">'+
+    '<span style="width:18px;height:18px;border-radius:6px;background:'+a.c+';color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+
+    '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(seatIdentity(seat))+'</span>'+
+    '<span style="flex:none;font-weight:700">'+mark+'</span></span>';
+}
+function scopeAgreementHTML(d){
+  if(!isEngagement(d)) return '';
+  var dl=d.deliverables;
+  if(!dl) return '';
+  var version='deliverable list v'+esc(dl.version==null?'?':dl.version);
+  var accepted=(dl.accepted_by||[]).map(function(s){ return seatPill(s,'✓','verified'); }).join('');
+  var awaiting=(dl.awaiting||[]).map(function(s){ return seatPill(s,'○','testing'); }).join('');
+
+  if(dl.locked){
+    /* Locked is one green line, not a panel: it is settled, and the screen’s attention
+       belongs to the outcomes below. What it still has to say is the asymmetry, because
+       it is the one people get wrong later — scope may SHRINK, never grow. */
+    return '<div style="'+ENG_CARD+'"><div style="padding:11px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+      '<span style="display:inline-flex;align-items:center;gap:7px;padding:3px 11px;border-radius:999px;font-size:11.5px;font-weight:700;background:var(--st-verified-bg);color:var(--st-verified-fg);white-space:nowrap">'+
+        '<span style="display:flex">'+dividerIcon('lock')+'</span>scope agreed · '+version+'</span>'+
+      (accepted?'<div style="display:flex;gap:5px;flex-wrap:wrap">'+accepted+'</div>':'')+
+      '<div style="flex:1"></div>'+
+      '<span style="font-size:11px;color:var(--text-2);line-height:1.5">The owner may withdraw a deliverable; adding one means a new engagement.</span>'+
+    '</div></div>';
+  }
+
+  var need = (dl.awaiting||[]).length
+    ? 'Waiting on the builders below to accept this list. One signature each, on the LIST — not one per deliverable.'
+    : 'Waiting on the owner to put a list of deliverables up for the team to accept.';
+  return '<div style="background:var(--surface);border:1px solid var(--st-testing-dot);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px">'+
+    '<div style="padding:13px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+      '<span style="display:flex;color:var(--st-testing-fg)">'+IC.warn+'</span>'+
+      '<span style="font-weight:700;font-size:14px;color:var(--text)">Scope is not agreed yet — nothing can be built</span>'+
+      '<div style="flex:1"></div>'+
+      '<span style="font-family:'+MONO+';font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px;background:var(--st-testing-bg);color:var(--st-testing-fg);white-space:nowrap">'+version+'</span></div>'+
+    '<div style="padding:12px 16px;display:flex;flex-direction:column;gap:10px">'+
+      '<div style="font-size:12px;color:var(--text-2);line-height:1.6">'+esc(need)+'</div>'+
+      (awaiting?'<div><div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--st-testing-fg);margin-bottom:6px">Waiting on</div>'+
+        '<div style="display:flex;gap:5px;flex-wrap:wrap">'+awaiting+'</div></div>':'')+
+      (accepted?'<div><div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin-bottom:6px">Already accepted</div>'+
+        '<div style="display:flex;gap:5px;flex-wrap:wrap">'+accepted+'</div></div>':'')+
+      '<p style="margin:0;font-size:11px;color:var(--text-3);line-height:1.6">Until every builder accepts, this task has no todos and no contracts — but messaging stays open, because pushing back IS the conversation. A push-back names one deliverable; the owner revises it, the list mints a new version, and everyone signs again.</p>'+
+    '</div></div>';
+}
+
+/* ---------- one deliverable, in the owner’s words ----------
+   `#1 Landing page, 3 buttons  ✓ working`, and underneath it the per-dev claims, because
+   a dev who claims work he did not do should be caught AT HIS OWN CLAIM rather than
+   hidden inside a deliverable that mostly works — and the honest dev is individually
+   credited, which is the other half of both sides being represented. */
+var STALENESS_NOTE={
+  stale:'This check was written against an older version of the contract. A ✗ here can mean the check is out of date rather than the work being broken — ask before blaming anyone.',
+  unknown:'No locked contract to compare this check against yet, so its freshness is unknown.'
+};
+function specRowHTML(s){
+  var a=avSeat(s.role);
+  var who=s.name || seatIdentity(s.role) || s.role;
+  var note=STALENESS_NOTE[s.staleness];
+  /* A per-claim verdict is rendered when the payload carries one; when it does not, the
+     claim still stands on screen with the deliverable’s own outcome above it — an
+     unmarked claim must never look like a passed one, so nothing here draws a tick. */
+  var mark=(s.result&&VERDICT_VIEW[s.result.verdict])
+    ? '<span style="flex:none;font-weight:700;color:var(--st-'+VERDICT_VIEW[s.result.verdict].k+'-fg)">'+VERDICT_VIEW[s.result.verdict].mark+'</span>'
+    : '';
+  var detail=(s.result&&s.result.detail)
+    ? '<span style="font-size:11px;color:var(--st-stuck-fg)">— '+esc(s.result.detail)+'</span>' : '';
+  return '<div style="display:flex;gap:9px;align-items:flex-start;padding:8px 0;border-top:1px dashed var(--border)">'+
+    '<span title="'+esc(seatIdentity(s.role, true))+'" style="width:18px;height:18px;border-radius:6px;background:'+a.c+';color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;margin-top:1px">'+esc(a.i)+'</span>'+
+    '<div style="flex:1;min-width:0">'+
+      '<div style="display:flex;align-items:baseline;gap:7px;flex-wrap:wrap">'+
+        '<span style="font-size:12px;font-weight:600;color:var(--text)">'+esc(who)+'</span>'+
+        '<span style="font-size:12px;color:var(--text-2)">“'+esc(s.claim)+'”</span>'+mark+detail+
+        (s.result?strengthChip(s.result.strength, s.result.strength_label):'')+'</div>'+
+      (s.how?'<div style="margin-top:3px;font-size:11px;color:var(--text-3);line-height:1.5">'+esc(s.how)+'</div>':'')+
+      (note?'<div style="margin-top:4px;font-size:10.5px;font-weight:600;color:var(--st-testing-fg);line-height:1.5">'+esc(note)+'</div>':'')+
+    '</div></div>';
+}
+function deliverableRowHTML(row){
+  var todoChips=(row.todos||[]).map(function(n){
+    return '<span style="font-family:'+MONO+';font-size:10px;font-weight:600;color:var(--text-2);border:1px solid var(--border-strong);border-radius:999px;padding:1px 7px;white-space:nowrap">todo #'+esc(n)+'</span>';
+  }).join('');
+  var work = todoChips
+    ? '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:7px"><span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3)">Built by</span>'+todoChips+'</div>'
+    : (row.withdrawn ? '' : '<div style="margin-top:7px;font-size:11px;color:var(--text-3)">No todo names this yet — no work on the board serves it.</div>');
+
+  var specs=(row.specs||[]);
+  var specBlock;
+  if(row.withdrawn){
+    specBlock='';
+  } else if(specs.length){
+    specBlock='<div style="margin-top:8px">'+specs.map(specRowHTML).join('')+'</div>';
+  } else {
+    /* Said out loud. A deliverable nobody left a check for is the single easiest thing
+       for a clean-looking page to hide, so it gets a line rather than empty space. */
+    specBlock='<div style="margin-top:8px;padding:7px 10px;border:1px dashed var(--border-strong);border-radius:9px;font-size:11px;color:var(--text-2);line-height:1.5">No dev has written a check for this one, so there is nothing for a verifier to go and find.</div>';
+  }
+
+  var withdrawn = row.withdrawn
+    ? '<div style="margin-top:6px;font-size:11px;color:var(--text-2);line-height:1.5">Withdrawn by the owner'+(row.withdraw_reason?' — '+esc(row.withdraw_reason):'')+'. It stays on the record; it is not work any more.</div>'
+    : '';
+  var detail=(!row.withdrawn && row.result && row.result.detail)
+    ? '<div style="margin-top:6px;font-size:11.5px;color:var(--text-2);line-height:1.55">'+esc(row.result.detail)+'</div>' : '';
+  var strength=(!row.withdrawn && row.result)
+    ? '<div style="margin-top:7px">'+strengthChip(row.result.strength, row.result.strength_label)+'</div>' : '';
+
+  return '<div id="'+esc('dlv-'+row.id)+'" style="padding:13px 16px;border-top:1px solid var(--border);opacity:'+(row.withdrawn?'.6':'1')+'">'+
+    '<div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">'+
+      '<span style="font-family:'+MONO+';font-size:12px;font-weight:700;color:var(--text-3);flex:none;padding-top:2px">#'+esc(row.number)+'</span>'+
+      '<span style="flex:1;min-width:0;font-size:14px;font-weight:600;color:var(--text);line-height:1.45'+(row.withdrawn?';text-decoration:line-through':'')+'">'+esc(row.text)+'</span>'+
+      outcomeBadge(row)+'</div>'+
+    strength+detail+withdrawn+work+specBlock+'</div>';
+}
+function registerHTML(d){
+  if(!isEngagement(d)) return '';
+  var dl=d.deliverables;
+  if(!dl || !(dl.rows||[]).length) return '';
+  var live=dl.rows.filter(function(r){ return !r.withdrawn; }).length;
+  var count='<span style="font-size:12px;color:var(--text-2);white-space:nowrap">'+live+' live'+
+    (dl.rows.length>live?' · '+(dl.rows.length-live)+' withdrawn':'')+'</span>';
+  return '<div style="'+ENG_CARD+'">'+
+    engHead('What was asked for', count,
+      'The owner’s own words, and what came back. The todos to the right are the same work in the team’s words — one record, two registers.')+
+    checkedAgainstHTML(d)+
+    '<div style="height:11px"></div>'+
+    dl.rows.map(deliverableRowHTML).join('')+
+  '</div>';
+}
+
+/* ---------- coverage: what was LOOKED AT, and what was not ----------
+   Two counts the broker gets by counting rows (deliverables with a spec, deliverables
+   with a result in the latest run), so "everything passed" cannot hide one nobody
+   opened. Both counts measure PRESENCE, NOT QUALITY — a spec with one lazy assertion
+   still "covers" its deliverable — and this is the exact place a non-technical owner
+   would over-read a bare number, so:
+     · the number never appears alone, always as "were looked at";
+     · what was NOT checked is rendered at least as prominently, in its own alarmed row,
+       naming the deliverables so it cannot be skimmed past;
+     · a "nothing was skipped" line still renders when nothing was skipped, because the
+       reader has to learn the absence of that row means something. */
+function missingListHTML(rows, label, tone){
+  if(!rows.length) return '';
+  var names=rows.map(function(r){
+    return '<a href="#'+esc('dlv-'+r.id)+'" style="font-size:11.5px;font-weight:600;color:var(--st-'+tone+'-fg);text-decoration:underline">#'+esc(r.number)+' '+esc(r.text)+'</a>';
+  }).join('<span style="color:var(--text-3)"> · </span>');
+  return '<div style="padding:9px 11px;border:1px dashed var(--st-'+tone+'-dot);border-radius:10px;background:var(--surface)">'+
+    '<div style="display:flex;align-items:center;gap:7px;font-size:12px;font-weight:700;color:var(--st-'+tone+'-fg)">'+
+      '<span style="display:flex">'+IC.warn+'</span>'+esc(rows.length+' '+label)+'</div>'+
+    '<div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap">'+names+'</div></div>';
+}
+function coverageHTML(d){
+  if(!isEngagement(d)) return '';
+  var v=d.verification;
+  if(!v) return '';
+  var c=v.coverage||{};
+  var total=c.deliverables||0;
+  if(!total) return '';
+  var rows=((d.deliverables||{}).rows||[]).filter(function(r){ return !r.withdrawn; });
+  var noResult=rows.filter(function(r){ return !r.result || r.result.strength==='not_checked'; });
+  var noSpec=rows.filter(function(r){ return !(r.specs||[]).length; });
+
+  var headline = v.run
+    ? '<strong style="color:var(--text)">'+(c.with_result||0)+' of '+total+'</strong> deliverables were looked at in the latest run.'
+    : '<strong style="color:var(--st-stuck-fg)">Nobody has run a check yet.</strong> Nothing on this list has been looked at.';
+  var specLine = '<strong style="color:var(--text)">'+(c.with_spec||0)+' of '+total+'</strong> have a check written by a dev for a verifier to follow.';
+
+  return '<div style="'+ENG_CARD+'">'+
+    engHead('What was checked', '',
+      'Counting only. The broker counts what was looked at — it does not judge how well any of it works.')+
+    '<div style="padding:12px 16px;display:flex;flex-direction:column;gap:9px">'+
+      '<div style="font-size:12.5px;color:var(--text-2);line-height:1.6">'+headline+'</div>'+
+      '<div style="font-size:12.5px;color:var(--text-2);line-height:1.6">'+specLine+'</div>'+
+      missingListHTML(noResult,'nobody checked in the latest run','stuck')+
+      missingListHTML(noSpec,'have no check written by any dev','testing')+
+      (noResult.length||noSpec.length ? '' :
+        '<div style="padding:8px 11px;border:1px solid var(--border);border-radius:10px;font-size:11.5px;color:var(--text-2);line-height:1.55">Nothing was skipped: every live deliverable has a check written and a result from the latest run.</div>')+
+      '<p style="margin:0;font-size:11px;color:var(--text-3);line-height:1.6">These are counts of what was looked at, not how well it works. One lazy check still counts as a check here, so a full count is never a promise of quality — read the strength on each deliverable above for that, and remember that only “Verified — this ran” means anything was proven.</p>'+
+    '</div>'+checkedAgainstHTML(d)+'<div style="height:12px"></div></div>';
+}
+
+/* Everything the owner’s register puts above the fold, in the order a non-technical
+   reader needs it: is the scope even agreed → what did I ask for and what came back →
+   how much of it was actually looked at. */
+function engagementHTML(d){
+  if(!isEngagement(d)) return '';
+  return scopeAgreementHTML(d)+registerHTML(d)+coverageHTML(d);
+}
+
+/* ---------- what the REVIEWER sees, beside the contract (item 2) ----------
+   The reviewing agent is already reading the proposal; putting the role’s standards and
+   the deliverables it serves next to it makes signing mean "I checked this against
+   them" — an accountable moment, with the broker claiming to have verified nothing.
+   Both are already in the payload, so this is nearly free. */
+function guidelinesCardHTML(d, roleTypes){
+  if(!isEngagement(d)) return '';
+  var g=d.guidelines;
+  if(!g) return '';                                   /* key ABSENT when none — no empty panel */
+  var types=(roleTypes||[]).filter(function(rt){ return (g[rt]||[]).length; });
+  if(!types.length) return '';
+  var blocks=types.map(function(rt){
+    var a=av(rt);
+    var items=(g[rt]||[]).map(function(r){
+      return '<li style="margin:0 0 5px;font-size:12px;color:var(--text);line-height:1.5">'+esc(r.rule)+'</li>';
+    }).join('');
+    return '<div style="padding:11px 16px;border-top:1px solid var(--border)">'+
+      '<div style="display:flex;align-items:center;gap:7px;margin-bottom:7px">'+
+        '<span style="width:16px;height:16px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+
+        '<span style="font-size:11.5px;font-weight:700;color:var(--text-2)">'+esc(a.label)+'</span></div>'+
+      '<ul style="margin:0;padding-left:17px">'+items+'</ul></div>';
+  }).join('');
+  return '<div style="'+ENG_CARD+';margin-top:16px;margin-bottom:0">'+
+    engHead('Guidelines', '',
+      'The host set these for this role. Signing the contract means you read it against them — the broker cannot check that the code follows them, and does not claim to.')+
+    blocks+'</div>';
+}
+/* Which deliverables one todo serves — the inverse of `rows[].todos`, so no new payload
+   field is needed. It is where you notice a contract has drifted past the agreed scope. */
+function deliverablesOfTodo(d, t){
+  var rows=((d.deliverables||{}).rows)||[];
+  var n=todoNo(t);
+  return rows.filter(function(r){ return (r.todos||[]).indexOf(n)>=0; });
+}
+function todoDeliverablesHTML(d, t){
+  if(!isEngagement(d)) return '';
+  var rows=deliverablesOfTodo(d, t);
+  if(!rows.length){
+    /* Internal work names no deliverable, and that is honest modelling rather than an
+       escape hatch — but it must be VISIBLE, or a todo that quietly serves nothing looks
+       the same as one that serves everything. */
+    return '<div style="'+ENG_CARD+';margin-top:16px;margin-bottom:0">'+
+      engHead('Serves no deliverable', '',
+        'Internal work — repo setup, CI, a refactor. Nobody verifies it in a browser, and it is left out of the owner’s register on purpose.')+'</div>';
+  }
+  var items=rows.map(function(r){
+    return '<div style="padding:9px 16px;border-top:1px solid var(--border);display:flex;align-items:flex-start;gap:9px">'+
+      '<span style="font-family:'+MONO+';font-size:11px;font-weight:700;color:var(--text-3);flex:none;padding-top:1px">#'+esc(r.number)+'</span>'+
+      '<span style="flex:1;min-width:0;font-size:12px;color:var(--text);line-height:1.5'+(r.withdrawn?';text-decoration:line-through':'')+'">'+esc(r.text)+'</span>'+
+      outcomeBadge(r)+'</div>';
+  }).join('');
+  return '<div style="'+ENG_CARD+';margin-top:16px;margin-bottom:0">'+
+    engHead('Deliverables this serves', '',
+      'What the owner asked for, in his words. If the contract has grown past these, it has grown past the agreed scope.')+
+    items+'</div>';
+}
+/* The whole review aside: the standards, then the scope, under the contract card. */
+function reviewAsideHTML(d, t){
+  if(!isEngagement(d)) return '';
+  var types=[];
+  (t.parties||[]).forEach(function(p){
+    var rt=seatRole(p);
+    if(types.indexOf(rt)<0) types.push(rt);
+  });
+  return guidelinesCardHTML(d, types)+todoDeliverablesHTML(d, t);
+}
+
 /* ---------- event log ---------- */
 function eventLogHTML(d){
   /* `slack` stays for events written before notifications went multi-channel; new rows
    are `notify`. Dropping it would make old rows unfilterable. */
-  var FILTERS=['all','transition','lock','deploy','test','notify','slack','token'];
+  /* The engagement kinds are appended rather than woven in, so a peer task's filter
+   row is unchanged in both content and order. */
+  var FILTERS=['all','transition','lock','deploy','test','notify','slack','token','todo','deliverable','verification','guidelines'];
   /* `todo` joins the vocabulary only for a task that HAS todos (incl. one whose todos
      were all dropped — its log still carries them), so a pre-todo task's filter row is
      exactly the row that shipped. */
@@ -2164,7 +2657,7 @@ function taskHTML(){
      with no todos (and a task whose todos were all dropped, where has_todos is false)
      keeps today's full seven-node stepper, unchanged. */
   var todos=hasTodos(d);
-  var steps=todos ? genStepsTodo(d) : genSteps(d.state, d.times, d.agents);
+  var steps=todos ? genStepsTodo(d) : genSteps(d.state, d.times, d.agents, isEngagement(d));
   var stuck=d.state==='stuck';
 
   var stepsHTML=steps.map(function(s){
@@ -2202,7 +2695,11 @@ function taskHTML(){
       '<h1 style="font-size:20px;font-weight:700;margin:0;color:var(--text);letter-spacing:-.02em">'+esc(d.title)+'</h1>'+
       '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
       '<div style="flex:1"></div>'+eventBtn+'</div>'+
-    stepper+rosterPanel(d)+activityStripHTML(d)+readinessFailPanel(d)+mobileTabs+
+    /* ENGAGEMENT MODE sits directly under the stepper, above everything the team uses:
+       for the person paying, the scope agreement and his own deliverables ARE the
+       headline screen. '' on a contract/debug task (the API omits the keys), so those
+       tasks render exactly the page they always did. */
+    stepper+engagementHTML(d)+rosterPanel(d)+activityStripHTML(d)+readinessFailPanel(d)+mobileTabs+
     '<div style="'+rowStyle+'">'+
       '<div style="display:'+threadDisp+'">'+threadHTML(d)+'</div>'+
       /* the right column becomes the TODO LIST when the task has todos; selecting one

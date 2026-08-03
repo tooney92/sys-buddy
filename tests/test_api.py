@@ -255,7 +255,8 @@ def test_contract_block_versions_and_default(conn):
 
     block = api._contract_for(conn, "signin", todo_id=tid)
     assert block["exists"] is True
-    assert block["versions"] == [{"id": "v1", "locked": True}, {"id": "v2", "locked": False}]
+    assert block["versions"] == [{"id": "v1", "locked": True, "status": "locked", "superseded": False},
+        {"id": "v2", "locked": False, "status": "draft", "superseded": False}]
     # default = latest *locked* version, not merely the latest.
     assert block["default"] == "v1"
     assert block["data"]["v1"]["endpoints"] == spec1["endpoints"]

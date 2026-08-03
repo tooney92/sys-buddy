@@ -37,6 +37,28 @@ from .identity import get_current, resolve_agent_token, set_current
 # readiness like every other write. list_files/get_file are reads and stay open.
 # share_activity is gated for the same reason as upload_file: it WRITES task data (a note
 # the peer's human reads on the dashboard), so it waits on readiness; list_activity reads.
+#
+# ENGAGEMENT MODE splits the same way, and the split is the same question every time: is
+# this an AGREEMENT or a claim (gated), or is it reading what somebody else agreed (open)?
+#   * The deliverable writes — propose_deliverables, add_deliverable, revise_deliverable,
+#     withdraw_deliverable, accept_deliverables, push_back — are the strongest agreement
+#     on the broker: the list is what the client commissioned and it gates every todo and
+#     contract under it. An owner who never proved he read the briefing setting the scope,
+#     or a builder accepting it, is exactly the worthless agreement the gate exists for.
+#     `push_back` is gated too although it REFUSES rather than agrees: it holds the whole
+#     list, which is an action on everyone else's work.
+#   * set_guidelines WRITES configuration that lands in other agents' context and clears
+#     their assessment. Host-only already, and host-only is not the same as pre-flighted.
+#   * submit_spec is a CLAIM about what you built, made to the person paying — the same
+#     authority as report_status, which is gated, and it is read by the agent that
+#     verifies. start_verification and record_verification write the RECORD of what was
+#     checked; a verdict is the most consequential write in an engagement.
+#   * get_deliverables stays OPEN — reading the scope is not agreeing to it, and a builder
+#     has to be able to read the list before deciding whether to accept it, exactly as
+#     get_todos is open.
+#   * guidelines_check and submit_guidelines stay OPEN because they ARE a gate, like
+#     readiness_check/submit_readiness. Gating a gate is how a session deadlocks, and
+#     passing this one early buys nothing: every write above still waits on pre-flight.
 ACTION_TOOLS = frozenset({
     "send_message",
     "propose_contract",
@@ -49,6 +71,17 @@ ACTION_TOOLS = frozenset({
     "drop_todo",
     "upload_file",
     "share_activity",
+    # engagement mode: the scope, the standards, the claims and the verdicts
+    "propose_deliverables",
+    "add_deliverable",
+    "revise_deliverable",
+    "withdraw_deliverable",
+    "accept_deliverables",
+    "push_back",
+    "set_guidelines",
+    "submit_spec",
+    "start_verification",
+    "record_verification",
 })
 
 # Anti-brute-force on the auth path (OWASP API2): throttle repeated *failed* token

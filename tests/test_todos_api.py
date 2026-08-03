@@ -110,7 +110,9 @@ def test_task_level_contract_ignores_todo_contracts(conn):
     assert api._contract_for(conn, "signin")["exists"] is False
     scoped = api._contract_for(conn, "signin", todo_id=todo["id"])
     assert scoped["exists"] is True
-    assert scoped["versions"] == [{"id": "v1", "locked": False}]
+    assert scoped["versions"] == [
+        {"id": "v1", "locked": False, "status": "draft", "superseded": False}
+    ]
 
 
 # --------------------------------------------------------------------------- #
