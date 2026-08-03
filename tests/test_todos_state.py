@@ -821,4 +821,72 @@ def test_the_dashboard_marks_a_superseded_draft(conn):
     versions = api._contract_for(conn, "signin", todo_id=todo_id)["versions"]
     by_id = {v["id"]: v for v in versions}
     assert by_id["v1"]["superseded"] is True
+    # Named, so the panel can send the reader to the one they should be reading.
+    assert by_id["v1"]["superseded_by"] == "v2"
     assert by_id["v2"]["superseded"] is False
+    assert by_id["v2"]["superseded_by"] is None
+
+
+def test_the_dashboard_marks_a_locked_version_superseded_by_a_later_lock(conn):
+    """Renegotiation is the ORDINARY way a contract changes, so a chain holds more than one
+    locked version — and only the newest is the agreement in force. The panel rendered every
+    one of them as "Locked · signed by all parties", identical green chips and all, so an old
+    version read as authoritative and a reader could integrate against dead scope."""
+    from sys_buddy import api
+
+    ag = _agents(conn)
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    todo_id = todos.get_row(conn, "signin", num)["id"]
+
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v1"), num)
+    state.lock_contract(conn, ag["backend"], 1, num)
+    state.lock_contract(conn, ag["mobile"], 1, num)
+
+    # A DRAFT above a lock supersedes nothing: the last lock keeps serving until the new
+    # version is signed by everyone, which is `state._reopen_todo`'s promise.
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v2"), num)
+    by_id = {
+        v["id"]: v
+        for v in api._contract_for(conn, "signin", todo_id=todo_id)["versions"]
+    }
+    assert by_id["v1"]["superseded"] is False
+    assert by_id["v1"]["superseded_by"] is None
+
+    # …and the moment v2 LOCKS, v1 stops being the agreement.
+    state.lock_contract(conn, ag["backend"], 2, num)
+    state.lock_contract(conn, ag["mobile"], 2, num)
+    block = api._contract_for(conn, "signin", todo_id=todo_id)
+    by_id = {v["id"]: v for v in block["versions"]}
+    assert by_id["v1"]["superseded"] is True
+    assert by_id["v1"]["superseded_by"] == "v2"
+    assert by_id["v2"]["superseded"] is False
+    assert by_id["v2"]["superseded_by"] is None
+    # The per-version payload carries it too — the panel renders from `data[selected]`.
+    assert block["data"]["v1"]["superseded"] is True
+    assert block["data"]["v1"]["superseded_by"] == "v2"
+    assert block["data"]["v2"]["superseded"] is False
+    # v1's signatures are still real and still listed; only their PALETTE changes.
+    assert {s["role"] for s in block["data"]["v1"]["signed"]} == {"backend", "mobile"}
+    # `default` is unmoved — the newest lock was already the one the panel opens on.
+    assert block["default"] == "v2"
+
+
+def test_a_declined_version_is_not_superseded(conn):
+    """Declined is decided, not replaced: it was never in force, so nothing took over from
+    it, and it keeps its own message rather than being told to read a later version."""
+    from sys_buddy import api
+
+    ag = _agents(conn)
+    num = _accepted_todo(conn, ag, "backend", ["backend", "mobile"])
+    todo_id = todos.get_row(conn, "signin", num)["id"]
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v1"), num)
+    state.decline_contract(conn, ag["mobile"], "wrong shape", num)
+    state.propose_contract(conn, ag["backend"], _valid_spec("/v2"), num)
+
+    by_id = {
+        v["id"]: v
+        for v in api._contract_for(conn, "signin", todo_id=todo_id)["versions"]
+    }
+    assert by_id["v1"]["status"] == "declined"
+    assert by_id["v1"]["superseded"] is False
+    assert by_id["v1"]["superseded_by"] is None
