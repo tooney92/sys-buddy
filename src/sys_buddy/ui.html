@@ -901,11 +901,21 @@ function mobileGate(){
 }
 
 /* ---------- full-screen message ---------- */
-function messageScreen(icon,title,body){
+/* `retry` adds a button that simply reloads. It is load-bearing on an auth failure and
+   NOT mere decoration: this page also runs inside the desktop app's dashboard window,
+   which has no address bar, no devtools and no private mode — so before this there was
+   literally no action available on that screen. The broker now DELETES a viewer cookie
+   that failed to resolve (api._unauthorized), which is what makes reloading meaningful:
+   the dead cookie is gone, so the reload is a clean attempt rather than a replay of the
+   same rejection. */
+function messageScreen(icon,title,body,retry){
+  var btn = retry
+    ? '<button data-reload="1" style="margin-top:18px;padding:9px 16px;border:1px solid var(--border-strong);border-radius:10px;background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;font-weight:600;font-family:inherit">Try again</button>'
+    : '';
   return headerHTML()+'<div style="max-width:520px;margin:12vh auto 0;padding:40px 24px;text-align:center">'+
     '<div style="width:52px;height:52px;border-radius:14px;background:var(--surface-2);border:1px dashed var(--border-strong);display:flex;align-items:center;justify-content:center;margin:0 auto 18px;color:var(--text-3)">'+icon+'</div>'+
     '<h1 style="font-size:19px;font-weight:700;margin:0 0 8px;color:var(--text);letter-spacing:-.02em">'+esc(title)+'</h1>'+
-    '<p style="font-size:14px;color:var(--text-2);margin:0;line-height:1.55">'+esc(body)+'</p></div>';
+    '<p style="font-size:14px;color:var(--text-2);margin:0;line-height:1.55">'+esc(body)+'</p>'+btn+'</div>';
 }
 
 /* ---------- task list ---------- */
@@ -2869,7 +2879,12 @@ function render(){
     var html;
     if(state.isMobile) html=mobileGate();
     else if(state.error==='no-token') html=messageScreen('<span style="font-size:22px">🔑</span>','No viewer token','This dashboard needs a viewer token. Open the link your host shared — it looks like /ui?v=sbv_… — to watch this task.');
-    else if(state.error==='unauthorized') html=messageScreen('<span style="font-size:22px">🚫</span>','Access denied','This viewer token isn’t valid or has been revoked. Ask your host for a fresh dashboard link.');
+    /* The wording no longer claims to know WHICH of the two happened, because it cannot:
+       a token that does not resolve is indistinguishable from one that was revoked. It
+       says what to do instead, and the stale-cookie case — by far the commonest, and the
+       one that used to be unrecoverable — is now handled for the reader rather than
+       described at them. */
+    else if(state.error==='unauthorized') html=messageScreen('<span style="font-size:22px">🚫</span>','Access denied','This viewer token isn’t valid any more. It has been cleared, so “Try again” will use the link you opened; if that still fails, ask your host for a fresh dashboard link.', true);
     else if(state.error==='forbidden') html=headerHTML()+messageBody('Not your task','This token can only view its own task. '+ (state.viewer&&state.viewer.task_id?('You have access to “'+state.viewer.task_id+'”.'):''));
     else if(state.error==='not-found') html=headerHTML()+messageBody('Task not found','That task doesn’t exist (or was closed).');
     else html=headerHTML()+(state.view==='task'?taskHTML():listHTML());
@@ -2940,6 +2955,10 @@ function cssEsc(s){ return String(s).replace(/["\\]/g,'\\$&'); }
 function bind(){
   app.querySelectorAll('[data-open]').forEach(function(el){ el.onclick=function(){ openTask(el.getAttribute('data-open')); }; });
   app.querySelectorAll('[data-home]').forEach(function(el){ el.onclick=function(){ goHome(); }; });
+  /* A real reload, not a re-render: the point is to re-run the whole load with the dead
+     cookie now cleared, including the `?v=` still in the window's original URL if there
+     was one. `location.reload()` keeps that URL, which is exactly what we want. */
+  app.querySelectorAll('[data-reload]').forEach(function(el){ el.onclick=function(){ location.reload(); }; });
   var sw=app.querySelector('[data-switcher]'); if(sw) sw.onclick=function(e){ e.stopPropagation(); state.switcherOpen=!state.switcherOpen; render(); };
   var tt=app.querySelector('[data-theme-toggle]'); if(tt) tt.onclick=toggleTheme;
   var nt=app.querySelector('[data-newtask]'); if(nt) nt.onclick=function(){ try{ window.pywebview.api.new_task(); }catch(e){} };

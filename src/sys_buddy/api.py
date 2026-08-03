@@ -1159,24 +1159,54 @@ async def _sse_events(
 # HTTP plumbing
 # --------------------------------------------------------------------------- #
 def _request_token(request) -> str:
-    """Resolve the viewer token, most-secure source first:
+    """Resolve the viewer token. An EXPLICIT token wins; the cookie is the convenience.
 
-    1. the ``sb_view`` HttpOnly cookie (set on the first ``/ui`` load — JS can't read
-       it and it never rides in a URL, so it can't leak via history/Referer/logs),
+    1. the ``?v=`` query param — somebody just handed us a token on purpose,
     2. an ``Authorization: Bearer`` header (API clients),
-    3. the ``?v=`` query param (the bootstrap link, before the cookie is set).
+    3. the ``sb_view`` HttpOnly cookie (set on the first ``/ui`` load — JS can't read it
+       and it never rides in a URL, so it can't leak via history/Referer/logs).
+
+    THE COOKIE USED TO COME FIRST, and that made a stale one unrecoverable. `sb_view`
+    lives for 7 days, so a token that stopped resolving — the db it was minted against
+    was replaced, the viewer was revoked — kept being sent and kept failing, and a fresh
+    ``?v=`` link was outranked on every ``/api/*`` call. The dashboard's own error text
+    says "ask your host for a fresh dashboard link", advice the code then refused to
+    honour. Worse in the desktop app's dashboard window, which has no address bar, no
+    devtools and no private mode: there was no way out at all.
+
+    Reordering costs nothing on the security side. A ``?v=`` is only ever in a URL
+    because someone put it there — the cookie exists to keep it OUT of subsequent URLs,
+    which still happens on the very next hop (``/ui`` redirects and re-sets it).
     """
-    cookie = request.cookies.get("sb_view")
-    if cookie:
-        return cookie
+    explicit = request.query_params.get("v", "") or ""
+    if explicit:
+        return explicit
     auth = request.headers.get("authorization", "")
     if auth[:7].lower() == "bearer ":
         return auth[7:].strip()
-    return request.query_params.get("v", "") or ""
+    return request.cookies.get("sb_view") or ""
 
 
 def _resolve(request, conn) -> ViewerIdentity | None:
     return identity.resolve_viewer_token(conn, _request_token(request))
+
+
+def _unauthorized(request) -> JSONResponse:
+    """401 — and DELETE the ``sb_view`` cookie on the way out if one was sent.
+
+    A viewer cookie that no longer resolves is not going to start resolving: it names a
+    revoked viewer, or a row in a database this broker no longer reads. Leaving it in
+    place meant the browser re-sent the same dead token for the rest of its 7-day life,
+    so every retry failed identically and the failure looked permanent. Clearing it makes
+    the next load a clean one — which is what the error screen's Retry button then acts
+    on, and what makes the desktop app's dashboard window recoverable at all.
+
+    Only ever sent alongside a 401, so a working session never has its cookie touched.
+    """
+    resp = JSONResponse({"error": "unauthorized"}, status_code=401)
+    if request.cookies.get("sb_view"):
+        resp.delete_cookie("sb_view", path="/")
+    return resp
 
 
 # --------------------------------------------------------------------------- #
@@ -1244,7 +1274,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         try:
             viewer = _resolve(request, conn)
             if viewer is None:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return _unauthorized(request)
             return JSONResponse(
                 {"viewer": viewer_block(viewer), "tasks": _list_tasks_for(conn, viewer)}
             )
@@ -1258,7 +1288,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         try:
             viewer = _resolve(request, conn)
             if viewer is None:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return _unauthorized(request)
             if not viewer_can_see(viewer, task_id):
                 return JSONResponse({"error": "forbidden"}, status_code=403)
             detail = _task_detail(conn, task_id, is_host=viewer.is_host)
@@ -1276,7 +1306,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         try:
             viewer = _resolve(request, conn)
             if viewer is None:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return _unauthorized(request)
             if not viewer_can_see(viewer, task_id):
                 return JSONResponse({"error": "forbidden"}, status_code=403)
             # 404 the unknown task so a buddy can't distinguish "no such task" via events.
@@ -1302,7 +1332,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         try:
             viewer = _resolve(request, conn)
             if viewer is None:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return _unauthorized(request)
             f = _file_for(conn, viewer, file_id)
             if f is None:
                 return JSONResponse({"error": "not found"}, status_code=404)
@@ -1327,7 +1357,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         finally:
             conn.close()
         if viewer is None:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return _unauthorized(request)
         return StreamingResponse(
             _sse_events(request, viewer),
             media_type="text/event-stream",
@@ -1365,7 +1395,15 @@ def register_api_routes(mcp, cfg: Config) -> None:
         after the first hop (out of browser history, Referer, and proxy logs). The
         page's own ``/api/*`` fetches then authenticate via the cookie automatically.
         """
-        secure = (cfg.public_url or "").lower().startswith("https://")
+        # Secure follows THIS REQUEST's scheme, not the configured public_url. Keying it
+        # on the config was a latent lockout: a host with an https tunnel made every
+        # cookie `Secure`, including the one set when the dashboard is opened on
+        # `http://127.0.0.1:8787/ui?v=…` — which is the link `sys-buddy host-viewer`
+        # prints. A browser silently refuses to send a Secure cookie over http, so every
+        # `/api/*` call arrived unauthenticated and the page read "Access denied" with a
+        # token that was perfectly valid. Per-request, a tunnelled load still gets Secure
+        # (the tunnel is https) and the loopback load gets a cookie that actually works.
+        secure = request.url.scheme == "https"
         v = request.query_params.get("v")
         if v:
             resp = RedirectResponse(url="/ui", status_code=302)
