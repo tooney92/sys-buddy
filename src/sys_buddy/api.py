@@ -341,20 +341,48 @@ def _contract_for(conn, task_id: str, *, todo_id: int | None = None, is_host: bo
     latest_locked_vid = None
     # The highest version in this chain. Anything below it that is still a DRAFT was
     # superseded by a later proposal — nobody may sign it (state.lock_contract refuses),
-    # so the picker must not offer it as an equal tab beside the live one. A locked or
-    # declined version is a different thing: those are decided, and worth reading back.
+    # so the picker must not offer it as an equal tab beside the live one. A declined
+    # version is a different thing: it is decided, and worth reading back as-is.
     newest_version = max(c["version"] for c in contracts)
+    # A LOCKED version is superseded too, but only by a later LOCK — never by a mere
+    # proposal. That asymmetry is `state._current_locked`'s rule, restated for the view:
+    # a v5 draft sitting above a locked v4 changes nothing about what the parties are
+    # bound to, because reopening negotiations leaves the last lock serving until the
+    # new version is signed by everyone (`state._reopen_todo`). Only when v8 locks does
+    # v4 stop being the agreement.
+    #
+    # This is what the panel needs and did not have. Every locked version rendered as
+    # "Locked · signed by all parties", identical green chips and all, so selecting a
+    # decided-but-historical v4 on a chain whose live agreement is v8 produced a screen
+    # that read as authoritative — and a human integrating off it builds the wrong shape.
+    # Renegotiation is the ordinary flow here (contracts get versions precisely because
+    # work uncovers things), so long chains are expected and marking the dead ones is not
+    # an edge case.
+    locked_versions = [c["version"] for c in contracts if c["status"] == "locked"]
+    newest_locked_version = max(locked_versions) if locked_versions else None
     for c in contracts:
         vid = f"v{c['version']}"
         locked = c["status"] == "locked"
-        superseded = (
-            c["status"] == "draft" and c["version"] < newest_version
-        )
+        if locked:
+            superseded_by = (
+                newest_locked_version
+                if c["version"] < newest_locked_version
+                else None
+            )
+        elif c["status"] == "draft" and c["version"] < newest_version:
+            superseded_by = newest_version
+        else:
+            # A declined version was never in force, so nothing replaced it.
+            superseded_by = None
         versions.append({
             "id": vid,
             "locked": locked,
             "status": c["status"],
-            "superseded": superseded,
+            "superseded": superseded_by is not None,
+            # Named, not just flagged: "superseded" alone tells a reader their version is
+            # dead without telling them which one to read instead, which is the only
+            # question they have at that moment.
+            "superseded_by": f"v{superseded_by}" if superseded_by else None,
         })
         latest_vid = vid
         if locked:
@@ -373,6 +401,12 @@ def _contract_for(conn, task_id: str, *, todo_id: int | None = None, is_host: bo
         spec = json.loads(c["spec_json"])
         data[vid] = {
             "locked": locked,
+            # Carried on the per-version payload as well as on the picker entry: the
+            # panel renders from `data[selected]` and would otherwise have to reach back
+            # into `versions` to find out whether the thing it is drawing is still in
+            # force.
+            "superseded": superseded_by is not None,
+            "superseded_by": f"v{superseded_by}" if superseded_by else None,
             "signed": [{"role": s["role"], "time": _hhmm(s["signed_at"])} for s in signed],
             **_units_of(spec),
             # The LIVE target, resolved on every read from the host's task/todo
@@ -1172,31 +1206,20 @@ def _file_for(conn, viewer: ViewerIdentity, file_id) -> dict | None:
 
 
 def _safe_filename(name: str) -> str:
-    """A filename safe to drop into a quoted ``Content-Disposition``. The suggested
-    download name is cosmetic — the file is identified by id — so we simply strip the
-    characters that would break the header or inject one (double-quote, backslash,
-    CR/LF), never trusting the stored name to be header-clean."""
-    return re.sub(r'[\r\n"\\]', "", name or "").strip() or "download"
+    """Kept as this module's name for ``files.safe_filename``; see there."""
+    return files.safe_filename(name)
 
 
 def _file_response(f: dict) -> Response:
-    """Serve a file's raw bytes with its stored Content-Type. Images render ``inline``
-    so the dashboard can point an ``<img src>`` at this URL; everything else (zip/pdf)
-    is an ``attachment`` so the browser downloads it under its original name.
+    """Serve a file's raw bytes — ``files.file_response``, which both byte-serving routes
+    share so the HTML hardening has exactly one implementation. See its docstring for why
+    only images may be ``inline``.
 
-    This is the ONLY route that returns bytes rather than JSON, and it is still strictly
-    read-only (D11): it hands bytes OUT, it never takes them IN — uploads happen through
-    the MCP ``upload_file`` tool, never against this dashboard origin.
+    This route hands bytes OUT and never takes them IN — still true of the whole ``/api/*``
+    surface (D11). Bytes come in through ``POST /files/{task_id}``, a different surface with a
+    different credential: an AGENT's token, never a viewer's.
     """
-    if f["content_type"].startswith("image/"):
-        disposition = "inline"
-    else:
-        disposition = f'attachment; filename="{_safe_filename(f["name"])}"'
-    return Response(
-        content=f["data"],
-        media_type=f["content_type"],
-        headers={"Content-Disposition": disposition},
-    )
+    return files.file_response(f)
 
 
 # --------------------------------------------------------------------------- #

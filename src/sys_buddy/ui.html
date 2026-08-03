@@ -373,7 +373,10 @@ function toggleTheme(){ state.theme = state.theme==='dark'?'light':'dark'; local
 function seg(active){ return 'padding:5px 13px;font-size:12.5px;font-weight:600;border-radius:7px;border:none;background:'+(active?'var(--surface)':'transparent')+';color:'+(active?'var(--text)':'var(--text-2)')+';box-shadow:'+(active?'var(--shadow)':'none'); }
 function tabStyle(active){ return 'flex:1;padding:10px 0;font-size:13px;font-weight:600;border:none;background:transparent;cursor:pointer;color:'+(active?'var(--accent)':'var(--text-2)')+';border-bottom:'+(active?'2px solid var(--accent)':'2px solid transparent'); }
 function filterStyle(active){ return 'padding:3px 10px;border-radius:7px;border:1px solid '+(active?'var(--accent)':'var(--border)')+';background:'+(active?'var(--accent-soft)':'transparent')+';color:'+(active?'var(--accent-2)':'var(--text-2)')+';font-size:11px;font-weight:600;cursor:pointer;font-family:'+MONO; }
-function vBtnStyle(active){ return 'padding:4px 10px;border-radius:7px;border:none;cursor:pointer;font-size:12px;font-weight:600;font-family:'+MONO+';display:flex;align-items:center;gap:4px;background:'+(active?'var(--surface)':'transparent')+';color:'+(active?'var(--text)':'var(--text-2)')+';box-shadow:'+(active?'var(--shadow)':'none'); }
+/* `dead` = superseded: still selectable (reading back what was agreed is the point of a
+   version picker) but never rendered as an equal of the live one. Only the INACTIVE state
+   is faded — a faded button you have just clicked reads as a failed click. */
+function vBtnStyle(active, dead){ return 'padding:4px 10px;border-radius:7px;border:none;cursor:pointer;font-size:12px;font-weight:600;font-family:'+MONO+';display:flex;align-items:center;gap:4px;background:'+(active?'var(--surface)':'transparent')+';color:'+(active?'var(--text)':'var(--text-2)')+';box-shadow:'+(active?'var(--shadow)':'none')+';opacity:'+(dead&&!active?'.45':'1'); }
 
 /* ---------- stepper ---------- */
 /* Pre-flight is done once every live agent has passed (readiness_status), with a
@@ -1062,7 +1065,10 @@ function threadHTML(d){
       '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+lps+
         '<div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;gap:4px">'+avs+'</div></div></div>'+
     threadLegendHTML()+
-    '<div style="padding:20px 18px;display:flex;flex-direction:column;gap:17px;max-height:640px;overflow-y:auto">'+inner+'</div></div>';
+    /* The id is what lets render() keep this box pinned to its newest message — see
+       THREAD_ID. Both task views call threadHTML, but taskHTML picks ONE of them, so the id
+       is never on the page twice. */
+    '<div id="'+THREAD_ID+'" style="padding:20px 18px;display:flex;flex-direction:column;gap:17px;max-height:640px;overflow-y:auto">'+inner+'</div></div>';
 }
 
 /* ---------- thread legend (the old "Tips" items, rehomed) ----------
@@ -1246,23 +1252,54 @@ function contractHTML(d){
   var vbtns = c.versions.map(function(v){
     /* data-vkey carries WHICH chain this button selects a version for — the task's, or
        one todo's. bind() falls back to state.taskId, so the task card is unchanged. */
-    return '<button data-version="'+esc(v.id)+'" data-vkey="'+esc(d.id)+'" style="'+vBtnStyle(v.id===selId)+';cursor:pointer">'+(v.locked?IC.lockSmall:'')+esc(v.id)+'</button>';
+    var tip = v.superseded ? esc(v.id)+' was superseded by '+esc(v.superseded_by||'a later version')
+      : v.status==='declined' ? esc(v.id)+' was declined'
+      : v.locked ? esc(v.id)+' is the agreement in force' : esc(v.id)+' — draft';
+    return '<button data-version="'+esc(v.id)+'" data-vkey="'+esc(d.id)+'" title="'+tip+'" style="'+vBtnStyle(v.id===selId, v.superseded)+';cursor:pointer">'+(v.locked?IC.lockSmall:'')+esc(v.id)+'</button>';
   }).join('');
   var data = (c.data&&c.data[selId]) || {locked:false,signed:[],units:[],endpoints:[]};
   var kindView = contractKind(data);
   var draft = !data.locked;
+  /* SUPERSEDED — this version is a record of something that WAS true. A locked one is
+     replaced by a later lock, a draft by a later proposal (api._contract_for owns which);
+     either way the panel must stop presenting it as the live agreement. Without this every
+     locked version in a chain rendered identical verified-green "signed by all parties",
+     so clicking back to v4 on a chain living at v8 produced a screen indistinguishable
+     from the one in force — and the reader integrates against dead scope. Renegotiation
+     is the ORDINARY way a contract changes, so this is the common case, not a corner. */
+  var dead = !!data.superseded;
+  var supBy = esc(data.superseded_by || 'a later version');
   var statusBlock='';
-  if(draft){
+  if(draft && dead){
+    /* A superseded draft cannot be signed AT ALL — state.lock_contract refuses it. Saying
+       "awaiting signatures" (which is what this said before) invited a human to go and ask
+       their agent for a signature the broker was always going to reject. */
+    statusBlock='<div style="margin-top:11px;display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px dashed var(--border-strong);border-radius:10px;font-size:12px;color:var(--text-3)"><span style="display:flex;flex:none">'+IC.lockSmall+'</span><span>Superseded by '+supBy+' — this draft can no longer be signed</span></div>';
+  } else if(draft){
     statusBlock='<div style="margin-top:11px;display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px dashed var(--border-strong);border-radius:10px;font-size:12px;color:var(--text-2)"><span style="width:8px;height:8px;border-radius:50%;border:1.5px dashed var(--text-3)"></span>Draft — awaiting signatures</div>';
   } else if((data.signed||[]).length){
+    /* The signatures are still REAL on a superseded version — those people did sign that
+       shape — so they are never hidden. They lose the verified palette instead: green is
+       this dashboard's "this holds now", and it is the one thing a historical record must
+       not borrow. */
+    var chipBg = dead ? 'var(--surface-2)' : 'var(--st-verified-bg)';
+    var chipFg = dead ? 'var(--text-2)' : 'var(--st-verified-fg)';
     var chips=(data.signed||[]).map(function(sg){
       var a=avSeat(sg.role);
-      return '<span title="'+esc(seatIdentity(sg.role, true))+'" style="display:inline-flex;align-items:center;gap:6px;max-width:100%;background:var(--st-verified-bg);border-radius:999px;padding:3px 10px 3px 3px;font-size:11px;color:var(--st-verified-fg);font-weight:600">'+
+      return '<span title="'+esc(seatIdentity(sg.role, true))+'" style="display:inline-flex;align-items:center;gap:6px;max-width:100%;background:'+chipBg+';border-radius:999px;padding:3px 10px 3px 3px;font-size:11px;color:'+chipFg+';font-weight:600'+(dead?';opacity:.8':'')+'">'+
         '<span style="width:18px;height:18px;border-radius:6px;background:'+a.c+';color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+
         '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(seatIdentity(sg.role))+'</span>'+
         '<span style="font-family:'+MONO+';opacity:.75;flex:none">'+esc(sg.time)+'</span></span>';
     }).join('');
-    statusBlock='<div style="margin-top:11px"><div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="color:var(--st-verified-fg);display:flex">'+dividerIcon('lock')+'</span>Locked · signed by all parties</div><div style="display:flex;flex-wrap:wrap;gap:6px">'+chips+'</div></div>';
+    var heading = dead
+      ? '<span style="color:var(--text-3);display:flex">'+dividerIcon('lock')+'</span>Locked · superseded by '+supBy
+      : '<span style="color:var(--st-verified-fg);display:flex">'+dividerIcon('lock')+'</span>Locked · signed by all parties';
+    /* Name the live one in a full sentence under the heading, not just in the uppercase
+       label: the reader's only question on landing here is "then what do I build?" */
+    var pointer = dead
+      ? '<div style="margin-top:8px;font-size:11.5px;color:var(--text-2)">Historical record — this was the agreement, and is not any more. The one in force is <span style="font-family:'+MONO+';font-weight:600">'+supBy+'</span>.</div>'
+      : '';
+    statusBlock='<div style="margin-top:11px"><div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);display:flex;align-items:center;gap:6px;margin-bottom:8px">'+heading+'</div><div style="display:flex;flex-wrap:wrap;gap:6px">'+chips+'</div>'+pointer+'</div>';
   }
 
   var eps=kindView.units(d, selId, contractUnits(data));
@@ -1273,11 +1310,26 @@ function contractHTML(d){
   // contract, version or signature. A `staging_url_at_lock` that DIFFERS is shown
   // beneath it: "we point here now, we signed against that" are two facts, and
   // collapsing them into one string is how a stale target hides in plain sight.
-  var stale = data.staging_url_at_lock && data.staging_url_at_lock!==data.staging_url
+  var stale = !dead && data.staging_url_at_lock && data.staging_url_at_lock!==data.staging_url
     ? '<div style="margin-top:6px;font-size:10.5px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(data.staging_url_at_lock)+'">signed against <span style="font-family:'+MONO+'">'+esc(data.staging_url_at_lock)+'</span> — the target moved, the contract did not</div>'
     : '';
-  var stagingBlock = data.staging_url
-    ? '<div style="margin-top:11px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;min-width:0"><div style="display:flex;align-items:center;gap:9px;min-width:0"><span style="display:flex;color:var(--text-3);flex:none">'+IC.link+'</span><span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);flex:none">Connect to</span><span style="font-family:'+MONO+';font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(data.staging_url)+'">'+esc(data.staging_url)+'</span></div>'+stale+'</div>'
+  /* On a superseded LOCKED version this stops being an instruction and becomes a record.
+     "Connect to" beside dead scope is the same error as the green lock chip: it reads as
+     "build this, here". So the label becomes "Signed against" and the value becomes what was
+     live when this version locked — the live target belongs to the version in force, which
+     the pointer above sends the reader to.
+
+     A superseded DRAFT gets no target line at all. It has no `staging_url_at_lock` (nothing
+     locked), so labelling the LIVE url "Signed against" would state something false about a
+     version nobody ever signed — and "Connect to" is no better on scope that cannot be
+     agreed. Nothing is hidden by leaving it out: the same host value is on the version in
+     force, one click away. */
+  var deadLocked = dead && data.locked;
+  var targetLabel = deadLocked ? 'Signed against' : 'Connect to';
+  var targetUrl = deadLocked ? (data.staging_url_at_lock || data.staging_url)
+    : (dead ? null : data.staging_url);
+  var stagingBlock = targetUrl
+    ? '<div style="margin-top:11px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;min-width:0'+(dead?';opacity:.7':'')+'"><div style="display:flex;align-items:center;gap:9px;min-width:0"><span style="display:flex;color:var(--text-3);flex:none">'+IC.link+'</span><span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);flex:none">'+targetLabel+'</span><span style="font-family:'+MONO+';font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(targetUrl)+'">'+esc(targetUrl)+'</span></div>'+stale+'</div>'
     : '';
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
     '<div style="padding:14px 16px;border-bottom:1px solid var(--border)">'+
@@ -2066,7 +2118,15 @@ function eventLogHTML(d){
   if(d && (d.todos||[]).length) FILTERS=FILTERS.concat(['todo']);
   var filter=state.eventFilter;
   var fbtns=FILTERS.map(function(f){ return '<button data-filter="'+f+'" style="'+filterStyle(filter===f)+'">'+f+'</button>'; }).join('');
-  var evs=(d.events||[]).filter(function(e){ return filter==='all'||e[1]===filter; });
+  /* NEWEST-FIRST, matching the activity strip. The API hands events back oldest-first
+     (api.py `ORDER BY id`) and this box is 320px tall, so rendering them in that order put
+     the newest event permanently below the fold on any task with more than a handful — and
+     the newest event is the entire reason anyone opens a log. Unlike the message thread
+     there is no conversation to read top-down here: each row stands alone.
+     Reversing AFTER `.filter()` is what keeps this safe: filter returns a fresh array, so
+     the live `d.events` payload is never reversed in place — which would flip the order on
+     every poll and make it oscillate. */
+  var evs=(d.events||[]).filter(function(e){ return filter==='all'||e[1]===filter; }).reverse();
   var rows;
   if(evs.length){
     rows=evs.map(function(ev){
@@ -2743,10 +2803,45 @@ function render(){
        screens, whose header carries the same two buttons. Never on the mobile gate,
        which has no header at all. */
     if(!state.isMobile) html+=panelHTML();
+    /* Captured BEFORE innerHTML is replaced, restored after — see THREAD_ID. */
+    var prevThread=threadScroll();
     app.innerHTML=html;
     bind();
+    restoreThreadScroll(prevThread);
   }
   patchVolatile();
+}
+
+/* ---------- thread scroll ----------
+   The newest message is at the BOTTOM of the thread, because a conversation reads top-down
+   and reversing it would mean reading replies before the things they reply to. That only
+   works if the newest one is actually reachable, and it was not: the box is 640px tall and
+   `render()` replaces `app.innerHTML` wholesale whenever `sig()` changes — and a new message
+   IS a sig change. So the arrival of a message scrolled the reader away from the message
+   that had just arrived, back to the top of the thread.
+
+   Pinned to the bottom instead, UNLESS the reader has deliberately scrolled up to read
+   history — their position is theirs to keep, and yanking someone out of what they are
+   reading because a peer said something is the same defect pointing the other way.
+
+   The event log needs none of this: it is newest-first, so its newest row is already the one
+   you see. */
+var THREAD_ID='sb-thread-scroll';
+function threadScroll(){
+  var el=document.getElementById(THREAD_ID);
+  if(!el) return null;
+  /* 40px of slack. "At the bottom" has to survive fractional scrollHeight and the browser's
+     own rounding, or the pin quietly stops engaging for readers who are, visibly, at the
+     bottom. */
+  return {top:el.scrollTop, atBottom:(el.scrollHeight-el.scrollTop-el.clientHeight)<=40};
+}
+function restoreThreadScroll(prev){
+  var el=document.getElementById(THREAD_ID);
+  if(!el) return;
+  /* No previous box means this is the thread's first paint — opening a task, or coming back
+     to one. Open on the newest message, which is what someone checking in wants to see. */
+  if(!prev || prev.atBottom) el.scrollTop=el.scrollHeight;
+  else el.scrollTop=prev.top;
 }
 function messageBody(title,body){
   return '<div style="max-width:520px;margin:12vh auto 0;padding:40px 24px;text-align:center">'+
