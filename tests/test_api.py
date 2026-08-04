@@ -506,7 +506,7 @@ async def _read_frames(gen, n, timeout=5.0):
 
 
 def test_stream_baseline_silent_then_ping(conn):
-    """A freshly-opened stream emits no synthetic event — only keepalive pings."""
+    """A freshly-opened stream emits no synthetic CHANGE event — only keepalive pings."""
     seed_task(conn, "signin")
     seed_viewer(conn, "host", "sbv_host", task_id=None)
     viewer = resolve_viewer_token(conn, "sbv_host")
@@ -514,14 +514,75 @@ def test_stream_baseline_silent_then_ping(conn):
     async def inner():
         gen = api._sse_events(_FakeRequest(), viewer, poll=0, ping_every=0)
         try:
-            frames = await _read_frames(gen, 2)
+            frames = await _read_frames(gen, 3)
         finally:
             await gen.aclose()
         return frames
 
     frames = asyncio.run(inner())
-    # Nothing changed since connect, so every frame is a keepalive comment.
-    assert all(f == ": ping\n\n" for f in frames)
+    # Nothing changed since connect, so every frame is a keepalive — and NOT one of
+    # them is a `tasks`/`task` change notification the client would act on.
+    assert all(f.startswith("event: ping\n") for f in frames)
+    assert not any("event: tasks" in f or "event: task\n" in f for f in frames)
+
+
+def test_stream_opens_with_an_immediate_ping_frame(conn):
+    """The FIRST thing out of the stream is a ping, before the loop runs at all.
+
+    A StreamingResponse sends no headers until the first body chunk, so with nothing
+    emitted on connect the response head sat unsent until a real change or the first
+    keepalive — through a buffering proxy the stream often never visibly established.
+    The opening frame is what flushes the headers, so ``ping_every`` is deliberately
+    set ENORMOUS here: if the frame only arrived on the keepalive schedule this test
+    would hang instead of passing.
+    """
+    seed_task(conn, "signin")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    async def inner():
+        gen = api._sse_events(_FakeRequest(), viewer, poll=0, ping_every=9999)
+        try:
+            return await _read_frames(gen, 1, timeout=2.0)
+        finally:
+            await gen.aclose()
+
+    (frame,) = asyncio.run(inner())
+    assert frame.startswith("event: ping\n")
+    # The opening frame is marked, so a client can tell "the stream just came up" from
+    # "the stream is still alive" without any change notification riding along.
+    assert json.loads(frame.split("\n")[1][len("data: "):]) == {"open": True}
+
+
+def test_stream_ping_is_an_observable_named_event(conn):
+    """Keepalives are `event: ping` frames, never a bare `: ping` COMMENT.
+
+    SSE comments are consumed by the parser and never surfaced to JavaScript, so a
+    page fed nothing but comments cannot tell a live idle stream from a dead socket —
+    which is precisely how a broken stream used to render as a healthy dashboard. The
+    client's watchdog listens for this event; if it goes back to being a comment the
+    watchdog goes blind and this test is the tripwire.
+    """
+    seed_task(conn, "signin")
+    seed_viewer(conn, "host", "sbv_host", task_id=None)
+    viewer = resolve_viewer_token(conn, "sbv_host")
+
+    async def inner():
+        gen = api._sse_events(_FakeRequest(), viewer, poll=0, ping_every=0)
+        try:
+            return await _read_frames(gen, 3)
+        finally:
+            await gen.aclose()
+
+    frames = asyncio.run(inner())
+    assert not any(f.lstrip().startswith(":") for f in frames), "a comment reached the wire"
+    # Every keepalive parses as a named event with a JSON data line.
+    for f in frames:
+        lines = f.split("\n")
+        assert lines[0] == "event: ping"
+        assert isinstance(json.loads(lines[1][len("data: "):]), dict)
+    # The steady-state ping carries no `open` marker — only the opening frame does.
+    assert json.loads(frames[-1].split("\n")[1][len("data: "):]) == {}
 
 
 def test_stream_emits_tasks_and_task_on_change(conn):
@@ -533,7 +594,7 @@ def test_stream_emits_tasks_and_task_on_change(conn):
     async def inner():
         gen = api._sse_events(_FakeRequest(), viewer, poll=0, ping_every=0)
         try:
-            # First frame establishes the baseline (a ping, no change yet).
+            # First frame is the opening ping (baseline captured, nothing emitted).
             first = await _read_frames(gen, 1)
             # Now cause a real change and read the emitted frames.
             _message(conn, "signin", be, "status_update", "backend is up")
@@ -543,7 +604,7 @@ def test_stream_emits_tasks_and_task_on_change(conn):
         return first, after
 
     first, after = asyncio.run(inner())
-    assert first == [": ping\n\n"]
+    assert first[0].startswith("event: ping\n")
 
     # The list token moved (new traffic) AND the task's detail token moved.
     assert after[0].startswith("event: tasks\ndata: ")
@@ -565,7 +626,10 @@ def test_stream_stops_on_disconnect(conn):
 
     async def inner():
         # is_disconnected() returns True on the very first poll → loop breaks at once.
+        # The opening frame is emitted BEFORE the loop, so it still comes out first: a
+        # client that connected deserves its headers even if it is already gone.
         gen = api._sse_events(_FakeRequest(disconnect_after=0), viewer, poll=0)
+        assert (await asyncio.wait_for(gen.__anext__(), 5.0)).startswith("event: ping\n")
         with pytest.raises(StopAsyncIteration):
             await asyncio.wait_for(gen.__anext__(), 5.0)
 
@@ -578,8 +642,10 @@ def test_stream_stops_on_idle_backstop(conn):
     viewer = resolve_viewer_token(conn, "sbv_host")
 
     async def inner():
-        # idle_timeout=0 → no change means the idle backstop trips immediately.
+        # idle_timeout=0 → no change means the idle backstop trips immediately, right
+        # after the pre-loop opening frame.
         gen = api._sse_events(_FakeRequest(), viewer, poll=0, idle_timeout=0)
+        assert (await asyncio.wait_for(gen.__anext__(), 5.0)).startswith("event: ping\n")
         with pytest.raises(StopAsyncIteration):
             await asyncio.wait_for(gen.__anext__(), 5.0)
 

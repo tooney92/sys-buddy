@@ -3034,11 +3034,30 @@ window.addEventListener('resize', function(){
 /* ---------- boot + live stream (SSE) ---------- */
 /* Replaces the old 3s poll: the broker pushes change notifications over
    GET /api/stream (see SSE contract v1). We refetch via the existing helpers
-   when told — we never reload the page, and tokens stay opaque to the client. */
-var es=null;                     // active EventSource, or null while paused
+   when told — we never reload the page, and tokens stay opaque to the client.
+
+   THE STREAM IS AN OPTIMISATION, NOT THE SOURCE OF FRESHNESS. It used to be the only
+   thing that refreshed this page, and that made a silent stream indistinguishable from
+   a quiet task: watched through a Cloudflare quick tunnel, new messages simply never
+   appeared and the header counted honestly but uselessly up to "Last refreshed 4m ago"
+   while the viewer reloaded by hand. (Measured: a quick tunnel forwarded ZERO bytes of
+   an open event-stream for 45s while keepalives and real change events sat on the wire.
+   It buffers on the order of 128 KB before flushing, and it drops the
+   `X-Accel-Buffering: no` we send on the floor.) So there are three layers now, and the
+   page is honest about which one it is running on:
+     1. the stream, when it works — sub-second,
+     2. a WATCHDOG that times the stream's own pings and reopens a dead one,
+     3. an unconditional slow POLL, so freshness never DEPENDS on layer 1 at all. */
+var es=null;                     // active EventSource, or null while paused/closed
 var idleTimer=null;
 var IDLE_MS=15*60*1000;          // ~15 min of no activity -> pause
+var POLL_MS=15*1000;             // fallback refresh when the stream is useless
+var DEAD_MS=45*1000;             // silence this long = the stream is gone, whatever it says
 var liveBanner=null;
+var lastFrame=0;                 // when the last stream frame of ANY kind arrived
+var streamErrors=0;              // consecutive es.onerror callbacks
+var paused=false;                // true ONLY on a deliberate pause (idle / hidden tab)
+var degraded=false;              // the stream is failing; the poll is carrying us
 
 /* one round of "get me current state" using the existing fetch helpers */
 function catchUp(){
@@ -3051,45 +3070,126 @@ function ensureBanner(){
   var b=document.createElement('div');
   b.id='sb-live-banner';
   b.setAttribute('role','button');
-  b.setAttribute('title','Resume live updates');
   b.style.cssText='position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:9999;'+
     'display:none;align-items:center;gap:8px;padding:9px 14px;border-radius:10px;cursor:pointer;'+
     'font-family:inherit;font-size:13px;font-weight:500;color:var(--text-2);'+
     'background:var(--surface);border:1px solid var(--border-strong);box-shadow:var(--shadow)';
-  b.innerHTML='<span style="width:8px;height:8px;border-radius:50%;background:var(--st-open-dot);display:inline-block"></span>'+
-    '<span>Live updates paused — click to resume</span>';
-  b.onclick=function(){ resumeStream(); };
+  b.innerHTML='<span id="sb-live-dot" style="width:8px;height:8px;border-radius:50%;background:var(--st-open-dot);display:inline-block"></span>'+
+    '<span id="sb-live-text">Live updates paused — click to resume</span>';
+  b.onclick=function(){ resumeStream(); };   // a click retries, in either mode
   document.body.appendChild(b);
   liveBanner=b;
   return b;
 }
-function showBanner(){ ensureBanner().style.display='flex'; }
+/* One banner, two DIFFERENT admissions — and the second one is the whole point.
+   'paused' is a choice the viewer made (or their tab going hidden). 'degraded' is the
+   stream failing underneath them, which this page used to render as perfect health. */
+function showBanner(kind){
+  var b=ensureBanner();
+  var dot=b.querySelector('#sb-live-dot'), txt=b.querySelector('#sb-live-text');
+  if(kind==='degraded'){
+    dot.style.background='var(--st-stuck-dot)';
+    txt.textContent='Live updates unavailable — refreshing every '+Math.round(POLL_MS/1000)+'s';
+    b.setAttribute('title','Click to retry the live connection');
+  }else{
+    dot.style.background='var(--st-open-dot)';
+    txt.textContent='Live updates paused — click to resume';
+    b.setAttribute('title','Resume live updates');
+  }
+  b.style.display='flex';
+}
 function hideBanner(){ if(liveBanner) liveBanner.style.display='none'; }
 
+function markDegraded(){
+  if(degraded) return;
+  degraded=true;
+  showBanner('degraded');
+}
+/* Any DATA frame at all — a ping counts — is proof the stream is delivering. Only
+   frames clear the degraded state, and that distinction is the whole trick: see the
+   `onopen` handler below for why "connected" is not evidence of anything. */
+function noteFrame(){
+  lastFrame=Date.now();
+  streamErrors=0;
+  if(degraded){ degraded=false; hideBanner(); }
+}
+
 /* open (or re-open) the stream. Always starts with a catch-up fetch so a
-   resume is never stale, then relies on EventSource auto-reconnect for blips. */
+   resume is never stale. */
 function openStream(){
+  paused=false;
   catchUp();
   if(es) return;                 // already streaming
+  lastFrame=Date.now();          // give the new stream a full DEAD_MS to say hello
   try{
     es=new EventSource('/api/stream');
-    es.addEventListener('tasks', function(){ fetchTasks(); });
+    /* `onopen` is NOT liveness, and must never call noteFrame(). Measured against a
+       real trycloudflare.com tunnel: onopen fired at 214ms and then not one data
+       frame arrived in the following 30s, with readyState sitting on OPEN the whole
+       time. The tunnel forwards the response HEAD promptly and then buffers the body
+       indefinitely — so "the stream opened" is precisely the reassurance that made
+       this bug invisible. All a successful connect proves is that the endpoint is
+       reachable, which is worth resetting the error count for and nothing else. */
+    es.onopen=function(){ streamErrors=0; };
+    /* A keepalive is a NAMED `ping` event now, not an invisible `: ping` comment —
+       SSE comments never reach JavaScript, so before this there was no way to observe
+       that an idle stream was still alive. This handler is the watchdog's heartbeat. */
+    es.addEventListener('ping', function(){ noteFrame(); });
+    es.addEventListener('tasks', function(){ noteFrame(); fetchTasks(); });
     es.addEventListener('task', function(e){
+      noteFrame();
       try{ var d=JSON.parse(e.data); if(d && d.id===state.taskId) fetchDetail(d.id); }catch(err){}
     });
-    /* onerror: EventSource reconnects itself on server-side drops (ngrok/proxy
-       idle timeouts). We only force a true pause via pauseStream() below. */
-  }catch(err){ es=null; }
+    /* EventSource's built-in auto-reconnect only covers a socket that visibly BREAKS.
+       It never fires for the failure that actually bit us — a proxy holding the
+       response open and silent forever — which is why the watchdog below exists as
+       well. Here we only count: two consecutive errors is a real problem worth
+       admitting to the viewer, one is a blip EventSource will retry through. */
+    es.onerror=function(){
+      streamErrors++;
+      if(streamErrors>=2) markDegraded();
+    };
+  }catch(err){ es=null; markDegraded(); }
 }
 /* client-side close = no auto-reconnect = a genuine pause */
 function pauseStream(){
+  paused=true;
+  degraded=false;                // a pause is a choice, not a failure
   if(es){ es.close(); es=null; }
-  showBanner();
+  showBanner('paused');
 }
 function resumeStream(){
   hideBanner();
   openStream();
   armIdle();
+  /* A retry is a hope, not a fix. If the stream was degraded, KEEP saying so until a
+     real frame proves otherwise — only noteFrame() clears it. Clearing it here would
+     buy the viewer another DEAD_MS of false calm every time they clicked the banner
+     (or moved the mouse), which is the deception in miniature. */
+  if(degraded) showBanner('degraded');
+}
+function restartStream(){
+  if(es){ try{ es.close(); }catch(e){} es=null; }
+  openStream();                   // which begins with catchUp(), so data is current
+}
+
+/* ---- watchdog: a stream lies by staying SILENT, so we time it ----
+   The broker pings every ~10s. 45s of total silence therefore means the stream is
+   gone no matter what `es.readyState` claims — a buffering proxy leaves it reading
+   OPEN forever. Reopening runs catchUp(), so a failed reconnect still leaves the page
+   current. Runs on its own 5s tick rather than off a frame, because the failure we
+   are hunting produces no frames to hang a timer off. */
+function watchdog(){
+  if(paused || document.hidden) return;   // a deliberate pause is not a failure
+  if(!es || Date.now()-lastFrame >= DEAD_MS){ markDegraded(); restartStream(); }
+}
+/* ---- fallback poll: freshness must never DEPEND on the stream ----
+   Slow enough to be free on a laptop, fast enough that a demo over a buffering tunnel
+   still reads as live. Respects the same two gates as the stream — a deliberate pause
+   and a hidden tab — so a paused dashboard genuinely stays paused. */
+function fallbackPoll(){
+  if(paused || document.hidden) return;
+  catchUp();
 }
 
 /* ---- inactivity gate: pause after IDLE_MS of no user activity ---- */
@@ -3114,7 +3214,9 @@ document.addEventListener('visibilitychange', function(){
 render();
 openStream();  // begins with a catch-up fetch; cookie carries auth, a bad token surfaces as 401
 armIdle();
-setInterval(patchVolatile, 1000); // keep "refreshed Ns ago" ticking (local only)
+setInterval(patchVolatile, 1000);   // keep "refreshed Ns ago" ticking (local only)
+setInterval(watchdog, 5000);        // notice a stream that has gone quiet on us
+setInterval(fallbackPoll, POLL_MS); // and stay fresh even when it has
 })();
 </script>
 </body>
