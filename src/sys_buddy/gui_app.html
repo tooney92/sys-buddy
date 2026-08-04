@@ -535,7 +535,6 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 .vbanner .vclose{appearance:none;background:transparent;border:0;cursor:pointer;
   color:var(--text-3);font-size:1rem;line-height:1;padding:2px 4px}
 .vbanner .vclose:hover{color:var(--text)}
-/* opt-in toggle in the footer */
 
 /* ---------- footer bridge check ---------- */
 .foot{
@@ -1803,9 +1802,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   });
 
   // ---- version awareness ----------------------------------------------
-  // The opt-in lives in localStorage; the GitHub call only happens when it's on, so
-  // the app never phones out unless the user allowed it. The RESTART-NEEDED case needs
-  // no opt-in — it only asks the local broker what it's running.
+  // The RESTART-NEEDED case needs no network at all — it only asks the local broker what
+  // it is running, and compares. See the block comment below for why the release check is
+  // unconditional.
   /* The version check is UNCONDITIONAL. It used to sit behind a footer checkbox that
      defaulted to off, and the result was that it told nobody anything — the owner ran
      1.4.0 for four releases while the site advertised 2.2.0, and hit two bugs live that
