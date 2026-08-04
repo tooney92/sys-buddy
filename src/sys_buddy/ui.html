@@ -2305,13 +2305,21 @@ function eventLogHTML(d){
    are `notify`. Dropping it would make old rows unfilterable. */
   /* The engagement kinds are appended rather than woven in, so a peer task's filter
    row is unchanged in both content and order. */
-  var FILTERS=['all','transition','lock','deploy','test','notify','slack','token','todo','deliverable','verification','guidelines'];
+  var FILTERS=['all','transition','lock','deploy','test','notify','slack','token','deliverable','verification','guidelines'];
   /* `todo` joins the vocabulary only for a task that HAS todos (incl. one whose todos
      were all dropped — its log still carries them), so a pre-todo task's filter row is
-     exactly the row that shipped. */
+     exactly the row that shipped. It was ALSO sitting in the base list above, which meant
+     a task with todos rendered the button twice — the conditional is the one that matches
+     the stated intent, so the base copy is gone rather than this. */
   if(d && (d.todos||[]).length) FILTERS=FILTERS.concat(['todo']);
   var filter=state.eventFilter;
-  var fbtns=FILTERS.map(function(f){ return '<button data-filter="'+f+'" style="'+filterStyle(filter===f)+'">'+f+'</button>'; }).join('');
+  /* The VALUE stays `todo` because that is the stored event kind; only the label follows
+     the task's vocabulary. Without this a debug task offered a `todo` filter above rows
+     that all read "Issue #N" — the same leak `api._render_detail` fixed one level down. */
+  var fbtns=FILTERS.map(function(f){
+    var label = (f==='todo' && isDebugTask(d)) ? 'issue' : f;
+    return '<button data-filter="'+f+'" style="'+filterStyle(filter===f)+'">'+label+'</button>';
+  }).join('');
   /* NEWEST-FIRST, matching the activity strip. The API hands events back oldest-first
      (api.py `ORDER BY id`) and this box is 320px tall, so rendering them in that order put
      the newest event permanently below the fold on any task with more than a handful — and

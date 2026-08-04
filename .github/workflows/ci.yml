@@ -44,3 +44,18 @@ jobs:
             exit 1
           fi
           echo "OK — no manual version edit."
+
+  lockfile:
+    name: lockfile matches the project version
+    # Runs on EVERY event, release-please's own PR included — that PR is exactly where the
+    # drift gets introduced, so exempting it would exempt the only case that matters.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if uv.lock disagrees with pyproject.toml
+        # release-please bumps `pyproject.toml` and never touches `uv.lock`, so after each
+        # release the lock names the PREVIOUS version. Harmless to the package, but it means
+        # any `uv run` rewrites the file, and every contributor picks up a spurious diff on
+        # top of whatever they were actually working on. Hand-relocked twice already; a
+        # check is what stops a third time.
+        run: python3 .github/scripts/check_lockfile.py
