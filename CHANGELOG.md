@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.5.0](https://github.com/tooney92/sys-buddy/compare/v2.4.0...v2.5.0) (2026-08-04)
+
+
+### Added
+
+* put more than one of a role on a task from the app ([b5ac514](https://github.com/tooney92/sys-buddy/commit/b5ac51421d2d2c447f1757b3d7774d5e53ff7aca))
+
 ## [2.4.0](https://github.com/tooney92/sys-buddy/compare/v2.3.0...v2.4.0) (2026-08-04)
 
 
