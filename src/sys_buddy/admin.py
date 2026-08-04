@@ -456,6 +456,74 @@ def revoke_agent(name: str, task: str | None = None) -> int:
         conn.close()
 
 
+def extend_agent_tokens(
+    task: str, *, hours: float = 24.0, never: bool = False
+) -> list[dict]:
+    """Push back (or lift) the expiry on every live agent token on ``task``.
+
+    THE GAP THIS FILLS. A tunnelled broker defaults agent tokens to a 24h TTL so a leaked
+    one self-expires, and the code that does it says "agents refresh with rotate_token".
+    They cannot. `rotate_token` authenticates with the token it is replacing, so the moment
+    one expires the agent is locked out of the only tool that could have saved it — and
+    `report_status("stuck")` is equally gone, so it cannot even escalate. Nothing warns
+    beforehand and the failure reads as "invalid or revoked", which sends everyone hunting a
+    revocation that never happened.
+
+    Recovery used to mean revoking the seat, minting a fresh invite, re-pairing, rewiring the
+    MCP client and restarting the agent's session — losing its context — or editing the
+    database by hand. This is the host-side move that was missing.
+
+    ``never`` clears the expiry outright (the same state a same-machine broker mints), which
+    is what you want for a long session or a demo. Only LIVE agents are touched: a revoked
+    seat stays revoked, because "extend the tokens" must never quietly re-admit somebody a
+    host deliberately cut off.
+
+    Returns one row per agent it touched, so the caller can print who was extended rather
+    than a bare count — a host needs to see that the seat they were worried about is in it.
+    """
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        now = time.time()
+        new_expiry = None if never else now + hours * 3600.0
+        rows = conn.execute(
+            "SELECT id, COALESCE(handle, role) AS seat, name, expires_at FROM agents "
+            "WHERE task_id = ? AND revoked_at IS NULL ORDER BY id",
+            (task,),
+        ).fetchall()
+        touched = [
+            {
+                "seat": r["seat"],
+                "name": r["name"],
+                "was": r["expires_at"],
+                "now": new_expiry,
+                # The one a host actually reacts to: this seat was already dead.
+                "was_expired": r["expires_at"] is not None and r["expires_at"] < now,
+            }
+            for r in rows
+        ]
+        conn.execute(
+            "UPDATE agents SET expires_at = ? WHERE task_id = ? AND revoked_at IS NULL",
+            (new_expiry, task),
+        )
+        conn.commit()
+        _write_event(
+            conn, task, "token",
+            {"text": (
+                f"Agent tokens extended for {len(touched)} seat(s): "
+                + ("no expiry" if never else f"+{hours:g}h")
+            )},
+        )
+        conn.commit()
+        audit.event(
+            "extend_agent_tokens", task=task,
+            count=len(touched), never=never, hours=None if never else hours,
+        )
+        return touched
+    finally:
+        conn.close()
+
+
 def revoke_viewer(label: str, task: str | None = None) -> int:
     """Revoke live viewers with ``label`` (optionally scoped to ``task``). Returns
     how many were revoked."""

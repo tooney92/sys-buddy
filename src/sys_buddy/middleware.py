@@ -21,7 +21,12 @@ from fastmcp.server.middleware import Middleware
 from . import audit
 from .config import get_config
 from .db import connect
-from .identity import get_current, resolve_agent_token, set_current
+from .identity import (
+    explain_agent_token,
+    get_current,
+    resolve_agent_token,
+    set_current,
+)
 
 # The action tools that change collaboration state. They stay LOCKED until the agent
 # passes the pre-flight readiness check (agents.ready = 1) — read-only tools (rules,
@@ -158,6 +163,8 @@ class AuthMiddleware(Middleware):
         conn = connect()
         try:
             identity = resolve_agent_token(conn, token)
+            # Only on the failure path, and only for the message: WHY it did not resolve.
+            reason = explain_agent_token(conn, token) if identity is None else "ok"
         finally:
             conn.close()
 
@@ -166,8 +173,34 @@ class AuthMiddleware(Middleware):
             if _auth_failure_limited(ip, time.time()):
                 audit.event("auth_ratelimit", ip=ip)
                 raise ToolError("too many failed auth attempts; slow down and retry shortly")
-            audit.event("auth_fail", ip=ip)
-            raise ToolError("unauthorized: invalid or revoked agent token")
+            audit.event("auth_fail", ip=ip, reason=reason)
+            # SAY WHICH. One sentence covered all three cases before, and for the commonest
+            # one it was wrong in a costly way: a tunnelled broker expires agent tokens after
+            # 24h, and an agent told it might have been "revoked" sends its human hunting a
+            # revocation nobody performed. Expiry also has a recovery the agent cannot reach
+            # on its own — `rotate_token` authenticates with the token it would replace — so
+            # the message has to name the person who can fix it and what they run.
+            if reason == "expired":
+                raise ToolError(
+                    "unauthorized: your agent token has EXPIRED (it was valid; it timed "
+                    "out). You cannot fix this yourself — rotate_token needs a working "
+                    "token, so it will fail the same way. Ask your host to run "
+                    "`sys-buddy task extend-tokens <task>` (or `--never` for a long "
+                    "session). Nothing else is needed afterwards: the broker re-reads the "
+                    "token on every call, so you are live again immediately — no re-pair, "
+                    "no session restart, and you keep your context."
+                )
+            if reason == "revoked":
+                raise ToolError(
+                    "unauthorized: your agent token was REVOKED by the host. This is "
+                    "deliberate, not a fault — ask them why, and for a fresh invite if you "
+                    "should still be on this task."
+                )
+            raise ToolError(
+                "unauthorized: this agent token is not recognised by this broker. Check "
+                "you are pointed at the right broker URL, and that the token was not "
+                "truncated when it was copied."
+            )
 
         set_current(identity)
         try:

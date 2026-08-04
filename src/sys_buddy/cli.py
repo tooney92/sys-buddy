@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -88,6 +89,39 @@ def cmd_task_create(args: argparse.Namespace) -> int:
         f"state: {task['state']}"
     )
     return 0
+
+
+def cmd_task_extend_tokens(args: argparse.Namespace) -> int:
+    from . import admin
+
+    _cfg_from_args(args)
+    try:
+        touched = admin.extend_agent_tokens(
+            args.task, hours=args.hours, never=args.never
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not touched:
+        print(f"No live agents on '{args.task}' — nothing to extend.")
+        return 0
+    when = "no expiry" if args.never else _fmt_local(touched[0]["now"])
+    for t in touched:
+        # Flag the ones that were ALREADY dead: that is the seat whose agent is locked out
+        # right now, and the reason the host is running this command.
+        was = " (was EXPIRED)" if t["was_expired"] else ""
+        print(f"  @{t['seat']:<16} {t['name']}{was}")
+    print(f"Extended {len(touched)} token(s) on '{args.task}' → {when}")
+    if not args.never:
+        print("  Agents need no action: the broker re-reads the token on every call, so")
+        print("  they are live again immediately — no re-pair, no session restart.")
+    return 0
+
+
+def _fmt_local(ts: float | None) -> str:
+    if ts is None:
+        return "no expiry"
+    return time.strftime("%a %d %b %H:%M", time.localtime(ts))
 
 
 def cmd_task_add_seat(args: argparse.Namespace) -> int:
@@ -551,6 +585,21 @@ def build_parser() -> argparse.ArgumentParser:
     ts.add_argument("--role", required=True, help="Role type, e.g. qa")
     ts.add_argument("--seat", help="Seat handle (default: derived, e.g. frontend-2)")
     ts.set_defaults(func=cmd_task_add_seat)
+
+    te = tsub.add_parser(
+        "extend-tokens",
+        help="Push back the expiry on a task's agent tokens (or lift it entirely)",
+    )
+    te.add_argument("task")
+    te.add_argument(
+        "--hours", type=float, default=24.0,
+        help="How much longer the tokens should live, from now (default: 24)",
+    )
+    te.add_argument(
+        "--never", action="store_true",
+        help="Remove the expiry altogether — what you want for a long session or a demo",
+    )
+    te.set_defaults(func=cmd_task_extend_tokens)
 
     tr = tsub.add_parser("roster", help="Show a task's cast, including seats nobody has taken")
     tr.add_argument("task")
