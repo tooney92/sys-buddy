@@ -13,6 +13,8 @@ the new default and the fact that the desktop app no longer passes a flag at all
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from sys_buddy import updates
@@ -149,6 +151,112 @@ def test_releases_url_is_always_present_even_when_offline(monkeypatch):
     assert s["releases_url"] == updates.RELEASES_URL
     assert s["releases_url"] == "https://sys-buddy.com/releases"
     assert s["release_url"] is None      # no GitHub answer, but the site link stands
+
+
+# --- how to actually take the update ----------------------------------------
+# Every case fakes the install layout. Nothing below depends on how THIS machine happens
+# to have sys-buddy installed, so the suite gives the same answer on a dev checkout, a
+# `uv tool` install and inside the Docker image.
+def _fake_layout(monkeypatch, *, executable, prefix, base_prefix, dockerenv=False):
+    monkeypatch.setattr(sys, "executable", executable)
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "base_prefix", base_prefix)
+    # Answer only for the container marker, so a test run inside a container can't leak in.
+    monkeypatch.setattr(updates.os.path, "exists", lambda p: dockerenv and p == "/.dockerenv")
+
+
+@pytest.mark.parametrize("layout,expected_method,expected_cmd", [
+    # uv tool install: interpreter lives under the uv tools dir, shim in ~/.local/bin.
+    (dict(executable="/Users/x/.local/share/uv/tools/sys-buddy/bin/python",
+          prefix="/Users/x/.local/share/uv/tools/sys-buddy",
+          base_prefix="/opt/homebrew/opt/python@3.11/Frameworks/Python.framework/Versions/3.11"),
+     "uv", "uv tool upgrade sys-buddy"),
+    # pipx keeps each app in its own venv under ~/.local/pipx/venvs.
+    (dict(executable="/home/x/.local/pipx/venvs/sys-buddy/bin/python",
+          prefix="/home/x/.local/pipx/venvs/sys-buddy",
+          base_prefix="/usr"),
+     "pipx", "pipx upgrade sys-buddy"),
+    # a plain venv — `python -m venv` + pip install, or an editable checkout.
+    (dict(executable="/home/x/dev/sys-buddy/.venv/bin/python",
+          prefix="/home/x/dev/sys-buddy/.venv",
+          base_prefix="/usr"),
+     "pip", "pip install -U sys-buddy"),
+    # Windows separators must not defeat the path match.
+    (dict(executable=r"C:\Users\x\AppData\Roaming\uv\tools\sys-buddy\Scripts\python.exe",
+          prefix=r"C:\Users\x\AppData\Roaming\uv\tools\sys-buddy",
+          base_prefix=r"C:\Python311"),
+     "uv", "uv tool upgrade sys-buddy"),
+])
+def test_detects_the_install_layout(monkeypatch, layout, expected_method, expected_cmd):
+    _fake_layout(monkeypatch, **layout)
+    assert updates.detect_install_method() == expected_method
+    assert updates.upgrade_command() == expected_cmd
+
+
+def test_a_container_wins_over_the_venv_inside_it(monkeypatch):
+    """The Docker image installs into /opt/app/.venv, so the venv check would call it a pip
+    install and tell the user to run pip inside a container they should be pulling instead.
+    /.dockerenv has to be checked first."""
+    _fake_layout(monkeypatch, executable="/opt/app/.venv/bin/python", prefix="/opt/app/.venv",
+                 base_prefix="/usr/local", dockerenv=True)
+    assert updates.detect_install_method() == "docker"
+    assert updates.upgrade_command() == "docker pull ghcr.io/tooney92/sys-buddy"
+
+
+def test_inconclusive_falls_back_to_the_uv_command(monkeypatch):
+    """No venv, no recognisable path — a bare system interpreter. The answer is a GUESS
+    (the one the website recommends), and it has to be a harmless one: the user is shown a
+    command to read, never an upgrade that runs itself."""
+    _fake_layout(monkeypatch, executable="/usr/bin/python3", prefix="/usr", base_prefix="/usr")
+    assert updates.detect_install_method() == updates._FALLBACK_METHOD
+    assert updates.upgrade_command() == "uv tool upgrade sys-buddy"
+
+
+def test_status_always_carries_the_upgrade_command(monkeypatch):
+    """The field the banner renders. Present in every payload — including the offline,
+    local-only one — because "an update exists" without "here is how" is half a message."""
+    monkeypatch.setattr(updates, "running_version", lambda *a, **k: None)
+    monkeypatch.setattr(updates, "latest_release", lambda *a, **k: None)
+    s = updates.status("http://x")
+    assert s["upgrade_command"] in updates.UPGRADE_COMMANDS.values()
+
+    s2 = updates.status("http://x", check_github=False)
+    assert s2["upgrade_command"] == s["upgrade_command"]
+
+
+def test_the_upgrade_command_reaches_the_page_through_the_bridge(monkeypatch):
+    """`status()` is where the detection lives so the page renders a string instead of
+    reimplementing this in JS — which only holds if the bridge passes the field through."""
+    from sys_buddy import gui
+
+    monkeypatch.setattr(updates, "running_version", lambda *a, **k: None)
+    monkeypatch.setattr(updates, "latest_release", lambda *a, **k: {
+        "version": "9.9.9", "name": "v9.9.9", "notes": "", "url": "u",
+    })
+    _fake_layout(monkeypatch, executable="/home/x/.local/pipx/venvs/sys-buddy/bin/python",
+                 prefix="/home/x/.local/pipx/venvs/sys-buddy", base_prefix="/usr")
+    s = gui.GuiApi().check_version()
+    assert "error" not in s
+    assert s["update_available"] is True
+    assert s["upgrade_command"] == "pipx upgrade sys-buddy"
+
+
+def test_the_banner_shows_the_command_and_the_real_restart_action():
+    """Source-level guard on the page half. The banner must render the detected command
+    (as text, never innerHTML — release names and notes are remote content) and must tell
+    a desktop user the action they can actually take."""
+    from pathlib import Path
+
+    from sys_buddy import gui
+
+    html = (Path(gui.__file__).parent / "gui_app.html").read_text(encoding="utf-8")
+    assert "upgrade_command" in html, "the banner should render the detected command"
+    assert 'data-copy="vb-cmd"' in html, "the command should be copyable"
+    assert "vbCmd.textContent" in html, "the command must be set as text, not markup"
+    assert "restart the broker to apply the update" not in html, (
+        "that says the what, not the how — a desktop user quits and reopens the app"
+    )
+    assert "Quit sys-buddy and open it again" in html
 
 
 def test_the_desktop_app_does_not_re_gate_the_check():
