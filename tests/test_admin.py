@@ -97,3 +97,52 @@ def test_engagement_is_creatable_without_an_owner_seat(conn):
     the fix. Enforcing it at creation would break the add-the-client-later flow."""
     t = admin.create_task(None, title="No client yet", roles=["backend"], mode="engagement")
     assert t["mode"] == "engagement"
+
+
+# --- more than one seat of a role ------------------------------------------
+def test_create_task_takes_several_seats_of_one_role(conn):
+    """The desktop app could only ever express ONE seat per role type — its cast was a
+    boolean map — so a two-frontend task was unreachable from the app even though this has
+    worked at the domain level since v2.0.0. The app now sends a repeated role, which is
+    the shape asserted here."""
+    t = admin.create_task(
+        None, title="Auth rework",
+        roles=["backend", "backend", "frontend", "frontend", "frontend"],
+    )
+    assert t["roles"] == ["backend-1", "backend-2", "frontend-1", "frontend-2", "frontend-3"]
+    assert t["seat_roles"] == {
+        "backend-1": "backend", "backend-2": "backend",
+        "frontend-1": "frontend", "frontend-2": "frontend", "frontend-3": "frontend",
+    }
+
+
+def test_one_of_each_is_unchanged_by_that(conn):
+    """The regression that matters: a one-seat-per-type cast — every task made before the
+    picker could count — still names its seats after the role type, with no suffix."""
+    t = admin.create_task(None, title="Classic", roles=["backend", "frontend"])
+    assert t["roles"] == ["backend", "frontend"]
+    assert t["seat_roles"] == {"backend": "backend", "frontend": "frontend"}
+
+
+def test_a_cast_of_only_frontends_is_legitimate(conn):
+    """"Just FEs" is a real cast: two frontend SEATS are two agents who can hold a contract
+    with each other, so the app's two-agent minimum counts seats rather than role types."""
+    t = admin.create_task(None, title="FE pair", roles=["frontend", "frontend"])
+    assert t["roles"] == ["frontend-1", "frontend-2"]
+
+
+def test_the_app_can_express_more_than_one_of_a_role():
+    """A source guard on the other half. The domain has always accepted a repeated role; the
+    bug was that the desktop app's cast was `{backend:true}` — a boolean, with no notion of
+    HOW MANY — so nothing could ever send one. If that map goes back to booleans, multi-seat
+    casts become unreachable again from the only surface most hosts use."""
+    from pathlib import Path
+
+    from sys_buddy import gui
+
+    html = (Path(gui.__file__).parent / "gui_app.html").read_text(encoding="utf-8")
+    assert "var cast = { backend:1 }" in html, "the cast is a boolean again — no counts"
+    assert "cast = { backend:true }" not in html
+    # The `+` affordance and the expansion that turns a count into repeated roles.
+    assert 'class="role-more"' in html
+    assert "function castRoles()" in html and "for (var i = 0; i < countOf(r); i++)" in html
