@@ -428,7 +428,15 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 .role-combo.on .role-you{display:inline-flex}
 .role-combo.on .role-you:hover{color:var(--text-2)}
 .role-combo.is-you .role-you{background:var(--rc);color:#fff;border-left-color:transparent}
-.role-main:focus-visible,.role-you:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* The `+` that makes a second seat of a role reachable. Sits between the name and YOU, so
+   the reading order is "frontend — add another — you". Only rendered when the role is on and
+   under its cap, so it never appears as a dead control. */
+.role-more{display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
+  font-family:inherit;font-size:.95rem;font-weight:600;line-height:1;
+  color:var(--text-3);background:transparent;border:none;
+  border-left:1px solid var(--border-strong);padding:0 10px;min-width:30px}
+.role-combo.on .role-more:hover{color:var(--text);background:color-mix(in srgb,var(--rc) 14%,transparent)}
+.role-main:focus-visible,.role-you:focus-visible,.role-more:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 /* ---------- host: connection card ---------- */
 .conn-card{border:1px solid var(--border);background:var(--surface);border-radius:14px;
@@ -662,7 +670,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
       <div class="field">
         <span class="label-txt" id="roles-label">Roles</span>
-        <p class="hint" id="roles-help" style="margin:0">Pick every role on this task — a contract needs at least two. Tap <strong>“you”</strong> on the one you’ll drive.</p>
+        <p class="hint" id="roles-help" style="margin:0">Pick who’s on this task — a contract needs at least two agents. Tap <strong>“+”</strong> for a second of the same role (two frontends get <code>@frontend-1</code> and <code>@frontend-2</code>, one invite each), and <strong>“you”</strong> on the role you’ll drive.</p>
         <!-- compound role chips are rendered by JS into here -->
         <div class="roles" id="roles-row" role="group" aria-labelledby="roles-label"></div>
         <p class="hint" id="roles-note"></p>
@@ -1467,36 +1475,70 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var OWNER_ROLE = 'owner';
   function allRoles(){ return isEngagement() ? BUILD_ROLES.concat([OWNER_ROLE]) : BUILD_ROLES; }
 
-  var cast = { backend:true };   // roles on the task; user adds more
-  var youRole = 'backend';       // the seat the host takes
+  /* `cast` is a COUNT per role type, not a boolean. It used to be `{backend:true}`, which
+     meant this screen could express "there is a frontend" and never "there are two" — so a
+     two-frontend task was unreachable from the app even though the broker has supported it
+     since v2.0.0 (`normalise_cast` numbers repeats into @frontend-1/@frontend-2, and invites
+     are minted per SEAT). The old comment even said "user adds more", meaning more role
+     TYPES, which is not what a reader assumes it means. */
+  var cast = { backend:1 };
+  var youRole = 'backend';       // the ROLE the host takes; they get its first seat
+  /* One client, by definition. Everything else is a headcount. */
+  var MAX_PER_ROLE = 6;
 
-  function castRoles(){ return allRoles().filter(function(r){ return cast[r]; }); }
+  function countOf(role){ return cast[role] || 0; }
+  function capFor(role){ return role === OWNER_ROLE ? 1 : MAX_PER_ROLE; }
+  /* Expanded, so `{frontend:2}` becomes ['frontend','frontend'] — which is exactly the shape
+     `admin.create_task` already reads as "two frontend developers". */
+  function castRoles(){
+    var out = [];
+    allRoles().forEach(function(r){ for (var i = 0; i < countOf(r); i++) out.push(r); });
+    return out;
+  }
+  /* The DISTINCT role types on the task — what the two-agent minimum used to count, and
+     deliberately still does not: see refreshGate. */
+  function castTypes(){ return allRoles().filter(function(r){ return countOf(r) > 0; }); }
 
   function renderRoles(){
     rolesRow.innerHTML = '';
     allRoles().forEach(function(role){
-      var on = !!cast[role];
+      var n = countOf(role);
+      var on = n > 0;
       var isYou = on && youRole === role;
+      var canAdd = n < capFor(role);
       var combo = document.createElement('div');
       combo.className = 'role-combo' + (on ? ' on' : '') + (isYou ? ' is-you' : '');
       combo.style.setProperty('--rc', 'var(--role-' + role + ')');
+      /* The count only appears once there is more than one, so a one-of-each cast — every
+         task before this change — looks exactly as it did. */
+      var label = role + (n > 1 ? ' ×' + n : '');
       combo.innerHTML =
-        '<button type="button" class="role-main"><span class="role-pip"></span>' + role + '</button>' +
+        '<button type="button" class="role-main"><span class="role-pip"></span>' + label + '</button>' +
+        (on && canAdd ? '<button type="button" class="role-more" aria-label="Add another ' + role + '" title="Add another ' + role + '">+</button>' : '') +
         '<button type="button" class="role-you" aria-label="I am the ' + role + '">' + (isYou ? '✓ you' : 'you') + '</button>';
+      /* The main chip still TOGGLES — click to add the role, click again to clear it
+         entirely. `+` is the only way to reach two, so a one-seat cast cannot be arrived at
+         by accident and the old muscle memory keeps working. */
       combo.querySelector('.role-main').addEventListener('click', function(){ toggleRole(role); });
-      combo.querySelector('.role-you').addEventListener('click', function(){ if (cast[role]) setYou(role); });
+      var more = combo.querySelector('.role-more');
+      if (more) more.addEventListener('click', function(e){ e.stopPropagation(); addSeat(role); });
+      combo.querySelector('.role-you').addEventListener('click', function(){ if (countOf(role)) setYou(role); });
       rolesRow.appendChild(combo);
     });
     refreshGate();
   }
   function toggleRole(role){
-    if (cast[role]) {
+    if (countOf(role)) {
       delete cast[role];
-      if (youRole === role) youRole = castRoles()[0] || null;  // hand the seat to another role
+      if (youRole === role) youRole = castTypes()[0] || null;   // hand the seat to another role
     } else {
-      cast[role] = true;
+      cast[role] = 1;
       if (!youRole) youRole = role;
     }
+    renderRoles();
+  }
+  function addSeat(role){
+    if (countOf(role) < capFor(role)) cast[role] = countOf(role) + 1;
     renderRoles();
   }
   function setYou(role){ youRole = role; renderRoles(); }
@@ -1508,9 +1550,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   // rather than just re-gated. Leaving an engagement drops the owner from the cast: keeping
   // it would ship a contract task carrying a seat only an engagement gives meaning to.
   function applyMode(){
-    if (!isEngagement() && cast[OWNER_ROLE]) {
+    if (!isEngagement() && countOf(OWNER_ROLE)) {
       delete cast[OWNER_ROLE];
-      if (youRole === OWNER_ROLE) youRole = castRoles()[0] || null;
+      if (youRole === OWNER_ROLE) youRole = castTypes()[0] || null;
     }
     if (modeHint) modeHint.textContent = MODE_HINTS[currentMode()] || '';
     renderRoles();   // calls refreshGate()
@@ -1525,21 +1567,24 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     var roles = castRoles();
     // An engagement runs the contract flow, so it shares the two-agent minimum.
     var contract = !modeDebug.checked;
+    /* Counts SEATS, not role types — and that is the point of this change. Two frontends
+       are two agents who can hold a contract with each other (`@frontend-1` signing with
+       `@frontend-2`), so "just FEs" is a legitimate cast and must satisfy the minimum. */
     var minRoles = contract ? 2 : 1;
     // An engagement with no owner seat can be created, but nothing can then be built on
     // it: only the owner may write the deliverable list, and the list must be accepted
     // before any todo or contract exists (`deliverables._assert_owner`). The broker
     // deliberately does not refuse it — the cast is not frozen at setup — so this screen
     // is the right place to stop somebody walking into a dead end.
-    var needsOwner = isEngagement() && !cast[OWNER_ROLE];
+    var needsOwner = isEngagement() && !countOf(OWNER_ROLE);
     // The host runs the broker and is a dev; the owner is the client, joining by invite.
     // Taking that seat yourself would make you the party you are supposed to be reporting
     // to, which is the one arrangement engagement mode exists to prevent.
     var youAreOwner = isEngagement() && youRole === OWNER_ROLE;
     if (roles.length < minRoles) {
       rolesNote.textContent = contract
-        ? 'Add at least one more role — a contract needs two agents.'
-        : 'Add at least one role.';
+        ? 'Add one more agent — a contract needs two. Two of the same role is fine: use “+”.'
+        : 'Add at least one agent.';
     } else if (needsOwner) {
       rolesNote.textContent = 'Add the owner seat — that is your client, and only they can list what was commissioned.';
     } else if (!youRole) {
@@ -1551,7 +1596,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     }
     var msg = '';
     if (!title) msg = 'Add a title to continue.';
-    else if (roles.length < minRoles) msg = 'Add ' + (roles.length ? 'another' : 'a') + ' role to continue.';
+    else if (roles.length < minRoles) msg = 'Add ' + (roles.length ? 'another' : 'an') + ' agent to continue.';
     else if (needsOwner) msg = 'An engagement needs an owner seat — that is the client.';
     else if (!youRole) msg = 'Mark which role is you.';
     else if (youAreOwner) msg = 'Mark “you” on a role you build in, not the owner.';
