@@ -22,18 +22,49 @@ contracts (2.0.0 moved it out) and a whole feature with no way to reach it. "Tel
 a newer version exists" is not something a tool needs permission for, and burying the
 question in a checkbox meant it was never asked. It is one 4-second GET on launch, it
 degrades to silence offline, and it never blocks anything.
+
+WHY IT ALSO SAYS *HOW*. The same not-quite-helping, one step later: the banner announced a
+release and stopped, so it only helped people who already knew the upgrade command — the
+ones who did not need a banner. The command depends on how sys-buddy was installed, which
+is DETECTED here (``detect_install_method``) rather than guessed at in JavaScript, and
+handed to the page as a finished string in ``upgrade_command``.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 import urllib.request
 
 from sys_buddy import __version__
 
 GITHUB_REPO = "tooney92/sys-buddy"
 _HTTP_TIMEOUT = 4.0
+
+DOCKER_IMAGE = "ghcr.io/tooney92/sys-buddy"
+
+# The upgrade command per install layout. Keys are what `detect_install_method()` returns.
+UPGRADE_COMMANDS = {
+    "uv": "uv tool upgrade sys-buddy",
+    "pipx": "pipx upgrade sys-buddy",
+    "pip": "pip install -U sys-buddy",
+    "docker": f"docker pull {DOCKER_IMAGE}",
+}
+
+# The fallback when detection is inconclusive. IT IS A FALLBACK, NOT A CERTAINTY: it is
+# what the website recommends and so the likeliest way a given user installed, but nothing
+# about the process proved it. A wrong answer here is harmless by construction — the banner
+# shows the user a string to read and copy, and never runs anything itself.
+_FALLBACK_METHOD = "uv"
+
+# Path fragments that identify a layout. Checked against sys.prefix/sys.executable, which
+# are the honest inputs: they say where the interpreter running THIS code actually lives,
+# whereas argv[0] or PATH can be anything.
+_UV_TOOLS = "/uv/tools/"        # ~/.local/share/uv/tools/sys-buddy/…  (shim in ~/.local/bin)
+_PIPX_VENVS = "/pipx/venvs/"    # ~/.local/pipx/venvs/sys-buddy/…
+_DOCKERENV = "/.dockerenv"      # created by the docker runtime inside every container
 
 # Where a HUMAN reads what changed. The GitHub release page is the machine record — one
 # tag, raw markdown, written for someone who already knows the codebase. The site's
@@ -61,6 +92,40 @@ def _newer(candidate: str | None, baseline: str | None) -> bool:
 def installed_version() -> str:
     """The version of the code THIS process is running from."""
     return __version__
+
+
+def detect_install_method() -> str:
+    """How sys-buddy was most likely installed: ``uv`` | ``pipx`` | ``pip`` | ``docker``.
+
+    This is detected, not asked, from ``sys.executable`` / ``sys.prefix`` — the interpreter
+    running this code has to live *somewhere*, and where it lives is what a package manager
+    decides. Order matters: the Docker image installs into a venv at ``/opt/app/.venv``, so
+    the container check has to win before the venv check sees it and says "pip".
+
+    Returns ``_FALLBACK_METHOD`` when nothing matches. See the comment on that constant:
+    it is a guess, and a wrong guess costs the user one wrong line of text to ignore.
+    """
+    # A container is a container regardless of what is installed inside it — you upgrade it
+    # by pulling a new image, not by running pip in it.
+    if os.path.exists(_DOCKERENV):
+        return "docker"
+
+    # Normalise separators so one comparison works on posix and Windows alike.
+    paths = [str(sys.executable or "").replace("\\", "/"), str(sys.prefix or "").replace("\\", "/")]
+    if any(_UV_TOOLS in p for p in paths):
+        return "uv"
+    if any(_PIPX_VENVS in p for p in paths):
+        return "pipx"
+    # Any other virtualenv: a plain `python -m venv` + pip install, or an editable checkout.
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        return "pip"
+    return _FALLBACK_METHOD
+
+
+def upgrade_command() -> str:
+    """The literal shell command that upgrades THIS install. Built here rather than in the
+    page so the browser renders a string and never reimplements the detection."""
+    return UPGRADE_COMMANDS.get(detect_install_method(), UPGRADE_COMMANDS[_FALLBACK_METHOD])
 
 
 def running_version(base_url: str) -> str | None:
@@ -100,6 +165,11 @@ def status(base_url: str, *, check_github: bool = True, repo: str = GITHUB_REPO)
 
     ``update_available`` — a newer release than what's installed.
 
+    ``upgrade_command`` — how to actually get it, detected from this install's layout.
+    Always present, because a banner that says an update exists without saying how to take
+    it is only half a message. Never raises: detection is filesystem-free apart from one
+    ``os.path.exists``, and falls back to a string rather than to an error.
+
     ``check_github`` defaults to True and exists now only so a caller (a test, or an
     operator who genuinely wants the local-only answer) can ask for the offline half.
     The desktop app does not pass it: telling somebody a newer version exists is not a
@@ -126,6 +196,8 @@ def status(base_url: str, *, check_github: bool = True, repo: str = GITHUB_REPO)
         "release_name": release_name,
         "notes": notes,
         "release_url": release_url,
+        # How to take the update, for THIS install. See detect_install_method().
+        "upgrade_command": upgrade_command(),
         # Always present, even offline — the banner links a human to the prose history
         # rather than to a raw tag. Constant rather than derived, so it is one string to
         # change if the site ever moves.

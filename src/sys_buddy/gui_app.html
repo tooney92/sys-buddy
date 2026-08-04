@@ -525,12 +525,16 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 .vbanner .vnotes{margin:5px 0 0;white-space:pre-wrap;color:var(--text-3);font-size:.82rem;
   max-height:8.5em;overflow:auto}
 .vbanner .vmeta{margin-top:6px;font-size:.78rem;color:var(--text-3)}
+/* the upgrade command: same pre.code + .btn.copy pairing as the connect-command blocks,
+   one size down so it sits inside a banner instead of dominating it. */
+.vbanner .vcmd{margin-top:9px}
+.vbanner .vcmd[hidden]{display:none}
+.vbanner .vcmd pre.code{flex:1;min-width:0;font-size:.8rem;padding:8px 11px;white-space:pre}
 .vbanner a{color:var(--accent);text-decoration:none}
 .vbanner a:hover{text-decoration:underline}
 .vbanner .vclose{appearance:none;background:transparent;border:0;cursor:pointer;
   color:var(--text-3);font-size:1rem;line-height:1;padding:2px 4px}
 .vbanner .vclose:hover{color:var(--text)}
-/* opt-in toggle in the footer */
 
 /* ---------- footer bridge check ---------- */
 .foot{
@@ -575,13 +579,22 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   </header>
 
   <!-- version-awareness banner: shown only when the broker is running stale code
-       (restart needed) or a newer release is published (opt-in). See updates.py. -->
+       (restart needed) or a newer release is published. Never when up to date.
+       See updates.py. -->
   <div class="vbanner" id="version-banner" role="status" aria-live="polite" hidden>
     <span class="vdot" aria-hidden="true"></span>
     <div class="vbody">
       <div class="vtitle" id="vb-title"></div>
       <div class="vnotes" id="vb-notes" hidden></div>
       <div class="vmeta" id="vb-meta"></div>
+      <!-- HOW to take the update. The command depends on how sys-buddy was installed, so
+           Python detects it (updates.detect_install_method) and hands us the finished
+           string in `upgrade_command`; this page renders it and copies it, and never
+           reimplements the logic. `data-copy` wires the shared copy handler below. -->
+      <div class="vcmd copy-row" id="vb-cmd-row" hidden>
+        <pre class="code" id="vb-cmd"></pre>
+        <button type="button" class="btn copy invite-copy-sm" data-copy="vb-cmd">Copy</button>
+      </div>
     </div>
     <button type="button" class="vclose" id="vb-close" aria-label="Dismiss">×</button>
   </div>
@@ -1789,9 +1802,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   });
 
   // ---- version awareness ----------------------------------------------
-  // The opt-in lives in localStorage; the GitHub call only happens when it's on, so
-  // the app never phones out unless the user allowed it. The RESTART-NEEDED case needs
-  // no opt-in — it only asks the local broker what it's running.
+  // The RESTART-NEEDED case needs no network at all — it only asks the local broker what
+  // it is running, and compares. See the block comment below for why the release check is
+  // unconditional.
   /* The version check is UNCONDITIONAL. It used to sit behind a footer checkbox that
      defaulted to off, and the result was that it told nobody anything — the owner ran
      1.4.0 for four releases while the site advertised 2.2.0, and hit two bugs live that
@@ -1801,17 +1814,25 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var vbTitle = document.getElementById('vb-title');
   var vbNotes = document.getElementById('vb-notes');
   var vbMeta = document.getElementById('vb-meta');
+  var vbCmdRow = document.getElementById('vb-cmd-row');
+  var vbCmd = document.getElementById('vb-cmd');
 
   function renderVersion(s){
     if (!s || s.error) { vb.hidden = true; return; }   // never nag on failure
     vbNotes.hidden = true; vbNotes.textContent = '';
     vbMeta.textContent = '';
+    vbCmdRow.hidden = true; vbCmd.textContent = '';
     if (s.restart_needed) {
-      // Actionable NOW, and independent of the GitHub opt-in — takes precedence.
+      // Actionable NOW, needs no network — takes precedence.
       vb.classList.add('warn');
       vbTitle.textContent = 'Restart needed';
+      // Say the actual action. "Restart the broker" is the what; in a desktop app the HOW
+      // is quitting the window, which does not feel like a fix unless you're told it is.
+      // The broker runs in-process (gui._ensure_broker), so quitting the app IS restarting
+      // it — except when the user started one themselves and the app attached to that.
       vbMeta.textContent = 'Installed ' + s.installed + ' · broker running ' + s.running
-        + ' — restart the broker to apply the update.';
+        + '. Quit sys-buddy and open it again — the broker runs inside the app, so that '
+        + 'restarts it. If you started the broker yourself in a terminal, restart that one.';
       vb.hidden = false;
       return;
     }
@@ -1832,6 +1853,11 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
         a.href = href; a.textContent = "See what's changed ↗";
         a.target = '_blank'; a.rel = 'noopener';
         vbMeta.appendChild(a);
+      }
+      // The command that actually gets it. textContent, like everything else here.
+      if (s.upgrade_command) {
+        vbCmd.textContent = s.upgrade_command;
+        vbCmdRow.hidden = false;
       }
       vb.hidden = false;
       return;
