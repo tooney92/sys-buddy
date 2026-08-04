@@ -165,8 +165,11 @@ def test_a_peer_task_has_no_gate_at_all(conn, mode):
     """A team that never opens an engagement should not be able to tell this shipped."""
     ag = _agents(conn, roles=("backend", "frontend"), mode=mode)
     if mode == "debug":
-        with pytest.raises(ValueError, match="debug tasks don't carry todos"):
+        # A debug task's work is ISSUES, and raising one is ungated too — the engagement
+        # gate is about a CLIENT's agreed scope, which neither peer mode has.
+        with pytest.raises(ValueError, match="propose_issue"):
             todos.propose_todo(conn, ag["backend"], "x", "y", ["backend", "frontend"])
+        todos.propose_issue(conn, ag["backend"], "x", "y", ["backend", "frontend"])
         return
     made = todos.propose_todo(conn, ag["backend"], "Contact API", "scope",
                               ["backend", "frontend"])
@@ -227,9 +230,12 @@ def test_a_solo_todo_is_still_refused_on_a_peer_task(conn, mode):
     signatory is a note to self, and nobody is positioned to say the work was done.
     Nothing about engagement mode may loosen that."""
     ag = _agents(conn, roles=("backend", "frontend"), mode=mode)
+    # On a debug task the same rule guards an ISSUE, and for a sharper reason: `fixed #N`
+    # requires every party, so a one-party issue would resolve on its own word.
+    propose = todos.propose_issue if mode == "debug" else todos.propose_todo
     with pytest.raises(ValueError) as e:
-        todos.propose_todo(conn, ag["backend"], "Solo work", "scope", ["backend"])
-    assert "TWO" in str(e.value) or "debug tasks don't carry todos" in str(e.value)
+        propose(conn, ag["backend"], "Solo work", "scope", ["backend"])
+    assert "TWO" in str(e.value)
 
 
 def test_a_todo_with_no_parties_is_refused_even_on_an_engagement(conn):

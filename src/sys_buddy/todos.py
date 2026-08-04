@@ -61,6 +61,16 @@ DROPPED = "dropped"        # abandoned by mutual consent, or by the host
 
 STATUSES = (PENDING, ACCEPTED, CONTRACTED, VERIFIED, DROPPED)
 
+# ISSUES — the same five stages MINUS the contract, spoken in debug's vocabulary. An
+# issue on a debug task is a todo with the contract half removed, so `contracted` cannot
+# occur and the finish line is called `resolved` rather than `verified`: "the bug is
+# resolved" is the word the humans and the task state already use in that mode.
+RESOLVED = "resolved"      # every named party said `fixed` — this issue is done
+ISSUE_STATUSES = (PENDING, ACCEPTED, RESOLVED, DROPPED)
+# Every status either vocabulary can produce — what `rollup` keys its counts by, so a
+# debug task's `resolved` issue does not blow up a dict built from contract words alone.
+ALL_STATUSES = (PENDING, ACCEPTED, CONTRACTED, VERIFIED, RESOLVED, DROPPED)
+
 ACCEPT = "accepted"
 DECLINE = "declined"
 
@@ -91,6 +101,38 @@ def _now() -> float:
 # --------------------------------------------------------------------------- #
 # reads
 # --------------------------------------------------------------------------- #
+def task_mode(conn, task_id: str) -> str:
+    """The task's workflow mode — ``'contract'`` (default), ``'debug'`` or
+    ``'engagement'``.
+
+    THE mode read for this module, and it is always a read: ``tasks.mode`` is the only
+    source of truth for whether a row here is a TODO or an ISSUE. No function in the
+    issue flow takes a ``debug=`` argument, because a parameter would be a second
+    statement of the same fact and the two can disagree — the exact class of bug that
+    made engagement mode shippable-but-uncreatable when three surfaces each spelled the
+    mode list themselves.
+    """
+    row = conn.execute("SELECT mode FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or row["mode"] is None:
+        return "contract"
+    return row["mode"]
+
+
+def is_debug(conn, task_id: str) -> bool:
+    """Does this task carry ISSUES rather than todos? Derived from ``tasks.mode``."""
+    return task_mode(conn, task_id) == "debug"
+
+
+def noun(conn, task_id: str) -> str:
+    """``'issue'`` on a debug task, ``'todo'`` everywhere else.
+
+    One word, read from the mode, used by every message and refusal this module writes —
+    so an agent that was taught "issue" is never told off in a vocabulary its human does
+    not use.
+    """
+    return "issue" if is_debug(conn, task_id) else "todo"
+
+
 def task_roles(conn, task_id: str) -> list[str]:
     row = conn.execute("SELECT roles_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
@@ -217,6 +259,51 @@ def decisions(conn, todo_id: int, version: int) -> dict[str, dict]:
     }
 
 
+def fixes(conn, todo_id: int, version: int) -> dict[str, dict]:
+    """``{role: {detail, at}}`` — who has said this ISSUE is fixed, for one VERSION.
+
+    The debug counterpart of ``contract_signatures``, and deliberately the same shape of
+    rule: an issue resolves only when EVERY named party has said so, over the same "all"
+    (the party list). Partial is a normal, expected state — one party fixing something the
+    other has not yet confirmed is most of the life of a bug — never an error.
+    """
+    return {
+        r["role"]: {"detail": r["detail"], "at": r["created_at"]}
+        for r in conn.execute(
+            "SELECT role, detail, created_at FROM todo_fixes WHERE todo_id = ? AND version = ?",
+            (todo_id, version),
+        ).fetchall()
+    }
+
+
+def all_fixed(conn, row) -> bool:
+    """Has every named party said this issue is fixed? The all-must-agree rule itself."""
+    f = fixes(conn, row["id"], row["version"])
+    parties = parties_of(row)
+    return bool(parties) and all(p in f for p in parties)
+
+
+def awaiting_fix(conn, row) -> list[str]:
+    """The parties who have NOT said `fixed` yet, in party order."""
+    f = fixes(conn, row["id"], row["version"])
+    return [p for p in parties_of(row) if p not in f]
+
+
+def record_fix(conn, todo_id: int, version: int, identity: Identity, detail: str | None) -> None:
+    """Stamp ONE party's "this is fixed" on one version of an issue.
+
+    An upsert, like :func:`_record`: saying it twice is the same statement, not a second
+    one, and re-saying it must not be a way to resolve an issue on one seat's word.
+    """
+    conn.execute(
+        "INSERT INTO todo_fixes (todo_id, version, role, agent_id, detail, created_at) "
+        "VALUES (?,?,?,?,?,?) ON CONFLICT(todo_id, version, role) DO UPDATE SET "
+        "detail = excluded.detail, agent_id = excluded.agent_id, "
+        "created_at = excluded.created_at",
+        (todo_id, version, identity.role, identity.agent_id, detail, _now()),
+    )
+
+
 def drop_consents(conn, todo_id: int) -> dict[str, str | None]:
     return {
         r["role"]: r["reason"]
@@ -244,7 +331,11 @@ def status_of(conn, row) -> str:
     if row["dropped_at"] is not None:
         return DROPPED
     if row["state"] == "verified":
-        return VERIFIED
+        # The SAME march value, read in the vocabulary the task actually speaks: an issue
+        # whose every party has said `fixed` is `resolved`, a deliverable that has been
+        # checked end to end is `verified`. One stored fact, two words for it — and the
+        # word comes from `tasks.mode`, never from a caller.
+        return RESOLVED if is_debug(conn, row["task_id"]) else VERIFIED
     if _contract_rows(conn, row["id"]):
         return CONTRACTED
     d = decisions(conn, row["id"], row["version"])
@@ -290,7 +381,7 @@ def to_dict(conn, row) -> dict:
     parties = parties_of(row)
     contracts = _contract_rows(conn, row["id"])
     locked = [c["version"] for c in contracts if c["status"] == "locked"]
-    return {
+    out = {
         # BOTH, on purpose: `number` is the handle humans and agents type (`#N`,
         # `todo=N`), `id` is the internal key every join in the schema uses. The
         # dashboard needs `id` to key its selection and `number` to print.
@@ -328,6 +419,15 @@ def to_dict(conn, row) -> dict:
         "created_at": row["created_at"],
         "verified_at": row["verified_at"],
     }
+    # ISSUES carry two more fields, and ONLY on a debug task — the same
+    # additive/omit-when-it-does-not-apply rule the engagement keys follow. A contract
+    # todo has no `fixed` step at all, so shipping an always-empty `fixed_by` on one
+    # would invite an agent to look for a move that does not exist there.
+    if is_debug(conn, row["task_id"]):
+        f = fixes(conn, row["id"], row["version"])
+        out["fixed_by"] = [p for p in parties if p in f]
+        out["awaiting_fix"] = [p for p in parties if p not in f]
+    return out
 
 
 def get_todos(conn, task_id: str) -> list[dict]:
@@ -354,11 +454,17 @@ def rollup(conn, task_id: str) -> dict | None:
     ``verified`` requires ALL of them. ``stuck`` is never derived: a stuck todo is
     surfaced as a count so the human sees it, but it must not force the task into a
     terminal state that would freeze the other five deliverables.
+
+    On a DEBUG task the same arithmetic is spoken in the debug vocabulary, because that is
+    the only vocabulary its task state machine has: ``open`` until every live issue is
+    fixed, then ``resolved``. The contract path is untouched — it never sees this branch,
+    and the six march values it derives from are unchanged.
     """
     rows = live_todos(conn, task_id)
     if not rows:
         return None
-    counts = {s: 0 for s in STATUSES}
+    debug = is_debug(conn, task_id)
+    counts = {s: 0 for s in ALL_STATUSES}
     stuck = 0
     # Todos still waiting on a seat NOBODY ever accepted an invite for. Counted
     # separately from `pending` because the fix is different: pending is a colleague to
@@ -373,16 +479,28 @@ def rollup(conn, task_id: str) -> dict | None:
             unjoined += 1
 
     states = [r["state"] for r in rows]
-    if all(s == "verified" for s in states):
+    done = all(s == "verified" for s in states)
+    if debug:
+        # An issue has no contract chain, so it only ever sits at `open` or `verified` and
+        # the furthest-march reading has nothing to say. The task is `resolved` when every
+        # live issue is fixed and `open` while any is not — and that is a ROLLUP, so it
+        # goes backwards the moment a new issue is raised (see `apply_rollup`).
+        derived = "resolved" if done else "open"
+    elif done:
         derived = "verified"
     else:
         derived = max((s for s in states if s != "verified"), key=lambda s: _MARCH_RANK.get(s, 0))
 
     total = len(rows)
+    # ONE count, two names. `verified` is what every existing surface reads; `fixed` is the
+    # same number under the word a debug task's panel prints ("2/3 fixed"), so no surface
+    # has to translate a vocabulary it was not told about.
+    finished = counts[VERIFIED] + counts[RESOLVED]
     return {
         "total": total,
         "counts": counts,
-        "verified": counts[VERIFIED],
+        "verified": finished,
+        "fixed": finished,
         "pending": counts[PENDING],
         "stuck": stuck,
         # ⊆ pending: how many of those are blocked on a seat nobody ever joined.
@@ -392,7 +510,7 @@ def rollup(conn, task_id: str) -> dict | None:
             (task_id,),
         ).fetchone()["n"],
         "state": derived,
-        "complete": counts[VERIFIED] == total,
+        "complete": finished == total,
     }
 
 
@@ -418,11 +536,35 @@ def apply_rollup(conn, task_id: str) -> str | None:
     # `verified` by the very next rollup pass — which fires on every contract proposal,
     # every lock, every reopen and every todo report. The client's acceptance would
     # evaporate the moment anyone touched anything.
-    if current is not None and current["state"] in (
-        _state.STUCK, _state.RESOLVED, _state.CONFIRMED
+    #
+    # `resolved` is the ONE of the three that is not always human-level, and the
+    # distinction is the same one `_assert_task_usable` already draws: a task that reached
+    # `resolved` because every live ISSUE is fixed got there by this very function, so it
+    # is a rollup and must go backwards when a new issue appears — nobody should need a
+    # human to reopen a bug they just found. A task that reached it because an agent said
+    # `report_status('resolved')` is a human-level verdict and stays terminal.
+    if current is not None and current["state"] in (_state.STUCK, _state.CONFIRMED):
+        return current["state"]
+    if (
+        current is not None
+        and current["state"] == _state.RESOLVED
+        and not rollup_resolved(conn, task_id)
     ):
         return current["state"]
     return _state._transition(conn, task_id, roll["state"])
+
+
+def rollup_resolved(conn, task_id: str) -> bool:
+    """Did this task reach ``resolved`` by ROLLUP rather than by a person saying so?
+
+    True only for a debug task whose ``resolved`` has no task-level ``resolved`` EVENT
+    behind it — that event is written by ``state._report_resolved`` and by nothing else, so
+    its absence is exactly "the state came from the issue counts". No new column: the
+    provenance is already in the log, and a column would be a second copy of it.
+    """
+    from . import state as _state
+
+    return is_debug(conn, task_id) and not _state.human_resolved(conn, task_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -495,13 +637,20 @@ def _validate_parties(conn, task_id: str, parties: object) -> list[str]:
     # second dev there would just be conscripting somebody to rubber-stamp work they had
     # nothing to do with, which is worse than no signature at all.
     if len(cleaned) < 2 and not deliverables.is_engagement(conn, task_id):
+        if is_debug(conn, task_id):
+            raise ValueError(
+                "an issue binds at least TWO of the task's seats — one to raise it and one "
+                "to agree it is real and, later, that it is fixed. `fixed #N` requires "
+                "EVERY party, and an issue with one party would resolve on its own word"
+            )
         raise ValueError(
             "a todo binds at least TWO of the task's seats — one to produce the "
             "deliverable and one to build against it (same rule as a contract task's cast)"
         )
     if not cleaned:
         raise ValueError(
-            "a todo binds at least one of the task's seats — name who is doing the work"
+            f"a {noun(conn, task_id)} binds at least one of the task's seats — name who "
+            f"is doing the work"
         )
     _assert_parties_ready(conn, task_id, cleaned)
     return cleaned
@@ -544,19 +693,29 @@ def _assert_parties_ready(conn, task_id: str, parties: list[str]) -> None:
         )
 
 
-def _assert_text(title: str, scope: str) -> tuple[str, str]:
+def _assert_text(title: str, scope: str, what: str = "todo") -> tuple[str, str]:
+    """``what`` is the noun this task's rows go by (:func:`noun`) — ``todo`` or ``issue``.
+    Same two fields, same limits; only the word the refusal uses changes, so an agent
+    working issues is never corrected in a vocabulary its human does not use."""
     title = (title or "").strip()
     scope = (scope or "").strip()
     if not title:
-        raise ValueError("a todo needs a title")
+        raise ValueError(f"an {what} needs a title" if what == "issue"
+                         else f"a {what} needs a title")
     if len(title) > MAX_TITLE:
         raise ValueError(f"title must be at most {MAX_TITLE} characters")
     if not scope:
+        if what == "issue":
+            raise ValueError(
+                "an issue needs a scope — what is actually wrong: the symptom, how to "
+                "reproduce it, and what counts as fixed. The other parties accept THAT, "
+                "not the title, and they each have to agree it is fixed later."
+            )
         raise ValueError(
             "a todo needs a scope — what is in and out of this deliverable. The other "
             "parties accept the SCOPE, not the title."
         )
-    service.assert_content_size(scope, "todo scope")
+    service.assert_content_size(scope, f"{what} scope")
     return title, scope
 
 
@@ -606,13 +765,17 @@ def _assert_task_usable(conn, task_id: str) -> None:
         raise ValueError(f"unknown task '{task_id}'")
     if row["closed_at"] is not None:
         raise ValueError(f"task '{task_id}' is closed")
-    if (row["mode"] or "contract") == "debug":
-        raise ValueError(
-            "debug tasks don't carry todos — they are a single problem you fix and "
-            "report_status('resolved'). Todos are for contract tasks."
-        )
+    # A debug task DOES carry rows in this table now — they are ISSUES: a todo with the
+    # contract half removed. Nothing here refuses them; which of the two a caller is
+    # allowed to propose is decided by mode, in `propose_todo`/`propose_issue`.
+    #
     # `verified` is NOT terminal once a task runs on todos (it is a rollup that can
-    # go backwards when a new todo appears), but a human-escalated stuck/resolved is.
+    # go backwards when a new todo appears), but a human-escalated stuck/resolved is. A
+    # ROLLUP-derived `resolved` is the debug-mode mirror of that same distinction: every
+    # issue is fixed, so the task reads resolved — and raising a new issue must drop it
+    # back with no human involved, exactly as a seventh todo reopens a `verified` task.
+    if row["state"] == _state.RESOLVED and rollup_resolved(conn, task_id):
+        return
     if row["state"] in (_state.STUCK, _state.RESOLVED):
         raise ValueError(
             f"task is in terminal state '{row['state']}'; reopening requires a human"
@@ -624,6 +787,42 @@ def _assert_task_usable(conn, task_id: str) -> None:
 # --------------------------------------------------------------------------- #
 def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list[str],
                  summary: str | None = None) -> dict:
+    """Propose a DELIVERABLE on a contract task. Refused on a debug task, which carries
+    ISSUES — see :func:`propose_issue`, which is this same function under the other name.
+    """
+    if is_debug(conn, identity.task_id):
+        raise ValueError(
+            f"task '{identity.task_id}' is a DEBUG task: its work is ISSUES, not todos — "
+            f"a problem you agree is real, fix, and every party says `fixed #N` on. Same "
+            f"call, other name: propose_issue(title, scope, parties). (There is no "
+            f"contract stage on a debug task, which is the only difference between them.)"
+        )
+    return _propose(conn, identity, title, scope, parties, summary)
+
+
+def propose_issue(conn, identity: Identity, title: str, scope: str, parties: list[str],
+                  summary: str | None = None) -> dict:
+    """Raise an ISSUE on a debug task — TWO NAMES, ONE MECHANISM.
+
+    An issue is a todo with the contract half removed, so there is nothing here to
+    implement twice: the numbering, the party list, "proposing IS your own acceptance",
+    accept/decline/repropose/drop, the stuck flag and the task rollup are the same rows and
+    the same code as a contract task's todos. The second NAME exists because an agent
+    briefed on a debug session is told to raise an "issue", and making it type
+    ``propose_todo`` for that is a tool fighting its own vocabulary.
+    """
+    if not is_debug(conn, identity.task_id):
+        mode = task_mode(conn, identity.task_id)
+        raise ValueError(
+            f"issues are for DEBUG tasks, and '{identity.task_id}' is a {mode} task — its "
+            f"work is todos, each with a contract on it. Same call, other name: "
+            f"propose_todo(title, scope, parties)."
+        )
+    return _propose(conn, identity, title, scope, parties, summary)
+
+
+def _propose(conn, identity: Identity, title: str, scope: str, parties: list[str],
+             summary: str | None = None) -> dict:
     """Propose a deliverable. **Proposing IS the creator's own consent**; the other
     named parties must accept before the todo is `accepted`.
 
@@ -632,6 +831,10 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
     That is not new authority: ``propose_contract``/``lock_contract`` have no human
     sign-off either; control comes from the prompt's "propose only when your human
     directs it", and todos follow the identical rule.
+
+    The ONE implementation behind ``propose_todo`` and ``propose_issue``. Every word it
+    writes reads its noun off ``tasks.mode`` (:func:`noun`) — never off an argument — so
+    the two names can never mean two behaviours.
     """
     _assert_task_usable(conn, identity.task_id)
     # ENGAGEMENT GATE. On commissioned work nothing may be built until the client's
@@ -644,13 +847,14 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
     # placed there would silently not apply to `sys-buddy local` — which is how this
     # gets demoed and how CLAUDE.md says to test. It would look enforced and not be.
     # The domain layer can also refuse USEFULLY, naming who has not accepted yet.
-    deliverables.assert_can_build(conn, identity.task_id, "propose a todo")
-    title, scope = _assert_text(title, scope)
+    what = noun(conn, identity.task_id)
+    deliverables.assert_can_build(conn, identity.task_id, f"propose a {what}")
+    title, scope = _assert_text(title, scope, what)
     summary = _assert_summary(summary, scope)
     parties = _validate_parties(conn, identity.task_id, parties)
     if identity.role not in parties:
         raise ValueError(
-            f"you ('{identity.role}') must be one of the parties on a todo you propose — "
+            f"you ('{identity.role}') must be one of the parties on a {what} you propose — "
             f"you named {', '.join(parties)}. Proposing IS your consent, so you cannot "
             f"propose work that binds only other people."
         )
@@ -673,7 +877,7 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
         except sqlite3.IntegrityError:
             conn.rollback()
     else:
-        raise ValueError("could not allocate a todo number — please retry")
+        raise ValueError(f"could not allocate a {what} number — please retry")
 
     todo_id = cur.lastrowid
     _record(conn, todo_id, 1, identity, ACCEPT, None)
@@ -682,21 +886,41 @@ def propose_todo(conn, identity: Identity, title: str, scope: str, parties: list
     conn.commit()
 
     others = [p for p in parties if p != identity.role]
-    service.post_message(
-        conn, identity, "todo_proposal",
-        f"Proposed todo #{number}: {title}. Scope: {scope}. This binds "
-        f"{', '.join(parties)} — proposing is my acceptance, so I'm waiting on "
-        f"{', '.join(others)}. Read it with get_todos(), then accept_todo({number}) "
-        f"if the scope is right, or decline_todo({number}, reason) / message me to "
-        f"reshape it. Accepting agrees on WHAT; the contract on this todo is a "
-        f"separate, later agreement about HOW.",
-        todo_id=todo_id,
-    )
+    if what == "issue":
+        body = (
+            f"Raised issue #{number}: {title}. Detail: {scope}. This binds "
+            f"{', '.join(parties)} — raising it IS my acceptance that it is real, so I'm "
+            f"waiting on {', '.join(others)}. Read it with get_todos(), then "
+            f"accept_todo({number}) if it is a genuine problem, or decline_todo("
+            f"{number}, reason) if it is not one. Once accepted, whoever fixes it reports "
+            f"report_status('fixed', detail, todo={number}) — and it is only RESOLVED once "
+            f"EVERY party has reported that independently. There is no contract on an issue."
+        )
+    else:
+        body = (
+            f"Proposed todo #{number}: {title}. Scope: {scope}. This binds "
+            f"{', '.join(parties)} — proposing is my acceptance, so I'm waiting on "
+            f"{', '.join(others)}. Read it with get_todos(), then accept_todo({number}) "
+            f"if the scope is right, or decline_todo({number}, reason) / message me to "
+            f"reshape it. Accepting agrees on WHAT; the contract on this todo is a "
+            f"separate, later agreement about HOW."
+        )
+    service.post_message(conn, identity, "todo_proposal", body, todo_id=todo_id)
+    # RE-DERIVE THE TASK. A new deliverable moves the rollup backwards — that is the whole
+    # point of the task state being derived rather than latched: on a debug task whose
+    # every issue was fixed, raising the next one drops it out of `resolved` with no human
+    # needed (a human-escalated `resolved` is refused above and never reaches here).
+    apply_rollup(conn, identity.task_id)
+    conn.commit()
     return _result(conn, identity.task_id, todo_id)
 
 
 def accept_todo(conn, identity: Identity, number: int) -> dict:
-    """Agree to WHAT this deliverable is. Not a lock — only "yes, let's work on it"."""
+    """Agree to WHAT this deliverable is. Not a lock — only "yes, let's work on it".
+
+    The same call accepts an ISSUE on a debug task ("yes, that is a real bug") — one
+    mechanism, and the message it posts names the next move in that task's own vocabulary.
+    """
     _assert_task_usable(conn, identity.task_id)
     row = get_row(conn, identity.task_id, number)
     _assert_open(row, "accept")
@@ -709,11 +933,20 @@ def accept_todo(conn, identity: Identity, number: int) -> dict:
 
     d = decisions(conn, row["id"], row["version"])
     parties = parties_of(row)
+    what = noun(conn, identity.task_id)
     awaiting = [p for p in parties if d.get(p, {}).get("decision") != ACCEPT]
     if awaiting:
         body = (
-            f"Accepted todo #{row['number']} v{row['version']} ({row['title']}). "
+            f"Accepted {what} #{row['number']} v{row['version']} ({row['title']}). "
             f"Still waiting on {', '.join(awaiting)}."
+        )
+    elif what == "issue":
+        body = (
+            f"Accepted issue #{row['number']} v{row['version']} ({row['title']}) — every "
+            f"party ({', '.join(parties)}) now agrees this is real, so this is where the "
+            f"work happens. There is no contract to agree: fix it, then each of us reports "
+            f"report_status('fixed', detail, todo={row['number']}) independently. It stays "
+            f"accepted until EVERY party has, and resolves on the last one."
         )
     else:
         body = (

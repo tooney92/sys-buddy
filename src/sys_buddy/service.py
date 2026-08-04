@@ -394,7 +394,12 @@ def ensure_broker_identity(conn, task_id: str) -> Identity:
 # NOT post them via send_message: a free-form test_result would desync the dashboard's
 # broker-counted strike total, and a free-form verified/deploy_confirmed would forge a
 # lifecycle event that never happened. They go through report_status only.
-RESERVED_TYPES = frozenset({"deploy_confirmed", "test_result", "verified", "stuck"})
+#
+# `fixed` is the debug half of the same idea: one party's "my side of issue #N is fixed",
+# written by `state._report_issue_fixed`. It is reserved for exactly the reason
+# `test_result` is — a free-form one would claim a party had confirmed a fix they never
+# looked at, which is the single thing the all-must-agree rule exists to prevent.
+RESERVED_TYPES = frozenset({"deploy_confirmed", "test_result", "verified", "stuck", "fixed"})
 
 # The conversational types an agent may send via send_message. A positive
 # allow-list (not just blocking RESERVED_TYPES) also stops an agent forging

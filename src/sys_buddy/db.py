@@ -207,6 +207,30 @@ CREATE TABLE IF NOT EXISTS todo_drop_consents (
     UNIQUE(todo_id, role)
 );
 
+-- ISSUES ON A DEBUG TASK: who has said "fixed". An issue IS a todo (same table, same
+-- numbering, same party list, same accept/decline) with the contract half removed, so the
+-- one thing it needs that a contract todo does not is a place to record each party's
+-- independent "this is fixed" — the debug counterpart of `contract_signatures`, and the
+-- same all-must-agree rule over the same "all" (the todo's party list).
+--
+-- It cannot ride on `todo_decisions`: that table is UNIQUE(todo_id, version, role) with
+-- one `decision` per row, so recording a fix would OVERWRITE that seat's `accepted` and
+-- the derived status would fall back to `pending` — the fix would un-accept the issue.
+--
+-- VERSION-SCOPED, exactly like `todo_decisions`: a repropose issues a new version and
+-- resets consent, so it must reset "fixed" too. Nobody's "yes, that's fixed" carries over
+-- to a problem that has since been restated.
+CREATE TABLE IF NOT EXISTS todo_fixes (
+    todo_id    INTEGER NOT NULL REFERENCES todos(id),
+    version    INTEGER NOT NULL,
+    -- A SEAT HANDLE, like `todo_decisions.role` — see the note there.
+    role       TEXT NOT NULL,
+    agent_id   INTEGER REFERENCES agents(id),
+    detail     TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(todo_id, version, role)
+);
+
 CREATE TABLE IF NOT EXISTS contract_signatures (
     contract_id INTEGER NOT NULL REFERENCES contracts(id),
     agent_id    INTEGER NOT NULL REFERENCES agents(id),
