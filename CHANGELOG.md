@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.3.0](https://github.com/tooney92/sys-buddy/compare/v2.2.0...v2.3.0) (2026-08-04)
+
+
+### Added
+
+* live updates survive a tunnel, engagement mode gets a door, and a todo opens over the board ([5b8dd1c](https://github.com/tooney92/sys-buddy/commit/5b8dd1c3cf310e55d6ec401af46bae0366befc32))
+
 ## [2.2.0](https://github.com/tooney92/sys-buddy/compare/v2.1.0...v2.2.0) (2026-08-03)
 
 
