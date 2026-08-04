@@ -130,6 +130,35 @@ def resolve_agent_token(conn: sqlite3.Connection, token: str) -> Identity | None
     )
 
 
+def explain_agent_token(conn: sqlite3.Connection, token: str) -> str:
+    """Why a token did not resolve: ``'expired'``, ``'revoked'``, or ``'unknown'``.
+
+    For the ERROR MESSAGE only, and called only on the failure path. `resolve_agent_token`
+    returns None for all three, and the middleware reported them with one sentence —
+    "invalid or revoked agent token" — which is actively misleading for the commonest case
+    by far. A tunnelled broker expires agent tokens after 24h; an agent that hits that is
+    told it may have been revoked, so its human goes looking for a revocation nobody
+    performed. That happened, cost two people an evening, and the fix is to say which.
+
+    Distinguishing them leaks almost nothing: an attacker holding no token still gets
+    'unknown'. Only somebody who once held a real token learns it has expired — and that
+    somebody is the legitimate agent trying to work out why it stopped.
+    """
+    if not token:
+        return "unknown"
+    row = conn.execute(
+        "SELECT revoked_at, expires_at FROM agents WHERE token_hash = ?",
+        (sha256_hex(token),),
+    ).fetchone()
+    if row is None:
+        return "unknown"
+    if row["revoked_at"] is not None:
+        return "revoked"
+    if row["expires_at"] is not None and row["expires_at"] < time.time():
+        return "expired"
+    return "unknown"
+
+
 def resolve_viewer_token(conn: sqlite3.Connection, token: str) -> ViewerIdentity | None:
     """Return the ViewerIdentity for a live viewer token, or None if invalid/revoked."""
     if not token:

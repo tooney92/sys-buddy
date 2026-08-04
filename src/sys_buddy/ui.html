@@ -292,10 +292,13 @@ var state = {
   loadingDetail:false,
   error:null,        // null | 'no-token' | 'unauthorized' | 'forbidden' | 'not-found' | 'network'
   expanded:{}, version:{}, eventFilter:'all', eventLogOpen:true,
-  /* which todo the right column is showing, keyed by task id (like `version`) so it
-     survives a poll refresh and leaving/returning to the task. Empty = the todo LIST.
-     MUST appear in sig() below or selecting a todo would never re-render. */
-  selectedTodo:{},
+  /* which todo is open in the modal over the board (its internal `id`), or null when
+     nothing is. NOT keyed by task like `version` is: a modal is a thing you opened a
+     second ago and close by pressing Escape, so remembering it across a navigation would
+     mean returning to a task and finding a dialog you never opened. Cleared on
+     navigation (openTask/goHome). MUST appear in sig() below or opening/closing it
+     would never re-render. */
+  todoModal:null,
   /* which shared file the screenshot lightbox is enlarging (its id, as a string), or
      null when the overlay is closed. MUST appear in sig() below or opening/closing the
      lightbox would never re-render. Cleared on navigation (openTask/goHome). */
@@ -362,11 +365,11 @@ function fetchDetail(id){
 /* ---------- navigation ---------- */
 function openTask(id){
   state.view='task'; state.taskId=id; state.detail=null; state.loadingDetail=true;
-  state.switcherOpen=false; state.mobileTab='thread'; state.lightbox=null;
+  state.switcherOpen=false; state.mobileTab='thread'; state.lightbox=null; state.todoModal=null;
   if(state.error==='not-found'||state.error==='forbidden') state.error=null;
   render(); fetchDetail(id);
 }
-function goHome(){ state.view='list'; state.switcherOpen=false; state.detail=null; state.taskId=null; state.lightbox=null; render(); }
+function goHome(){ state.view='list'; state.switcherOpen=false; state.detail=null; state.taskId=null; state.lightbox=null; state.todoModal=null; render(); }
 function toggleTheme(){ state.theme = state.theme==='dark'?'light':'dark'; localStorage.setItem('sb-theme',state.theme); render(); }
 
 /* ---------- style helpers ---------- */
@@ -898,11 +901,21 @@ function mobileGate(){
 }
 
 /* ---------- full-screen message ---------- */
-function messageScreen(icon,title,body){
+/* `retry` adds a button that simply reloads. It is load-bearing on an auth failure and
+   NOT mere decoration: this page also runs inside the desktop app's dashboard window,
+   which has no address bar, no devtools and no private mode — so before this there was
+   literally no action available on that screen. The broker now DELETES a viewer cookie
+   that failed to resolve (api._unauthorized), which is what makes reloading meaningful:
+   the dead cookie is gone, so the reload is a clean attempt rather than a replay of the
+   same rejection. */
+function messageScreen(icon,title,body,retry){
+  var btn = retry
+    ? '<button data-reload="1" style="margin-top:18px;padding:9px 16px;border:1px solid var(--border-strong);border-radius:10px;background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;font-weight:600;font-family:inherit">Try again</button>'
+    : '';
   return headerHTML()+'<div style="max-width:520px;margin:12vh auto 0;padding:40px 24px;text-align:center">'+
     '<div style="width:52px;height:52px;border-radius:14px;background:var(--surface-2);border:1px dashed var(--border-strong);display:flex;align-items:center;justify-content:center;margin:0 auto 18px;color:var(--text-3)">'+icon+'</div>'+
     '<h1 style="font-size:19px;font-weight:700;margin:0 0 8px;color:var(--text);letter-spacing:-.02em">'+esc(title)+'</h1>'+
-    '<p style="font-size:14px;color:var(--text-2);margin:0;line-height:1.55">'+esc(body)+'</p></div>';
+    '<p style="font-size:14px;color:var(--text-2);margin:0;line-height:1.55">'+esc(body)+'</p>'+btn+'</div>';
 }
 
 /* ---------- task list ---------- */
@@ -1348,7 +1361,6 @@ function todoById(d,id){
   for(var i=0;i<ts.length;i++){ if(ts[i].id===id) return ts[i]; }
   return null;
 }
-function selectedTodo(d){ return d ? todoById(d, state.selectedTodo[d.id]) : null; }
 /* The number a HUMAN types: `todos.number`, per task, starting at 1 — NOT the row's
    `id`, which is global and would print `#7` where the human types `#1`. Every `#` on
    screen and every command string this page prints goes through here; `id` stays for
@@ -1538,7 +1550,11 @@ function todoMiniStepperHTML(t){
       '<div style="'+v.nodeStyle+'">'+v.inner+'</div>'+
       '<span style="margin-top:5px;font-size:9.5px;font-weight:600;text-align:center;color:'+v.labelColor+'">'+esc(s[1])+'</span></div>';
   }).join('');
-  return '<div style="display:flex;align-items:flex-start;padding:13px 16px 11px;border-bottom:1px solid var(--border)">'+nodes+'</div>';
+  /* No padding and no border of its own: this used to sit in a card that needed a rule
+     under it, and now it sits inside the modal's status band, which already draws both.
+     Carrying the old chrome in here painted a rule that started halfway across the band,
+     under the stepper only. The CALLER owns the spacing around this widget. */
+  return '<div style="display:flex;align-items:flex-start">'+nodes+'</div>';
 }
 
 /* ---------- "what happens next" ----------
@@ -1602,7 +1618,10 @@ function nextStepHTML(t){
     return '<code style="font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:0 5px;white-space:nowrap">'+c+'</code>';
   });
 
-  return '<div style="margin:12px 16px 0;padding:10px 12px;background:'+bg+';border:1px solid '+bd+';border-radius:11px;min-width:0">'+
+  /* Flush with whatever column it is dropped into — the 16px side inset it used to carry
+     belonged to the card it lived in, and inside the modal it read as a card that had
+     slipped out of line with the prose above it. The caller spaces it. */
+  return '<div style="padding:10px 12px;background:'+bg+';border:1px solid '+bd+';border-radius:11px;min-width:0">'+
     '<div style="display:flex;align-items:center;gap:6px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:'+fg+'">'+
       '<span style="display:flex">'+icon+'</span>'+label+'</div>'+
     (head?'<div style="margin-top:6px;font-size:12px;color:var(--text-2);line-height:1.9;display:flex;flex-wrap:wrap;align-items:center;gap:4px">'+head+'</div>':'')+
@@ -1630,7 +1649,9 @@ function dropTodoHTML(d,t){
   /* A line the human TYPES, so it carries the per-task number — the CLI takes the same
      `#N` the agents do, not the global row id. */
   var cmd = 'sys-buddy todo drop '+d.id+' '+todoNo(t)+' --reason "…"';
-  return '<div style="margin:12px 16px 0;padding:11px 13px;border:1px dashed var(--border-strong);border-radius:11px">'+
+  /* Same as the NEXT card: no side inset of its own, so it lines up with the column it
+     is dropped into rather than with a card that no longer exists. */
+  return '<div style="margin:14px 0 0;padding:11px 13px;border:1px dashed var(--border-strong);border-radius:11px">'+
     '<div style="display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;color:var(--text-2)">'+
       '<span style="display:flex;color:var(--st-testing-fg)">'+IC.warn+'</span>Drop todo (host)</div>'+
     '<p style="margin:6px 0 8px;font-size:11.5px;color:var(--text-2);line-height:1.5">'+why+
@@ -1638,10 +1659,12 @@ function dropTodoHTML(d,t){
     '<div style="font-family:'+MONO+';font-size:11px;color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;overflow-x:auto;white-space:pre">'+esc(cmd)+'</div></div>';
 }
 
-/* Selecting a todo swaps the panel to today's contract card scoped to THAT todo, under
-   its own header + mini-stepper. Back returns to the list. */
-function todoDetailHTML(d,t){
-  var parties=(t.parties||[]).map(function(p){
+/* One pill per seat on the todo, carrying that seat's answer (✓ accepted / ✕ declined /
+   ○ still waiting). Its own function because the pills are the answer to "who is on this
+   and what did they say", asked in more than one place — a second copy is how one of them
+   ends up fixed and the other doesn't. */
+function todoPartyPillsHTML(t){
+  return (t.parties||[]).map(function(p){
     var a=avSeat(p), who=seatIdentity(p);
     var yes=(t.accepted_by||[]).indexOf(p)>=0, no=(t.declined_by||[]).indexOf(p)>=0;
     /* The waiting mark is a hollow ring, NOT an ellipsis. `…` immediately after a name
@@ -1665,52 +1688,105 @@ function todoDetailHTML(d,t){
       '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(who)+'</span>'+
       '<span style="flex:none">'+mark+'</span></span>';
   }).join('');
-
-  var declines=Object.keys(t.decline_reasons||{}).map(function(r){
-    return '<div style="font-size:11.5px;color:var(--st-stuck-fg);line-height:1.5"><strong>'+esc(seatIdentity(r, true))+'</strong> declined: '+esc(t.decline_reasons[r])+'</div>';
-  }).join('');
-  if(declines) declines='<div style="margin:10px 16px 0;padding:8px 11px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:10px;display:flex;flex-direction:column;gap:4px">'+declines+'</div>';
-
-  var stuckLine = t.stuck ? '<div style="margin:10px 16px 0;padding:8px 11px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:10px;font-size:11.5px;font-weight:600;color:var(--st-stuck-fg)">'+esc(t.stuck_reason||'stuck — humans notified 📣')+'</div>' : '';
-  var dropLine = t.status==='dropped' ? '<div style="margin:10px 16px 0;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;font-size:11.5px;color:var(--text-2)">Dropped by '+esc(t.dropped_by||'mutual consent')+(t.drop_reason?' — '+esc(t.drop_reason):'')+'</div>' : '';
-
-  var strikeLine='';
-  if(t.strikes>0){
-    var dots='';
-    for(var i=1;i<=MAX_STRIKES;i++){ dots+='<span style="width:6px;height:6px;border-radius:50%;background:'+(i<=t.strikes?'var(--st-stuck-dot)':'var(--border-strong)')+'"></span>'; }
-    strikeLine='<div style="margin:10px 16px 0"><span style="display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border-radius:999px;background:var(--surface);border:1px solid var(--st-stuck-dot);font-size:11.5px;font-weight:600;color:var(--st-stuck-fg)"><span style="display:flex;gap:3px">'+dots+'</span>strike '+t.strikes+' of '+MAX_STRIKES+'</span></div>';
-  }
-
-  var head='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px">'+
-    '<div style="padding:13px 16px;display:flex;align-items:flex-start;gap:10px;border-bottom:1px solid var(--border)">'+
-      '<button data-todoback="1" title="Back to all todos" style="display:flex;align-items:center;justify-content:center;width:26px;height:26px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;cursor:pointer;color:var(--text-2);flex:none">'+IC.back+'</button>'+
-      '<div style="flex:1;min-width:0">'+
-        '<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">'+
-          '<span style="font-size:13.5px;font-weight:600;color:var(--text)">'+esc(t.title)+'</span>'+
-          '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+esc(todoNo(t))+' v'+esc(t.version)+'</span>'+
-          todoStatusChip(t)+'</div>'+
-        summaryHTML(t)+
-        '<details style="margin:8px 0 0"><summary style="cursor:pointer;font-size:11px;color:var(--text-3);list-style:none">Full scope</summary>'+
-          '<div style="margin-top:4px;padding-left:2px;border-left:2px solid var(--border)">'+scopeHTML(t.scope)+'</div>'+
-        '</details>'+
-      '</div></div>'+
-    todoMiniStepperHTML(t)+
-    /* Directly under the stepper: the stepper says WHERE it is, this says what moves it. */
-    nextStepHTML(t)+
-    '<div style="padding:12px 16px 0;display:flex;gap:5px;flex-wrap:wrap">'+parties+'</div>'+
-    declines+stuckLine+dropLine+strikeLine+dropTodoHTML(d,t)+
-    '<div style="height:14px"></div></div>';
-
-  /* the SAME contract card the task view has always rendered, scoped to this todo —
-     followed, on an ENGAGEMENT task only, by what the reviewer is meant to read it
-     against: the role's guidelines and the deliverables it serves (item 2). Both render
-     '' for a contract/debug task, so that column is byte-identical to before. */
-  return head+contractHTML({id:d.id+'#'+t.id, contract:t.contract})+reviewAsideHTML(d,t);
 }
 
 function todoPanelHTML(d){
-  var t=selectedTodo(d);
-  return t ? todoDetailHTML(d,t) : todoListHTML(d);
+  /* The right column is ALWAYS the list now. Selecting a todo used to swap this column
+     in place, which cost you the list the moment you wanted one todo — you could not
+     compare two, and getting back meant a dedicated back button. A todo opens in a modal
+     over the top instead (`todoModalHTML`), so the board stays where it was. */
+  return todoListHTML(d);
+}
+
+/* ---------- the todo modal ----------
+   ONE todo, opened over the board: status across the top because the two state fields are
+   the thing everyone trips on (docs/todo-flow.md) and they describe the todo rather than
+   either half of it; the human PROSE on the left — what was asked, in whose words, and the
+   one command that moves it; the CONTRACT on the right, which is the machine-readable half
+   and the thing you scroll through while reading the ask beside it.
+
+   Every piece below is the SAME renderer the in-column detail used — `todoStatusChip`,
+   `summaryHTML`, `scopeHTML`, `todoMiniStepperHTML`, `nextStepHTML`, `contractHTML`,
+   `reviewAsideHTML`. This is a re-layout, not a second implementation, so a fix to any of
+   them lands here too. */
+function todoModalHTML(d){
+  if(state.todoModal==null) return '';
+  var t=todoById(d, state.todoModal);
+  /* The id no longer resolves (dropped, or the payload moved on) → close rather than
+     render an empty shell. Same guard the lightbox uses. */
+  if(!t) return '';
+
+  var parties=todoPartyPillsHTML(t);
+  var declines=Object.keys(t.decline_reasons||{}).map(function(r){
+    return '<div style="font-size:11.5px;color:var(--st-stuck-fg);line-height:1.5"><strong>'+esc(seatIdentity(r, true))+'</strong> declined: '+esc(t.decline_reasons[r])+'</div>';
+  }).join('');
+  if(declines) declines='<div style="margin-top:12px;padding:8px 11px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:10px;display:flex;flex-direction:column;gap:4px">'+declines+'</div>';
+
+  var stuckLine = t.stuck ? '<div style="margin-top:12px;padding:8px 11px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:10px;font-size:11.5px;font-weight:600;color:var(--st-stuck-fg)">'+esc(t.stuck_reason||'stuck — humans notified 📣')+'</div>' : '';
+  var dropLine = t.status==='dropped' ? '<div style="margin-top:12px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;font-size:11.5px;color:var(--text-2)">Dropped by '+esc(t.dropped_by||'mutual consent')+(t.drop_reason?' — '+esc(t.drop_reason):'')+'</div>' : '';
+
+  var strikeChip='';
+  if(t.strikes>0){
+    var dots='';
+    for(var i=1;i<=MAX_STRIKES;i++){ dots+='<span style="width:6px;height:6px;border-radius:50%;background:'+(i<=t.strikes?'var(--st-stuck-dot)':'var(--border-strong)')+'"></span>'; }
+    strikeChip='<span style="display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border-radius:999px;background:var(--surface);border:1px solid var(--st-stuck-dot);font-size:11.5px;font-weight:600;color:var(--st-stuck-fg);flex:none"><span style="display:flex;gap:3px">'+dots+'</span>strike '+t.strikes+' of '+MAX_STRIKES+'</span>';
+  }
+
+  var sectionLabel='font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin-bottom:7px';
+
+  /* SCOPE is open, not behind a disclosure toggle. In the column it had to be collapsed
+     because it shared that space with the contract; here it has a column of its own, and
+     the whole point of the left side is that the ask is readable without a click. */
+  var left='<div style="min-width:0">'+
+      '<div style="'+sectionLabel+'">The ask</div>'+
+      /* No `|| 'no summary'` fallback here: summaryHTML already says so itself, in one
+         voice, and a second wording of the same sentence is how they drift apart. */
+      summaryHTML(t)+
+      '<div style="margin-top:18px"><div style="'+sectionLabel+'">Scope</div>'+
+        '<div style="font-size:13px;color:var(--text-2);line-height:1.6">'+scopeHTML(t.scope)+'</div></div>'+
+      '<div style="margin-top:18px"><div style="'+sectionLabel+'">Parties</div>'+
+        '<div style="font-size:11.5px;color:var(--text-3);margin-bottom:7px">proposed by '+esc(seatIdentity(t.proposed_by||'', true))+' · todo v'+esc(t.version)+'</div>'+
+        '<div style="display:flex;gap:5px;flex-wrap:wrap">'+parties+'</div>'+
+        declines+stuckLine+dropLine+'</div>'+
+      /* NEXT is last on this side deliberately: it is the only actionable thing on the
+         screen, and it ends in the literal command a person types. */
+      '<div style="margin-top:18px"><div style="'+sectionLabel+'">Next</div>'+nextStepHTML(t)+'</div>'+
+      dropTodoHTML(d,t)+
+    '</div>';
+
+  var right='<div style="min-width:0">'+
+      contractHTML({id:d.id+'#'+t.id, contract:t.contract})+
+      reviewAsideHTML(d,t)+
+    '</div>';
+
+  /* One column under `narrow` — two 46%-wide columns would make both unreadable, and the
+     order (ask, then contract) is the order they are meant to be read in anyway. */
+  var cols = state.narrow
+    ? '<div style="display:flex;flex-direction:column;gap:22px">'+left+right+'</div>'
+    : '<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:26px;align-items:start">'+left+right+'</div>';
+
+  return '<div data-tm-backdrop="1" style="position:fixed;inset:0;z-index:9997;background:rgba(20,15,10,.74);display:flex;align-items:flex-start;justify-content:center;padding:5vh 22px 22px">'+
+    '<div role="dialog" aria-modal="true" aria-label="'+esc('Todo #'+todoNo(t)+' — '+(t.title||''))+'" style="background:var(--bg);border:1px solid var(--border);border-radius:18px;box-shadow:0 28px 70px -20px rgba(0,0,0,.7);width:min(1080px,96vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden">'+
+      /* header */
+      '<div style="padding:15px 18px;display:flex;align-items:flex-start;gap:12px;border-bottom:1px solid var(--border);flex:none">'+
+        '<div style="flex:1;min-width:0">'+
+          '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'+
+            '<span style="font-family:'+MONO+';font-size:12px;color:var(--text-3);flex:none">#'+esc(todoNo(t))+'</span>'+
+            '<span style="font-size:16px;font-weight:600;color:var(--text);letter-spacing:-.01em">'+esc(t.title)+'</span>'+
+          '</div></div>'+
+        '<button data-tm-close="1" aria-label="Close" title="Close (Esc)" style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;color:var(--text-2);flex:none;font-size:14px;line-height:1">✕</button>'+
+      '</div>'+
+      /* STATUS BAND — spans both columns, because the two fields are a fact about the
+         todo and not a property of either side. */
+      '<div style="padding:12px 18px;border-bottom:1px solid var(--border);background:var(--surface-2);flex:none;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
+        todoStatusChip(t)+
+        '<div style="flex:1;min-width:220px">'+todoMiniStepperHTML(t)+'</div>'+
+        strikeChip+
+      '</div>'+
+      /* the scrolling body — one scroller for the pair, so the two sides stay aligned
+         with each other rather than drifting apart as you read. */
+      '<div style="padding:20px 18px;overflow-y:auto;min-height:0">'+cols+'</div>'+
+    '</div></div>';
 }
 
 /* ---------- ENGAGEMENT MODE — the owner’s register (docs/enhancements.md item 1) ----------
@@ -2176,7 +2252,11 @@ function debugTaskHTML(d){
     attachmentsHTML(d)+
     eventLogHTML(d)+
     readinessPreviewHTML(d)+
-  '</div>'+lightboxHTML();
+  /* Both overlays hang off the END, outside the page container, so nothing above can
+     clip them. The debug view gets the todo modal too: a debug task grows no todo list,
+     but its thread can still carry a ⟨#N⟩ chip, and a chip that opens nothing is worse
+     than no chip. Both render '' when closed. */
+  '</div>'+todoModalHTML(d)+lightboxHTML();
 }
 
 /* ---------- shorthand cheatsheet ---------- */
@@ -2762,15 +2842,19 @@ function taskHTML(){
     stepper+engagementHTML(d)+rosterPanel(d)+activityStripHTML(d)+readinessFailPanel(d)+mobileTabs+
     '<div style="'+rowStyle+'">'+
       '<div style="display:'+threadDisp+'">'+threadHTML(d)+'</div>'+
-      /* the right column becomes the TODO LIST when the task has todos; selecting one
-         swaps this same slot to that todo's contract card. The shared screenshots + files
-         sit under it (so on mobile they live inside the existing Contract/Todos tab — no
+      /* the right column becomes the TODO LIST when the task has todos, and STAYS the
+         list — selecting one opens it in the modal below instead of swapping this slot,
+         so you never lose the board to read one row. The shared screenshots + files sit
+         under it (so on mobile they live inside the existing Contract/Todos tab — no
          new tab). attachmentsHTML('') when the task has no files, so this is unchanged. */
       '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+(todos?todoPanelHTML(d):contractHTML(d))+attachmentsHTML(d)+'</div>'+
     '</div>'+
     '<div style="display:'+logDisp+'">'+eventLogHTML(d)+'</div>'+
     readinessPreviewHTML(d)+
-  '</div>'+lightboxHTML();
+  /* the overlays go LAST, outside the page container — the right column is
+     position:sticky, and a modal nested inside a sticky, transformed ancestor is no
+     longer positioned against the viewport. Both render '' when closed. */
+  '</div>'+todoModalHTML(d)+lightboxHTML();
 }
 
 /* ---------- render ---------- */
@@ -2780,7 +2864,7 @@ function sig(){
   return JSON.stringify({
     view:state.view, taskId:state.taskId, error:state.error, theme:state.theme, isMobile:state.isMobile,
     viewer:state.viewer, tasks:tasksLite, detail:state.detail,
-    expanded:state.expanded, version:state.version, selectedTodo:state.selectedTodo,
+    expanded:state.expanded, version:state.version, todoModal:state.todoModal,
     lightbox:state.lightbox, panel:state.panel, narrow:state.narrow, wf:state.wf,
     eventFilter:state.eventFilter,
     eventLogOpen:state.eventLogOpen, mobileTab:state.mobileTab, switcherOpen:state.switcherOpen,
@@ -2795,7 +2879,12 @@ function render(){
     var html;
     if(state.isMobile) html=mobileGate();
     else if(state.error==='no-token') html=messageScreen('<span style="font-size:22px">🔑</span>','No viewer token','This dashboard needs a viewer token. Open the link your host shared — it looks like /ui?v=sbv_… — to watch this task.');
-    else if(state.error==='unauthorized') html=messageScreen('<span style="font-size:22px">🚫</span>','Access denied','This viewer token isn’t valid or has been revoked. Ask your host for a fresh dashboard link.');
+    /* The wording no longer claims to know WHICH of the two happened, because it cannot:
+       a token that does not resolve is indistinguishable from one that was revoked. It
+       says what to do instead, and the stale-cookie case — by far the commonest, and the
+       one that used to be unrecoverable — is now handled for the reader rather than
+       described at them. */
+    else if(state.error==='unauthorized') html=messageScreen('<span style="font-size:22px">🚫</span>','Access denied','This viewer token isn’t valid any more. It has been cleared, so “Try again” will use the link you opened; if that still fails, ask your host for a fresh dashboard link.', true);
     else if(state.error==='forbidden') html=headerHTML()+messageBody('Not your task','This token can only view its own task. '+ (state.viewer&&state.viewer.task_id?('You have access to “'+state.viewer.task_id+'”.'):''));
     else if(state.error==='not-found') html=headerHTML()+messageBody('Task not found','That task doesn’t exist (or was closed).');
     else html=headerHTML()+(state.view==='task'?taskHTML():listHTML());
@@ -2866,14 +2955,24 @@ function cssEsc(s){ return String(s).replace(/["\\]/g,'\\$&'); }
 function bind(){
   app.querySelectorAll('[data-open]').forEach(function(el){ el.onclick=function(){ openTask(el.getAttribute('data-open')); }; });
   app.querySelectorAll('[data-home]').forEach(function(el){ el.onclick=function(){ goHome(); }; });
+  /* A real reload, not a re-render: the point is to re-run the whole load with the dead
+     cookie now cleared, including the `?v=` still in the window's original URL if there
+     was one. `location.reload()` keeps that URL, which is exactly what we want. */
+  app.querySelectorAll('[data-reload]').forEach(function(el){ el.onclick=function(){ location.reload(); }; });
   var sw=app.querySelector('[data-switcher]'); if(sw) sw.onclick=function(e){ e.stopPropagation(); state.switcherOpen=!state.switcherOpen; render(); };
   var tt=app.querySelector('[data-theme-toggle]'); if(tt) tt.onclick=toggleTheme;
   var nt=app.querySelector('[data-newtask]'); if(nt) nt.onclick=function(){ try{ window.pywebview.api.new_task(); }catch(e){} };
   /* data-vkey names the contract chain (task id, or '<task>#<todo>'); absent = the task's */
   app.querySelectorAll('[data-version]').forEach(function(el){ el.onclick=function(){ state.version[el.getAttribute('data-vkey')||state.taskId]=el.getAttribute('data-version'); render(); }; });
-  /* select a todo — from a panel row OR from a ⟨todo⟩ chip in the thread */
-  app.querySelectorAll('[data-todo]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.selectedTodo[state.taskId]=parseInt(el.getAttribute('data-todo'),10); state.mobileTab='contract'; render(); }; });
-  var tback=app.querySelector('[data-todoback]'); if(tback) tback.onclick=function(){ delete state.selectedTodo[state.taskId]; render(); };
+  /* open a todo in the modal — from a panel row OR from a ⟨todo⟩ chip in the thread.
+     No `state.mobileTab='contract'` any more: that existed to bring the swapped-in detail
+     into view on a phone, and the todo now opens over everything regardless of which tab
+     is showing (and the phone gate means this only ever runs on a desktop anyway). */
+  app.querySelectorAll('[data-todo]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.todoModal=parseInt(el.getAttribute('data-todo'),10); render(); }; });
+  /* the todo modal closes on the backdrop (click OUTSIDE the dialog — the e.target test is
+     what keeps a click inside it from closing) and on the ✕. Escape too, below. */
+  var tmb=app.querySelector('[data-tm-backdrop]'); if(tmb) tmb.onclick=function(e){ if(e.target===tmb){ state.todoModal=null; render(); } };
+  app.querySelectorAll('[data-tm-close]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.todoModal=null; render(); }; });
   /* screenshot lightbox: a thumbnail opens it; the backdrop (click outside the image) and
      the ✕ close it. Escape also closes — see the document keydown handler below. */
   app.querySelectorAll('[data-lightbox]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.lightbox=el.getAttribute('data-lightbox'); render(); }; });
@@ -2911,11 +3010,14 @@ function bind(){
     el.onmouseleave=function(){ el.style.borderColor='var(--border)'; el.style.boxShadow='none'; };
   });
 }
-/* Esc closes the screenshot lightbox, then the reference panel — innermost first, so a
-   lightbox opened over a panel doesn't take the panel down with it. */
+/* Esc closes the screenshot lightbox, then the todo modal, then the reference panel —
+   innermost first, so a lightbox opened over the modal doesn't take the modal down with
+   it, and closing the modal doesn't also dismiss the panel behind it. One press, one
+   layer. */
 document.addEventListener('keydown', function(e){
   if(e.key!=='Escape') return;
   if(state.lightbox!=null){ state.lightbox=null; render(); }
+  else if(state.todoModal!=null){ state.todoModal=null; render(); }
   else if(state.panel){ state.panel=null; render(); }
 });
 /* close switcher on outside click */
@@ -2932,11 +3034,56 @@ window.addEventListener('resize', function(){
 /* ---------- boot + live stream (SSE) ---------- */
 /* Replaces the old 3s poll: the broker pushes change notifications over
    GET /api/stream (see SSE contract v1). We refetch via the existing helpers
-   when told — we never reload the page, and tokens stay opaque to the client. */
-var es=null;                     // active EventSource, or null while paused
+   when told — we never reload the page, and tokens stay opaque to the client.
+
+   THE STREAM IS AN OPTIMISATION, NOT THE SOURCE OF FRESHNESS. It used to be the only
+   thing that refreshed this page, and that made a silent stream indistinguishable from
+   a quiet task: watched through a Cloudflare quick tunnel, new messages simply never
+   appeared and the header counted honestly but uselessly up to "Last refreshed 4m ago"
+   while the viewer reloaded by hand. (Measured: a quick tunnel forwarded ZERO bytes of
+   an open event-stream for 45s while keepalives and real change events sat on the wire.
+   It buffers on the order of 128 KB before flushing, and it drops the
+   `X-Accel-Buffering: no` we send on the floor.) So there are three layers now, and the
+   page is honest about which one it is running on:
+     1. the stream, when it works — sub-second,
+     2. a WATCHDOG that times the stream's own pings and reopens a dead one,
+     3. a slow POLL the VIEWER turns on, so freshness never DEPENDS on layer 1 at all.
+
+   Layer 3 is opt-in, and that is a deliberate reversal of the first attempt. Polling is
+   not free to the person watching: it is two requests every 15s through THEIR tunnel,
+   ~480/hour, and a free ngrok allowance is measured in tens of thousands of requests. We
+   were about to spend somebody's quota on their behalf because we had decided it was
+   worth it. It is their tunnel.
+
+   So the page detects the failure, SAYS SO, and offers the switch — the control only
+   exists once there is a reason for it, which is what keeps this from being the hidden
+   footer checkbox we deleted elsewhere in this release. The answer is remembered per
+   broker, because a modal on every reload is its own kind of broken. */
+var es=null;                     // active EventSource, or null while paused/closed
 var idleTimer=null;
 var IDLE_MS=15*60*1000;          // ~15 min of no activity -> pause
+var POLL_MS=15*1000;             // fallback refresh when the stream is useless
+var DEAD_MS=45*1000;             // silence this long = the stream is gone, whatever it says
 var liveBanner=null;
+var lastFrame=0;                 // when the last stream frame of ANY kind arrived
+var streamErrors=0;              // consecutive es.onerror callbacks
+var paused=false;                // true ONLY on a deliberate pause (idle / hidden tab)
+var degraded=false;              // the stream is failing; the header switch is showing
+/* The viewer's answer to "shall I poll?", remembered per broker origin — the transport is
+   a property of the broker, so the answer is too. Three states, and `null` matters: it is
+   "never asked", which is what makes the modal appear exactly once. */
+var POLL_KEY='sysbuddy.pollWhenDegraded:'+location.origin;
+var pollOptIn=null;
+try{
+  var _saved=localStorage.getItem(POLL_KEY);
+  if(_saved==='1') pollOptIn=true; else if(_saved==='0') pollOptIn=false;
+}catch(e){}
+function setPollOptIn(v){
+  pollOptIn=v;
+  try{ localStorage.setItem(POLL_KEY, v?'1':'0'); }catch(e){}
+  if(v) catchUp();               // acting on "yes" immediately is the point of saying yes
+  renderStreamSwitch();
+}
 
 /* one round of "get me current state" using the existing fetch helpers */
 function catchUp(){
@@ -2949,45 +3096,229 @@ function ensureBanner(){
   var b=document.createElement('div');
   b.id='sb-live-banner';
   b.setAttribute('role','button');
-  b.setAttribute('title','Resume live updates');
   b.style.cssText='position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:9999;'+
     'display:none;align-items:center;gap:8px;padding:9px 14px;border-radius:10px;cursor:pointer;'+
     'font-family:inherit;font-size:13px;font-weight:500;color:var(--text-2);'+
     'background:var(--surface);border:1px solid var(--border-strong);box-shadow:var(--shadow)';
-  b.innerHTML='<span style="width:8px;height:8px;border-radius:50%;background:var(--st-open-dot);display:inline-block"></span>'+
-    '<span>Live updates paused — click to resume</span>';
-  b.onclick=function(){ resumeStream(); };
+  b.innerHTML='<span id="sb-live-dot" style="width:8px;height:8px;border-radius:50%;background:var(--st-open-dot);display:inline-block"></span>'+
+    '<span id="sb-live-text">Live updates paused — click to resume</span>';
+  b.onclick=function(){ resumeStream(); };   // a click retries, in either mode
   document.body.appendChild(b);
   liveBanner=b;
   return b;
 }
-function showBanner(){ ensureBanner().style.display='flex'; }
+/* One banner, two DIFFERENT admissions — and the second one is the whole point.
+   'paused' is a choice the viewer made (or their tab going hidden). 'degraded' is the
+   stream failing underneath them, which this page used to render as perfect health. */
+function showBanner(kind){
+  var b=ensureBanner();
+  var dot=b.querySelector('#sb-live-dot'), txt=b.querySelector('#sb-live-text');
+  if(kind==='degraded'){
+    /* Kept for the retry affordance, but it no longer claims to be refreshing — that is the
+       header switch's business now, and only if the viewer said yes. */
+    dot.style.background='var(--st-stuck-dot)';
+    txt.textContent='Live updates unavailable — click to retry';
+    b.setAttribute('title','Click to retry the live connection');
+  }else{
+    dot.style.background='var(--st-open-dot)';
+    txt.textContent='Live updates paused — click to resume';
+    b.setAttribute('title','Resume live updates');
+  }
+  b.style.display='flex';
+}
 function hideBanner(){ if(liveBanner) liveBanner.style.display='none'; }
 
+/* ---- the header switch: visible ONLY while the stream is failing ---- */
+/* It lives in the header beside "Last refreshed" because that is where a viewer already
+   looks to ask "is this current?" — the honest place for the answer. It does not exist at
+   all on a healthy stream, so there is nothing to find, ignore, or wonder about. */
+function ensureStreamSwitch(){
+  var el=document.getElementById('sb-stream-switch');
+  if(el) return el;
+  var host=document.getElementById('sb-refresh-dot');
+  if(!host || !host.parentNode) return null;
+  el=document.createElement('button');
+  el.id='sb-stream-switch';
+  el.type='button';
+  el.style.cssText='display:none;align-items:center;gap:6px;margin-left:4px;padding:3px 9px;'+
+    'border-radius:999px;border:1px solid var(--st-stuck-dot);background:var(--st-stuck-bg);'+
+    'color:var(--st-stuck-fg);font-family:inherit;font-size:11px;font-weight:600;cursor:pointer;'+
+    'white-space:nowrap;flex:none';
+  host.parentNode.appendChild(el);
+  return el;
+}
+function renderStreamSwitch(){
+  var el=ensureStreamSwitch();
+  if(!el) return;
+  if(!degraded){ el.style.display='none'; return; }
+  var on=pollOptIn===true;
+  el.textContent = on
+    ? 'Refreshing every '+Math.round(POLL_MS/1000)+'s'
+    : 'Not updating live';
+  el.title = on
+    ? 'The live connection is not working. Click to stop refreshing and save requests.'
+    : 'The live connection is not working, so this page is NOT updating. Click to refresh every '
+      + Math.round(POLL_MS/1000) + 's.';
+  el.onclick=function(){
+    if(pollOptIn===true) setPollOptIn(false);
+    else if(pollOptIn===false) setPollOptIn(true);
+    else showPollModal();      // never asked → ask properly
+  };
+  el.style.display='inline-flex';
+}
+
+/* ---- the one-time explanation ---- */
+/* A viewer whose stream just died has no way of knowing WHY, and the why is almost always
+   their transport rather than anything on this page. Naming the likely culprit and the
+   transports that do work turns a dead end into a decision — and it is the difference
+   between "this app is broken" and "my tunnel buffers". */
+function showPollModal(){
+  if(document.getElementById('sb-poll-modal')) return;
+  var back=document.createElement('div');
+  back.id='sb-poll-modal';
+  back.style.cssText='position:fixed;inset:0;z-index:9996;background:rgba(20,15,10,.74);'+
+    'display:flex;align-items:center;justify-content:center;padding:24px';
+  back.innerHTML=
+    '<div role="dialog" aria-modal="true" aria-label="Live updates unavailable" '+
+      'style="background:var(--surface);border:1px solid var(--border);border-radius:16px;'+
+      'box-shadow:var(--shadow);max-width:520px;padding:22px 24px">'+
+      '<h2 style="font-size:16px;font-weight:700;margin:0 0 10px;color:var(--text)">Live updates aren’t getting through</h2>'+
+      '<p style="font-size:13.5px;line-height:1.6;color:var(--text-2);margin:0 0 10px">'+
+        'This page holds an open connection to the broker for instant updates, and nothing '+
+        'is arriving on it. The page is <strong>not refreshing itself</strong> right now.</p>'+
+      '<p style="font-size:13.5px;line-height:1.6;color:var(--text-2);margin:0 0 10px">'+
+        'The usual cause is the tunnel in between. <strong>Free Cloudflare quick tunnels '+
+        '(<span style="font-family:'+MONO+'">trycloudflare.com</span>) buffer this kind of '+
+        'connection and never release it</strong> — so if that is how you are connected, '+
+        'this is why. A <strong>named Cloudflare tunnel</strong>, <strong>ngrok</strong> or '+
+        '<strong>Tailscale</strong> carries live updates instantly.</p>'+
+      '<p style="font-size:13.5px;line-height:1.6;color:var(--text-2);margin:0 0 16px">'+
+        'Until then this page can re-check every '+Math.round(POLL_MS/1000)+' seconds instead. '+
+        'That is <strong>your</strong> tunnel’s allowance it spends — roughly 480 requests an '+
+        'hour — so it is your call, and you can change it any time from the header.</p>'+
+      '<div style="display:flex;gap:9px;justify-content:flex-end">'+
+        '<button data-poll-no="1" style="padding:8px 14px;border:1px solid var(--border);'+
+          'border-radius:9px;background:var(--surface);color:var(--text-2);cursor:pointer;'+
+          'font-family:inherit;font-size:13px">Not now</button>'+
+        '<button data-poll-yes="1" style="padding:8px 14px;border:1px solid var(--accent);'+
+          'border-radius:9px;background:var(--accent-soft);color:var(--accent-2);cursor:pointer;'+
+          'font-family:inherit;font-size:13px;font-weight:600">Refresh every '+
+          Math.round(POLL_MS/1000)+'s</button>'+
+      '</div></div>';
+  function close(){ if(back.parentNode) back.parentNode.removeChild(back); }
+  back.querySelector('[data-poll-yes]').onclick=function(){ setPollOptIn(true); close(); };
+  back.querySelector('[data-poll-no]').onclick=function(){ setPollOptIn(false); close(); };
+  /* Backdrop click = "Not now", but NOT remembered: a stray click outside must not silently
+     answer a question about spending somebody's quota. The switch stays in the header. */
+  back.onclick=function(e){ if(e.target===back){ close(); renderStreamSwitch(); } };
+  document.body.appendChild(back);
+}
+
+function markDegraded(){
+  if(degraded) return;
+  degraded=true;
+  renderStreamSwitch();
+  /* Ask once, ever, per broker. After that the header switch is the whole interface. */
+  if(pollOptIn===null) showPollModal();
+}
+/* Any DATA frame at all — a ping counts — is proof the stream is delivering. Only
+   frames clear the degraded state, and that distinction is the whole trick: see the
+   `onopen` handler below for why "connected" is not evidence of anything. */
+function noteFrame(){
+  lastFrame=Date.now();
+  streamErrors=0;
+  if(degraded){
+    degraded=false; hideBanner(); renderStreamSwitch();
+    /* RECOVERY IS A REFETCH, not just a cleared flag. While the stream was down anything
+       could have changed, and a viewer who declined polling has had no fetch at all — so
+       without this the page keeps whatever it was showing AND keeps reading "connection
+       issue" in the header, because only a successful fetch clears that. Observed exactly
+       that: the switch correctly disappeared while the header still cried outage. */
+    catchUp();
+  }
+}
+
 /* open (or re-open) the stream. Always starts with a catch-up fetch so a
-   resume is never stale, then relies on EventSource auto-reconnect for blips. */
+   resume is never stale. */
 function openStream(){
+  paused=false;
   catchUp();
   if(es) return;                 // already streaming
+  lastFrame=Date.now();          // give the new stream a full DEAD_MS to say hello
   try{
     es=new EventSource('/api/stream');
-    es.addEventListener('tasks', function(){ fetchTasks(); });
+    /* `onopen` is NOT liveness, and must never call noteFrame(). Measured against a
+       real trycloudflare.com tunnel: onopen fired at 214ms and then not one data
+       frame arrived in the following 30s, with readyState sitting on OPEN the whole
+       time. The tunnel forwards the response HEAD promptly and then buffers the body
+       indefinitely — so "the stream opened" is precisely the reassurance that made
+       this bug invisible. All a successful connect proves is that the endpoint is
+       reachable, which is worth resetting the error count for and nothing else. */
+    es.onopen=function(){ streamErrors=0; };
+    /* A keepalive is a NAMED `ping` event now, not an invisible `: ping` comment —
+       SSE comments never reach JavaScript, so before this there was no way to observe
+       that an idle stream was still alive. This handler is the watchdog's heartbeat. */
+    es.addEventListener('ping', function(){ noteFrame(); });
+    es.addEventListener('tasks', function(){ noteFrame(); fetchTasks(); });
     es.addEventListener('task', function(e){
+      noteFrame();
       try{ var d=JSON.parse(e.data); if(d && d.id===state.taskId) fetchDetail(d.id); }catch(err){}
     });
-    /* onerror: EventSource reconnects itself on server-side drops (ngrok/proxy
-       idle timeouts). We only force a true pause via pauseStream() below. */
-  }catch(err){ es=null; }
+    /* EventSource's built-in auto-reconnect only covers a socket that visibly BREAKS.
+       It never fires for the failure that actually bit us — a proxy holding the
+       response open and silent forever — which is why the watchdog below exists as
+       well. Here we only count: two consecutive errors is a real problem worth
+       admitting to the viewer, one is a blip EventSource will retry through. */
+    es.onerror=function(){
+      streamErrors++;
+      if(streamErrors>=2) markDegraded();
+    };
+  }catch(err){ es=null; markDegraded(); }
 }
 /* client-side close = no auto-reconnect = a genuine pause */
 function pauseStream(){
+  paused=true;
+  degraded=false;                // a pause is a choice, not a failure
   if(es){ es.close(); es=null; }
-  showBanner();
+  showBanner('paused');
 }
 function resumeStream(){
   hideBanner();
   openStream();
   armIdle();
+  /* A retry is a hope, not a fix. If the stream was degraded, KEEP saying so until a
+     real frame proves otherwise — only noteFrame() clears it. Clearing it here would
+     buy the viewer another DEAD_MS of false calm every time they clicked the banner
+     (or moved the mouse), which is the deception in miniature. */
+  if(degraded) showBanner('degraded');
+}
+function restartStream(){
+  if(es){ try{ es.close(); }catch(e){} es=null; }
+  openStream();                   // which begins with catchUp(), so data is current
+}
+
+/* ---- watchdog: a stream lies by staying SILENT, so we time it ----
+   The broker pings every ~10s. 45s of total silence therefore means the stream is
+   gone no matter what `es.readyState` claims — a buffering proxy leaves it reading
+   OPEN forever. Reopening runs catchUp(), so a failed reconnect still leaves the page
+   current. Runs on its own 5s tick rather than off a frame, because the failure we
+   are hunting produces no frames to hang a timer off. */
+function watchdog(){
+  if(paused || document.hidden) return;   // a deliberate pause is not a failure
+  if(!es || Date.now()-lastFrame >= DEAD_MS){ markDegraded(); restartStream(); }
+}
+/* ---- fallback poll: freshness must never DEPEND on the stream ----
+   Slow enough to be free on a laptop, fast enough that a demo over a buffering tunnel
+   still reads as live. Respects the same two gates as the stream — a deliberate pause
+   and a hidden tab — so a paused dashboard genuinely stays paused. */
+function fallbackPoll(){
+  if(paused || document.hidden) return;
+  /* Only when the viewer asked for it, and only while the stream is actually failing. On a
+     healthy stream this costs nothing at all — which is the other half of the reversal: the
+     first attempt polled every 15s even when the stream was delivering perfectly, spending
+     ~480 requests an hour of somebody's tunnel to duplicate work already being done. */
+  if(!degraded || pollOptIn!==true) return;
+  catchUp();
 }
 
 /* ---- inactivity gate: pause after IDLE_MS of no user activity ---- */
@@ -3012,7 +3343,9 @@ document.addEventListener('visibilitychange', function(){
 render();
 openStream();  // begins with a catch-up fetch; cookie carries auth, a bad token surfaces as 401
 armIdle();
-setInterval(patchVolatile, 1000); // keep "refreshed Ns ago" ticking (local only)
+setInterval(patchVolatile, 1000);   // keep "refreshed Ns ago" ticking (local only)
+setInterval(watchdog, 5000);        // notice a stream that has gone quiet on us
+setInterval(fallbackPoll, POLL_MS); // and stay fresh even when it has
 })();
 </script>
 </body>

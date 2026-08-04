@@ -141,3 +141,34 @@ def test_link_printing_commands_all_accept_port():
     for argv in (["host-viewer"], ["invite", "--task", "t", "--role", "backend"]):
         args = _parse([*argv, "--port", "1234"])
         assert args.port == 1234, f"{argv[0]} dropped --port"
+
+
+# --- the workflows a host can actually pick ---------------------------------
+def test_cli_mode_choices_are_exactly_admin_modes():
+    """Three surfaces used to spell the mode list independently — `admin.create_task`, this
+    parser, and the desktop app's radio group. `engagement` shipped in v2.1.0 and only the
+    domain layer learned about it, so no host could create one for two releases. The CLI now
+    reads `admin.MODES`; this asserts it and fails if anyone retypes the list."""
+    from sys_buddy import admin
+
+    action = next(
+        a for a in cli.build_parser()._subparsers._group_actions[0]
+        .choices["task"]._subparsers._group_actions[0]
+        .choices["create"]._actions
+        if a.dest == "mode"
+    )
+    assert tuple(action.choices) == admin.MODES
+
+
+def test_the_desktop_app_offers_a_radio_for_every_mode():
+    """The third surface, checked at the source. The desktop app is the route most hosts
+    take, and it is where `engagement` was invisible — offering two of the three workflows
+    while the broker supported all three. A missing radio is a feature nobody can reach."""
+    from pathlib import Path
+
+    from sys_buddy import admin, gui
+
+    html = (Path(gui.__file__).parent / "gui_app.html").read_text(encoding="utf-8")
+    for mode in admin.MODES:
+        assert f'name="session-mode"' in html
+        assert f'value="{mode}"' in html, f"the desktop app cannot create a {mode!r} task"

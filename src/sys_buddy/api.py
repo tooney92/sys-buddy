@@ -1083,12 +1083,37 @@ def _change_tokens(conn, viewer: ViewerIdentity) -> tuple[str, dict[str, str]]:
     return json.dumps(sorted(list_parts)), task_tokens
 
 
+def _sse_ping(*, opening: bool = False) -> str:
+    """One keepalive frame — a NAMED EVENT, not the bare ``: ping`` comment.
+
+    SSE comments are consumed by the parser and never surfaced to JavaScript; there is
+    no handler you can attach to one. A page receiving nothing but comments therefore
+    cannot tell a healthy idle stream from a dead socket, which is exactly how a broken
+    stream used to render as a live one. Naming the event makes liveness OBSERVABLE, and
+    that is what lets the dashboard's watchdog notice silence and reconnect. Older pages
+    listen only for ``tasks``/``task`` and ignore unknown event names, so this stays
+    backwards-compatible; it is still real bytes on the wire, which is its other job.
+
+    ``opening`` marks the frame emitted on connect (see ``_sse_events``).
+
+    DO NOT pad this frame to try to punch through a buffering proxy. That was tried and
+    measured against a real ``trycloudflare.com`` quick tunnel: a comment pad of 2 KB,
+    8 KB, 32 KB, 48 KB, 64 KB and 96 KB all produced ZERO bytes at the client inside
+    25 s; only 128 KB flushed. A quick tunnel buffers on the order of its edge buffer,
+    not a few KB, so padding buys nothing an honest client-side fallback poll does not
+    already cover — and it would cost every real deployment the bytes. The dashboard's
+    slow ``catchUp()`` poll is the thing that survives a buffering tunnel.
+    """
+    data = json.dumps({"open": True} if opening else {})
+    return f"event: ping\ndata: {data}\n\n"
+
+
 async def _sse_events(
     request,
     viewer: ViewerIdentity,
     *,
     poll: float = 1.0,
-    ping_every: float = 15.0,
+    ping_every: float = 10.0,
     idle_timeout: float = 30 * 60.0,
 ):
     """Async generator of SSE frames for one viewer's ``/api/stream`` connection.
@@ -1103,21 +1128,37 @@ async def _sse_events(
         event: task\\n
         data: {"id": "...", "token": "..."}\\n\\n  # one task's detail changed
 
-    plus a bare ``: ping`` comment roughly every ``ping_every`` seconds so idle
-    proxies/tunnels don't drop the socket. The current tokens are captured as the
-    baseline on entry and are NOT emitted, so a freshly-opened stream stays silent
-    until something actually changes (the client does its own catch-up fetch on
-    open — SSE contract §"send nothing until the first real change"). The loop
-    exits when the client disconnects, or after ``idle_timeout`` seconds with no
-    emitted change (a still-present browser just auto-reconnects). ``poll`` /
-    ``ping_every`` / ``idle_timeout`` are keyword knobs so the loop can be driven
-    deterministically under test.
+    plus an ``event: ping`` keepalive roughly every ``ping_every`` seconds so idle
+    proxies/tunnels don't drop the socket and the client can SEE that the stream is
+    alive (see ``_sse_ping``).
+
+    The very first thing out of this generator is an opening ping, emitted BEFORE the
+    loop and before anything has changed. It exists because a StreamingResponse sends
+    no HEADERS until the first body chunk, and this generator used to emit nothing at
+    all until either a real change or the first keepalive 15s away. Measured on
+    loopback: the response head reached the client at +15.1s, i.e. only when that first
+    keepalive finally gave uvicorn a chunk to send. It is now +0.02s. Fifteen seconds
+    of an unestablished stream is bad on its own and worse through any proxy that will
+    not forward a response it has not begun receiving.
+
+    It is NOT a synthetic change notification: the current tokens are captured as the
+    baseline on entry and are never emitted, so a freshly-opened stream still says
+    "nothing has changed yet" (the client does its own catch-up fetch on open — SSE
+    contract §"send nothing until the first real change"). The loop exits when the
+    client disconnects, or after ``idle_timeout`` seconds with no emitted change (a
+    still-present browser just auto-reconnects). ``poll`` / ``ping_every`` /
+    ``idle_timeout`` are keyword knobs so the loop can be driven deterministically
+    under test.
     """
     conn = connect()
     try:
         last_list, last_tasks = _change_tokens(conn, viewer)
     finally:
         conn.close()
+
+    # Before the loop, before the first token diff, before anything can go slow: get
+    # bytes on the wire so the headers flush through whatever is in the middle.
+    yield _sse_ping(opening=True)
 
     last_ping = time.monotonic()
     last_change = time.monotonic()
@@ -1150,7 +1191,7 @@ async def _sse_events(
             last_change = now
         if now - last_ping >= ping_every:
             last_ping = now
-            yield ": ping\n\n"
+            yield _sse_ping()
 
         await asyncio.sleep(poll)
 
@@ -1159,24 +1200,54 @@ async def _sse_events(
 # HTTP plumbing
 # --------------------------------------------------------------------------- #
 def _request_token(request) -> str:
-    """Resolve the viewer token, most-secure source first:
+    """Resolve the viewer token. An EXPLICIT token wins; the cookie is the convenience.
 
-    1. the ``sb_view`` HttpOnly cookie (set on the first ``/ui`` load — JS can't read
-       it and it never rides in a URL, so it can't leak via history/Referer/logs),
+    1. the ``?v=`` query param — somebody just handed us a token on purpose,
     2. an ``Authorization: Bearer`` header (API clients),
-    3. the ``?v=`` query param (the bootstrap link, before the cookie is set).
+    3. the ``sb_view`` HttpOnly cookie (set on the first ``/ui`` load — JS can't read it
+       and it never rides in a URL, so it can't leak via history/Referer/logs).
+
+    THE COOKIE USED TO COME FIRST, and that made a stale one unrecoverable. `sb_view`
+    lives for 7 days, so a token that stopped resolving — the db it was minted against
+    was replaced, the viewer was revoked — kept being sent and kept failing, and a fresh
+    ``?v=`` link was outranked on every ``/api/*`` call. The dashboard's own error text
+    says "ask your host for a fresh dashboard link", advice the code then refused to
+    honour. Worse in the desktop app's dashboard window, which has no address bar, no
+    devtools and no private mode: there was no way out at all.
+
+    Reordering costs nothing on the security side. A ``?v=`` is only ever in a URL
+    because someone put it there — the cookie exists to keep it OUT of subsequent URLs,
+    which still happens on the very next hop (``/ui`` redirects and re-sets it).
     """
-    cookie = request.cookies.get("sb_view")
-    if cookie:
-        return cookie
+    explicit = request.query_params.get("v", "") or ""
+    if explicit:
+        return explicit
     auth = request.headers.get("authorization", "")
     if auth[:7].lower() == "bearer ":
         return auth[7:].strip()
-    return request.query_params.get("v", "") or ""
+    return request.cookies.get("sb_view") or ""
 
 
 def _resolve(request, conn) -> ViewerIdentity | None:
     return identity.resolve_viewer_token(conn, _request_token(request))
+
+
+def _unauthorized(request) -> JSONResponse:
+    """401 — and DELETE the ``sb_view`` cookie on the way out if one was sent.
+
+    A viewer cookie that no longer resolves is not going to start resolving: it names a
+    revoked viewer, or a row in a database this broker no longer reads. Leaving it in
+    place meant the browser re-sent the same dead token for the rest of its 7-day life,
+    so every retry failed identically and the failure looked permanent. Clearing it makes
+    the next load a clean one — which is what the error screen's Retry button then acts
+    on, and what makes the desktop app's dashboard window recoverable at all.
+
+    Only ever sent alongside a 401, so a working session never has its cookie touched.
+    """
+    resp = JSONResponse({"error": "unauthorized"}, status_code=401)
+    if request.cookies.get("sb_view"):
+        resp.delete_cookie("sb_view", path="/")
+    return resp
 
 
 # --------------------------------------------------------------------------- #
@@ -1244,7 +1315,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         try:
             viewer = _resolve(request, conn)
             if viewer is None:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return _unauthorized(request)
             return JSONResponse(
                 {"viewer": viewer_block(viewer), "tasks": _list_tasks_for(conn, viewer)}
             )
@@ -1258,7 +1329,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         try:
             viewer = _resolve(request, conn)
             if viewer is None:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return _unauthorized(request)
             if not viewer_can_see(viewer, task_id):
                 return JSONResponse({"error": "forbidden"}, status_code=403)
             detail = _task_detail(conn, task_id, is_host=viewer.is_host)
@@ -1276,7 +1347,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         try:
             viewer = _resolve(request, conn)
             if viewer is None:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return _unauthorized(request)
             if not viewer_can_see(viewer, task_id):
                 return JSONResponse({"error": "forbidden"}, status_code=403)
             # 404 the unknown task so a buddy can't distinguish "no such task" via events.
@@ -1302,7 +1373,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         try:
             viewer = _resolve(request, conn)
             if viewer is None:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return _unauthorized(request)
             f = _file_for(conn, viewer, file_id)
             if f is None:
                 return JSONResponse({"error": "not found"}, status_code=404)
@@ -1327,7 +1398,7 @@ def register_api_routes(mcp, cfg: Config) -> None:
         finally:
             conn.close()
         if viewer is None:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return _unauthorized(request)
         return StreamingResponse(
             _sse_events(request, viewer),
             media_type="text/event-stream",
@@ -1365,7 +1436,15 @@ def register_api_routes(mcp, cfg: Config) -> None:
         after the first hop (out of browser history, Referer, and proxy logs). The
         page's own ``/api/*`` fetches then authenticate via the cookie automatically.
         """
-        secure = (cfg.public_url or "").lower().startswith("https://")
+        # Secure follows THIS REQUEST's scheme, not the configured public_url. Keying it
+        # on the config was a latent lockout: a host with an https tunnel made every
+        # cookie `Secure`, including the one set when the dashboard is opened on
+        # `http://127.0.0.1:8787/ui?v=…` — which is the link `sys-buddy host-viewer`
+        # prints. A browser silently refuses to send a Secure cookie over http, so every
+        # `/api/*` call arrived unauthenticated and the page read "Access denied" with a
+        # token that was perfectly valid. Per-request, a tunnelled load still gets Secure
+        # (the tunnel is https) and the loopback load gets a cookie that actually works.
+        secure = request.url.scheme == "https"
         v = request.query_params.get("v")
         if v:
             resp = RedirectResponse(url="/ui", status_code=302)

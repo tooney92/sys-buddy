@@ -24,6 +24,14 @@ from . import audit, seats, service, todos
 from .db import connect
 from .identity import new_invite_code, new_viewer_token, sha256_hex
 
+# The workflows a task can run. ONE list, because this used to be spelled out
+# independently in `create_task`, in the CLI's `--mode` choices and in the desktop app's
+# radio group — and when `engagement` shipped in v2.1.0 all three kept the old pair. The
+# schema, domain layer, tools, dashboard and briefings supported engagements; the only
+# function that creates a task refused the mode, so the feature had no door for two
+# releases. A single tuple the surfaces read from is what makes that unrepeatable.
+MODES = ("contract", "debug", "engagement")
+
 # Single-use invites live 15 minutes (SPEC §9). Short enough that a code lingering
 # in a Slack scrollback is dead by the time anyone scans for it.
 INVITE_TTL_SECONDS = 15 * 60
@@ -79,7 +87,15 @@ def create_task(
 
     ``mode`` selects the workflow: ``'contract'`` (the default) runs the full
     propose/lock/deploy state machine; ``'debug'`` is a lightweight mode where two
-    buddies just fix a problem and mark it resolved, with no contract required.
+    buddies just fix a problem and mark it resolved, with no contract required;
+    ``'engagement'`` is the contract flow plus a client — an ``owner`` seat whose
+    deliverables the team accepts before anything may be built, and whose agent
+    verifies the result (see ``deliverables.py``).
+
+    An engagement wants an ``owner`` seat in its cast, but that is NOT enforced here.
+    The cast is deliberately not frozen at setup (``add_seat`` exists), so a host may
+    create the engagement and invite the client afterwards; ``deliverables._assert_owner``
+    is where the absence is caught, and it says exactly what to add.
 
     ``same_machine`` records the task's CONNECTIVITY (not the broker's auth mode):
     True only when the host proved everything lives on one box. It relaxes the
@@ -92,8 +108,10 @@ def create_task(
     used verbatim, and a duplicate explicit id is rejected explicitly (rather than
     surfacing a raw sqlite IntegrityError) so the CLI can print an actionable message.
     """
-    if mode not in ("contract", "debug"):
-        raise ValueError(f"unknown mode {mode!r}; expected 'contract' or 'debug'")
+    if mode not in MODES:
+        raise ValueError(
+            f"unknown mode {mode!r}; expected one of {', '.join(repr(m) for m in MODES)}"
+        )
     # Normalise the cast into (handles, {handle: role_type}). Repeating a role type is
     # now MEANINGFUL — it is how you say "two frontend developers" — and the derivation
     # gives the second one `frontend-2` with no thought from the host. What must still
@@ -434,6 +452,74 @@ def revoke_agent(name: str, task: str | None = None) -> int:
         conn.commit()
         audit.event("revoke_agent", name=name, task=task or "*", count=cur.rowcount)
         return cur.rowcount
+    finally:
+        conn.close()
+
+
+def extend_agent_tokens(
+    task: str, *, hours: float = 24.0, never: bool = False
+) -> list[dict]:
+    """Push back (or lift) the expiry on every live agent token on ``task``.
+
+    THE GAP THIS FILLS. A tunnelled broker defaults agent tokens to a 24h TTL so a leaked
+    one self-expires, and the code that does it says "agents refresh with rotate_token".
+    They cannot. `rotate_token` authenticates with the token it is replacing, so the moment
+    one expires the agent is locked out of the only tool that could have saved it — and
+    `report_status("stuck")` is equally gone, so it cannot even escalate. Nothing warns
+    beforehand and the failure reads as "invalid or revoked", which sends everyone hunting a
+    revocation that never happened.
+
+    Recovery used to mean revoking the seat, minting a fresh invite, re-pairing, rewiring the
+    MCP client and restarting the agent's session — losing its context — or editing the
+    database by hand. This is the host-side move that was missing.
+
+    ``never`` clears the expiry outright (the same state a same-machine broker mints), which
+    is what you want for a long session or a demo. Only LIVE agents are touched: a revoked
+    seat stays revoked, because "extend the tokens" must never quietly re-admit somebody a
+    host deliberately cut off.
+
+    Returns one row per agent it touched, so the caller can print who was extended rather
+    than a bare count — a host needs to see that the seat they were worried about is in it.
+    """
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        now = time.time()
+        new_expiry = None if never else now + hours * 3600.0
+        rows = conn.execute(
+            "SELECT id, COALESCE(handle, role) AS seat, name, expires_at FROM agents "
+            "WHERE task_id = ? AND revoked_at IS NULL ORDER BY id",
+            (task,),
+        ).fetchall()
+        touched = [
+            {
+                "seat": r["seat"],
+                "name": r["name"],
+                "was": r["expires_at"],
+                "now": new_expiry,
+                # The one a host actually reacts to: this seat was already dead.
+                "was_expired": r["expires_at"] is not None and r["expires_at"] < now,
+            }
+            for r in rows
+        ]
+        conn.execute(
+            "UPDATE agents SET expires_at = ? WHERE task_id = ? AND revoked_at IS NULL",
+            (new_expiry, task),
+        )
+        conn.commit()
+        _write_event(
+            conn, task, "token",
+            {"text": (
+                f"Agent tokens extended for {len(touched)} seat(s): "
+                + ("no expiry" if never else f"+{hours:g}h")
+            )},
+        )
+        conn.commit()
+        audit.event(
+            "extend_agent_tokens", task=task,
+            count=len(touched), never=never, hours=None if never else hours,
+        )
+        return touched
     finally:
         conn.close()
 

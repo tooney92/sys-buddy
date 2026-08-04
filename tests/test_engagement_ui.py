@@ -332,7 +332,12 @@ def test_the_gate_explains_that_messaging_stays_open():
 def test_the_guidelines_sit_beside_the_contract_at_review_time():
     """Signing then means "I checked this against them" — an accountable moment, with
     the broker claiming to have verified nothing."""
-    assert "contract:t.contract})+reviewAsideHTML(d,t)" in UI_HTML
+    # BESIDE, literally: the todo modal's right-hand column is the contract card with the
+    # aside directly under it, so a reviewer reads the rules and the thing they govern
+    # without leaving the dialog.
+    modal = _fn("todoModalHTML")
+    assert "contract:t.contract})+" in modal
+    assert "reviewAsideHTML(d,t)" in modal
     aside = _fn("reviewAsideHTML")
     assert "guidelinesCardHTML" in aside and "todoDeliverablesHTML" in aside
 

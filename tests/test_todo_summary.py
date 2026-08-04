@@ -140,10 +140,18 @@ def test_the_dashboard_splits_scope_without_parsing_markup(conn):
     assert "esc(t.scope)" not in UI_HTML
 
 
-def test_the_full_scope_is_collapsed_behind_a_toggle(conn):
-    """The summary is the headline; the wall of text is one click away, not gone."""
-    assert "Full scope" in UI_HTML
-    assert "<details" in UI_HTML
+def test_the_full_scope_is_read_in_the_open(conn):
+    """The summary is the headline in the LIST; opening the todo shows the whole scope.
+
+    It used to hide behind a "Full scope" `<details>`, because the detail shared the
+    right-hand column with the contract and there was no room for both. A todo now opens
+    in a modal with a column of its own for the prose, so the wall of text is the point
+    of that column — collapsing it would mean a click to reach the thing you opened the
+    todo to read.
+    """
+    modal = UI_HTML.split("function todoModalHTML(")[1].split("\nfunction ")[0]
+    assert "scopeHTML(t.scope)" in modal
+    assert "<details" not in modal, "the scope the modal exists to show is not collapsed"
 
 
 def test_the_briefing_tells_agents_to_always_write_one(conn):
