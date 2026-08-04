@@ -3047,7 +3047,18 @@ window.addEventListener('resize', function(){
    page is honest about which one it is running on:
      1. the stream, when it works — sub-second,
      2. a WATCHDOG that times the stream's own pings and reopens a dead one,
-     3. an unconditional slow POLL, so freshness never DEPENDS on layer 1 at all. */
+     3. a slow POLL the VIEWER turns on, so freshness never DEPENDS on layer 1 at all.
+
+   Layer 3 is opt-in, and that is a deliberate reversal of the first attempt. Polling is
+   not free to the person watching: it is two requests every 15s through THEIR tunnel,
+   ~480/hour, and a free ngrok allowance is measured in tens of thousands of requests. We
+   were about to spend somebody's quota on their behalf because we had decided it was
+   worth it. It is their tunnel.
+
+   So the page detects the failure, SAYS SO, and offers the switch — the control only
+   exists once there is a reason for it, which is what keeps this from being the hidden
+   footer checkbox we deleted elsewhere in this release. The answer is remembered per
+   broker, because a modal on every reload is its own kind of broken. */
 var es=null;                     // active EventSource, or null while paused/closed
 var idleTimer=null;
 var IDLE_MS=15*60*1000;          // ~15 min of no activity -> pause
@@ -3057,7 +3068,22 @@ var liveBanner=null;
 var lastFrame=0;                 // when the last stream frame of ANY kind arrived
 var streamErrors=0;              // consecutive es.onerror callbacks
 var paused=false;                // true ONLY on a deliberate pause (idle / hidden tab)
-var degraded=false;              // the stream is failing; the poll is carrying us
+var degraded=false;              // the stream is failing; the header switch is showing
+/* The viewer's answer to "shall I poll?", remembered per broker origin — the transport is
+   a property of the broker, so the answer is too. Three states, and `null` matters: it is
+   "never asked", which is what makes the modal appear exactly once. */
+var POLL_KEY='sysbuddy.pollWhenDegraded:'+location.origin;
+var pollOptIn=null;
+try{
+  var _saved=localStorage.getItem(POLL_KEY);
+  if(_saved==='1') pollOptIn=true; else if(_saved==='0') pollOptIn=false;
+}catch(e){}
+function setPollOptIn(v){
+  pollOptIn=v;
+  try{ localStorage.setItem(POLL_KEY, v?'1':'0'); }catch(e){}
+  if(v) catchUp();               // acting on "yes" immediately is the point of saying yes
+  renderStreamSwitch();
+}
 
 /* one round of "get me current state" using the existing fetch helpers */
 function catchUp(){
@@ -3088,8 +3114,10 @@ function showBanner(kind){
   var b=ensureBanner();
   var dot=b.querySelector('#sb-live-dot'), txt=b.querySelector('#sb-live-text');
   if(kind==='degraded'){
+    /* Kept for the retry affordance, but it no longer claims to be refreshing — that is the
+       header switch's business now, and only if the viewer said yes. */
     dot.style.background='var(--st-stuck-dot)';
-    txt.textContent='Live updates unavailable — refreshing every '+Math.round(POLL_MS/1000)+'s';
+    txt.textContent='Live updates unavailable — click to retry';
     b.setAttribute('title','Click to retry the live connection');
   }else{
     dot.style.background='var(--st-open-dot)';
@@ -3100,10 +3128,98 @@ function showBanner(kind){
 }
 function hideBanner(){ if(liveBanner) liveBanner.style.display='none'; }
 
+/* ---- the header switch: visible ONLY while the stream is failing ---- */
+/* It lives in the header beside "Last refreshed" because that is where a viewer already
+   looks to ask "is this current?" — the honest place for the answer. It does not exist at
+   all on a healthy stream, so there is nothing to find, ignore, or wonder about. */
+function ensureStreamSwitch(){
+  var el=document.getElementById('sb-stream-switch');
+  if(el) return el;
+  var host=document.getElementById('sb-refresh-dot');
+  if(!host || !host.parentNode) return null;
+  el=document.createElement('button');
+  el.id='sb-stream-switch';
+  el.type='button';
+  el.style.cssText='display:none;align-items:center;gap:6px;margin-left:4px;padding:3px 9px;'+
+    'border-radius:999px;border:1px solid var(--st-stuck-dot);background:var(--st-stuck-bg);'+
+    'color:var(--st-stuck-fg);font-family:inherit;font-size:11px;font-weight:600;cursor:pointer;'+
+    'white-space:nowrap;flex:none';
+  host.parentNode.appendChild(el);
+  return el;
+}
+function renderStreamSwitch(){
+  var el=ensureStreamSwitch();
+  if(!el) return;
+  if(!degraded){ el.style.display='none'; return; }
+  var on=pollOptIn===true;
+  el.textContent = on
+    ? 'Refreshing every '+Math.round(POLL_MS/1000)+'s'
+    : 'Not updating live';
+  el.title = on
+    ? 'The live connection is not working. Click to stop refreshing and save requests.'
+    : 'The live connection is not working, so this page is NOT updating. Click to refresh every '
+      + Math.round(POLL_MS/1000) + 's.';
+  el.onclick=function(){
+    if(pollOptIn===true) setPollOptIn(false);
+    else if(pollOptIn===false) setPollOptIn(true);
+    else showPollModal();      // never asked → ask properly
+  };
+  el.style.display='inline-flex';
+}
+
+/* ---- the one-time explanation ---- */
+/* A viewer whose stream just died has no way of knowing WHY, and the why is almost always
+   their transport rather than anything on this page. Naming the likely culprit and the
+   transports that do work turns a dead end into a decision — and it is the difference
+   between "this app is broken" and "my tunnel buffers". */
+function showPollModal(){
+  if(document.getElementById('sb-poll-modal')) return;
+  var back=document.createElement('div');
+  back.id='sb-poll-modal';
+  back.style.cssText='position:fixed;inset:0;z-index:9996;background:rgba(20,15,10,.74);'+
+    'display:flex;align-items:center;justify-content:center;padding:24px';
+  back.innerHTML=
+    '<div role="dialog" aria-modal="true" aria-label="Live updates unavailable" '+
+      'style="background:var(--surface);border:1px solid var(--border);border-radius:16px;'+
+      'box-shadow:var(--shadow);max-width:520px;padding:22px 24px">'+
+      '<h2 style="font-size:16px;font-weight:700;margin:0 0 10px;color:var(--text)">Live updates aren’t getting through</h2>'+
+      '<p style="font-size:13.5px;line-height:1.6;color:var(--text-2);margin:0 0 10px">'+
+        'This page holds an open connection to the broker for instant updates, and nothing '+
+        'is arriving on it. The page is <strong>not refreshing itself</strong> right now.</p>'+
+      '<p style="font-size:13.5px;line-height:1.6;color:var(--text-2);margin:0 0 10px">'+
+        'The usual cause is the tunnel in between. <strong>Free Cloudflare quick tunnels '+
+        '(<span style="font-family:'+MONO+'">trycloudflare.com</span>) buffer this kind of '+
+        'connection and never release it</strong> — so if that is how you are connected, '+
+        'this is why. A <strong>named Cloudflare tunnel</strong>, <strong>ngrok</strong> or '+
+        '<strong>Tailscale</strong> carries live updates instantly.</p>'+
+      '<p style="font-size:13.5px;line-height:1.6;color:var(--text-2);margin:0 0 16px">'+
+        'Until then this page can re-check every '+Math.round(POLL_MS/1000)+' seconds instead. '+
+        'That is <strong>your</strong> tunnel’s allowance it spends — roughly 480 requests an '+
+        'hour — so it is your call, and you can change it any time from the header.</p>'+
+      '<div style="display:flex;gap:9px;justify-content:flex-end">'+
+        '<button data-poll-no="1" style="padding:8px 14px;border:1px solid var(--border);'+
+          'border-radius:9px;background:var(--surface);color:var(--text-2);cursor:pointer;'+
+          'font-family:inherit;font-size:13px">Not now</button>'+
+        '<button data-poll-yes="1" style="padding:8px 14px;border:1px solid var(--accent);'+
+          'border-radius:9px;background:var(--accent-soft);color:var(--accent-2);cursor:pointer;'+
+          'font-family:inherit;font-size:13px;font-weight:600">Refresh every '+
+          Math.round(POLL_MS/1000)+'s</button>'+
+      '</div></div>';
+  function close(){ if(back.parentNode) back.parentNode.removeChild(back); }
+  back.querySelector('[data-poll-yes]').onclick=function(){ setPollOptIn(true); close(); };
+  back.querySelector('[data-poll-no]').onclick=function(){ setPollOptIn(false); close(); };
+  /* Backdrop click = "Not now", but NOT remembered: a stray click outside must not silently
+     answer a question about spending somebody's quota. The switch stays in the header. */
+  back.onclick=function(e){ if(e.target===back){ close(); renderStreamSwitch(); } };
+  document.body.appendChild(back);
+}
+
 function markDegraded(){
   if(degraded) return;
   degraded=true;
-  showBanner('degraded');
+  renderStreamSwitch();
+  /* Ask once, ever, per broker. After that the header switch is the whole interface. */
+  if(pollOptIn===null) showPollModal();
 }
 /* Any DATA frame at all — a ping counts — is proof the stream is delivering. Only
    frames clear the degraded state, and that distinction is the whole trick: see the
@@ -3111,7 +3227,15 @@ function markDegraded(){
 function noteFrame(){
   lastFrame=Date.now();
   streamErrors=0;
-  if(degraded){ degraded=false; hideBanner(); }
+  if(degraded){
+    degraded=false; hideBanner(); renderStreamSwitch();
+    /* RECOVERY IS A REFETCH, not just a cleared flag. While the stream was down anything
+       could have changed, and a viewer who declined polling has had no fetch at all — so
+       without this the page keeps whatever it was showing AND keeps reading "connection
+       issue" in the header, because only a successful fetch clears that. Observed exactly
+       that: the switch correctly disappeared while the header still cried outage. */
+    catchUp();
+  }
 }
 
 /* open (or re-open) the stream. Always starts with a catch-up fetch so a
@@ -3189,6 +3313,11 @@ function watchdog(){
    and a hidden tab — so a paused dashboard genuinely stays paused. */
 function fallbackPoll(){
   if(paused || document.hidden) return;
+  /* Only when the viewer asked for it, and only while the stream is actually failing. On a
+     healthy stream this costs nothing at all — which is the other half of the reversal: the
+     first attempt polled every 15s even when the stream was delivering perfectly, spending
+     ~480 requests an hour of somebody's tunnel to duplicate work already being done. */
+  if(!degraded || pollOptIn!==true) return;
   catchUp();
 }
 
