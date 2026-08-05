@@ -147,10 +147,19 @@ var MONO="'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace";
    Fields:
      id     lookup key for SH(); never rendered.
      code   the LITERAL a human types. This is the string both panels print — prose must
-            never hand-type a command again, it asks for SH('id').
-     tools  the broker tool(s) the agent calls. [] means the agent composes the answer
-            locally and calls nothing. Every name here is registered in tools.py, and a
-            test pins that.
+            never hand-type a command again, it asks for SH('id'). ESCAPED on render, so
+            angle brackets are safe here (`todo <title>`).
+     desc   the sentence beside it. Interpolated as RAW HTML — `cmd()` cannot esc() it
+            because the role-tags row builds <b> into its own desc. So any literal angle
+            bracket MUST be written &lt;like-this&gt; or the browser eats it as a tag:
+            `/files/<task-id>` silently rendered as `/files/` until it was caught in a
+            screenshot. Escaped for the same reason in MCP_TOOLS below.
+     tools  the broker tool(s) the agent calls. [] means no broker TOOL is called —
+            either the agent composes the answer locally (`st`) or it shells out to an
+            HTTP route (`upload`, `getfile`, which move bytes precisely so they never
+            enter a context). Every name here is registered in tools.py, and a test pins
+            that; naming the base64 fallbacks would advertise the expensive path as the
+            normal one.
      group  the cheatsheet heading it sits under. Order in this array IS render order,
             and the heading is emitted whenever it changes, so grouping needs no second
             structure. "Todo Contract" is one heading naming one concept — there is no
@@ -198,6 +207,9 @@ var SHORTCODES=[
   {"id":"stuck","code":"stuck [#N]","bare":"stuck","scoped":"stuck #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"optional","desc":"give up; ping the humans — the one command #N is optional on: with #N just that todo, bare escalates the whole task"},
   {"id":"resolved","code":"resolved","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"none","desc":"the issue is fixed (debug tasks)"},
   {"id":"stuck-debug","code":"stuck","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"none","desc":"give up; ping the humans"},
+  {"id":"files","code":"files","tools":["list_files"],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"what has been shared on the task"},
+  {"id":"upload","code":"upload <path>","tools":[],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"share a file — the agent POSTs the raw bytes to /files/&lt;task-id&gt;, so nothing goes through its context"},
+  {"id":"getfile","code":"getfile <id>","tools":[],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"fetch one back the same cheap way"},
   {"id":"pf","code":"pf","tools":["readiness_check","submit_readiness"],"group":"Meta","modes":["contract","debug"],"scope":"none","desc":"re-run pre-flight"},
   {"id":"st","code":"st","tools":[],"group":"Meta","modes":["contract","debug"],"scope":"none","desc":"status recap (state, contract, unread)"},
   {"id":"rules","code":"rules","tools":["rules"],"group":"Meta","modes":["contract","debug"],"scope":"none","desc":"re-read the charter"}
@@ -2307,7 +2319,8 @@ function shortcodesHTML(d){
 /* ---------- the real MCP tools ----------
    The long form of everything above: what the agent actually calls once it has read the
    shorthand. EVERY name here is registered in `src/sys_buddy/tools.py` — read it out of
-   there before adding a row. There is a design mockup floating around with issue-tracker
+   there before adding a row. The sole exception is the pair of `/files/...` HTTP routes,
+   flagged where they sit. There is a design mockup floating around with issue-tracker
    tools on it (report_issue / resolve_issue / …); they have no implementation and MUST
    NOT be listed, or this panel documents a feature that does not ship. */
 var MCP_TOOLS=[
@@ -2339,10 +2352,19 @@ var MCP_TOOLS=[
   ['Status',[
     ['report_status','ready / checked / blocked / verified / stuck, on todo N']
   ]],
+  /* Files — the two HTTP routes lead because they are how bytes actually MOVE: the agent
+     shells out and the file never enters its context. They are the one exception to the
+     tools.py rule above (an HTTP route is not an MCP tool) and they earn it —
+     `upload_file`/`get_file` carry the file as a base64 tool ARGUMENT, so the agent has to
+     generate or swallow the whole encoding, and an 8 MB file will not fit in a context at
+     all. Same order, and the same reason, as the file-sharing section of
+     RULES_OF_ENGAGEMENT in `rules.py`; keep the two agreeing. */
   ['Files',[
-    ['upload_file','share a screenshot, design or artefact'],
+    ['POST /files/<task-id>','share a screenshot, design or artefact — raw bytes over curl, nothing through the agent’s context'],
+    ['GET /files/<task-id>/<file-id>','fetch one back the same way; the task id in the path must be yours or it is refused'],
     ['list_files','what has been shared on the task'],
-    ['get_file','fetch one back']
+    ['upload_file','no-shell fallback — base64 as a tool argument, ~128k tokens for a 328 KB screenshot'],
+    ['get_file','no-shell fallback — fetch one back, at the same cost']
   ]],
   ['Meta',[
     ['readiness_check','see the pre-flight questions'],

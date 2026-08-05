@@ -50,6 +50,30 @@ ALLOWED_TYPES = {
 }
 KINDS = frozenset({"screenshot", "design", "other"})
 
+# Human-readable label per accepted type, for prose aimed at an agent rather than at a
+# parser. A type with no entry here falls back to its MIME string, so adding to
+# ``ALLOWED_TYPES`` alone can never silently drop a type out of the briefings — the worst
+# case is that it reads as ``image/avif`` until somebody names it.
+_FRIENDLY_TYPE = {
+    "image/png": "PNG",
+    "image/jpeg": "JPG",
+    "application/pdf": "PDF",
+    "application/zip": "ZIP",
+    "text/html": "text/html",
+}
+
+
+def types_sentence() -> str:
+    """The accepted types as a briefing would say them: ``PNG, JPG, PDF, ZIP, text/html``.
+
+    Every surface that tells an agent what it may share renders this rather than spelling
+    the list by hand. ``upload_file``'s rejection message was hand-written that way and
+    drifted — it advertised a list that omitted ``text/html`` while the broker happily
+    accepted it (fixed in v2.2.0). The briefings then drifted the same way for the same
+    reason, so they read from the allow-list too now, and a test asserts it.
+    """
+    return ", ".join(_FRIENDLY_TYPE.get(t, t) for t in ALLOWED_TYPES)
+
 
 def _kind_for(content_type: str, kind: str | None) -> str:
     """Honour an explicit kind if valid; otherwise bucket by content type."""
