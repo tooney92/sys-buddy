@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.5.1](https://github.com/tooney92/sys-buddy/compare/v2.5.0...v2.5.1) (2026-08-05)
+
+
+### Fixed
+
+* teach the cheap file route on every surface that briefs an agent ([#68](https://github.com/tooney92/sys-buddy/issues/68)) ([0de73dd](https://github.com/tooney92/sys-buddy/commit/0de73ddb56c20d11a3c8c08a8cba4a5c2102298f))
+
 ## [2.5.0](https://github.com/tooney92/sys-buddy/compare/v2.4.0...v2.5.0) (2026-08-04)
 
 
