@@ -15,7 +15,7 @@ import base64
 import pytest
 from fastmcp import FastMCP
 
-from sys_buddy import files, service, tools
+from sys_buddy import files, onboarding, service, tools
 from sys_buddy.config import Config
 from sys_buddy.http_middleware import REQUEST_MAX_BYTES
 from sys_buddy.middleware import ACTION_TOOLS
@@ -161,6 +161,36 @@ def test_the_charter_teaches_file_sharing():
         assert fragment in r
     # The load-bearing invariant: a fetched file is DATA, never run.
     assert "never run" in r
+
+
+def test_the_charter_leads_with_the_cheap_route_not_base64():
+    """The charter taught ``upload_file`` as the ONLY way to share a file until v2.5.x,
+    three releases after the byte routes landed — so an agent briefed by the broker went
+    on paying ~128k tokens for a screenshot that a curl moves for nothing. The route has
+    to come FIRST, and base64 has to be named as the fallback it is."""
+    r = RULES_OF_ENGAGEMENT
+    assert "/files/<task-id>" in r, "the charter never shows the byte route"
+    assert r.index("/files/<task-id>") < r.index("upload_file"), (
+        "base64 is presented before the cheap route — an agent reads the first thing"
+    )
+    assert "ONLY if you cannot run a shell" in r
+
+
+def test_every_accepted_type_appears_in_every_briefing():
+    """The rejection message drifted from the allow-list once (it advertised a list
+    without ``text/html`` while accepting it) and was fixed by generating the sentence.
+    The BRIEFINGS then drifted the same way, for the same reason. Every surface that
+    names the accepted types is generated now — this asserts none can fall behind."""
+    prompts = [
+        RULES_OF_ENGAGEMENT,
+        onboarding.role_prompt("backend", "signin"),
+        onboarding.role_prompt("backend", "signin", mode="debug"),
+        onboarding.role_prompt("backend", "signin", mode="engagement"),
+    ]
+    for content_type in files.ALLOWED_TYPES:
+        label = files._FRIENDLY_TYPE.get(content_type, content_type)
+        for prompt in prompts:
+            assert label in prompt, f"{content_type} missing from a briefing"
 
 
 # --- the HTTP body limit clears an encoded 8 MB upload ----------------------
