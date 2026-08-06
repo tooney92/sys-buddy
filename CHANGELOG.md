@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.7.1](https://github.com/tooney92/sys-buddy/compare/v2.7.0...v2.7.1) (2026-08-06)
+
+
+### Fixed
+
+* real mono weights, N-agent wording, and a file rule with a number in it ([#77](https://github.com/tooney92/sys-buddy/issues/77)) ([d37d37a](https://github.com/tooney92/sys-buddy/commit/d37d37aa13c0ff4b58bd32a2525e9d46d9f20115))
+
 ## [2.7.0](https://github.com/tooney92/sys-buddy/compare/v2.6.0...v2.7.0) (2026-08-06)
 
 
