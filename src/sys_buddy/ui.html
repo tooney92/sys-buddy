@@ -1081,7 +1081,7 @@ function threadItemHTML(it){
         toChip+tdChip+
         '<span style="font-size:11px;color:var(--text-3);font-family:'+MONO+'">'+esc(m.time)+'</span>'+
       '</div>'+
-      '<div style="'+bubbleStyle(m.type,pass)+'"><span>'+esc(m.body)+'</span>'+code+strikePill+'</div>'+confetti+
+      '<div style="'+bubbleStyle(m.type,pass)+'">'+bodyHTML(m.body)+code+strikePill+'</div>'+confetti+
     '</div></div>';
 }
 function threadHTML(d){
@@ -1447,28 +1447,62 @@ var TODO_STATUS_SHOWN = {pending:1, dropped:1};
    That is a convention agents already follow, because the briefing teaches
    "Out of scope:" — so this renders todos that were written months ago, which an
    array-of-paragraphs field could never do. */
-function scopeHTML(text){
-  var out=[], list=[];
-  function flushList(){
-    if(!list.length) return;
-    out.push('<ul style="margin:4px 0 8px;padding-left:17px;color:var(--text-2);font-size:11.5px;line-height:1.55">'+
-      list.map(function(li){ return '<li style="margin:2px 0">'+esc(li)+'</li>'; }).join('')+'</ul>');
-    list=[];
-  }
+/* The SHAPES, separated from the styling. Two surfaces render agent prose \u2014 a todo's
+   `scope` card and a message bubble \u2014 and they need different type sizes and colours,
+   but they must never drift on WHAT counts as a heading or a bullet. So the parse
+   happens once here and returns tokens; each renderer below owns only its own CSS.
+
+   Returns [{kind:'p'|'h', text} | {kind:'ul', items:[\u2026]}]. No markup is produced and
+   no markup is recognised \u2014 see the note above; every renderer still esc()s. */
+function proseBlocks(text){
+  var blocks=[], list=[];
+  function flushList(){ if(list.length){ blocks.push({kind:'ul', items:list}); list=[]; } }
   String(text||'').split(/\n/).forEach(function(raw){
     var line=raw.trim();
     if(!line){ flushList(); return; }
     if(/^[-*\u2022]\s+/.test(line)){ list.push(line.replace(/^[-*\u2022]\s+/,'')); return; }
     flushList();
     var heading = (line.length<60 && (/:$/.test(line) || (line===line.toUpperCase() && /[A-Z]{3}/.test(line))));
-    if(heading){
-      out.push('<div style="margin:10px 0 3px;font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">'+esc(line.replace(/:$/,''))+'</div>');
-    } else {
-      out.push('<p style="margin:4px 0;font-size:11.5px;color:var(--text-2);line-height:1.55">'+esc(line)+'</p>');
-    }
+    blocks.push(heading ? {kind:'h', text:line.replace(/:$/,'')} : {kind:'p', text:line});
   });
   flushList();
-  return out.join('');
+  return blocks;
+}
+
+function scopeHTML(text){
+  return proseBlocks(text).map(function(b){
+    if(b.kind==='ul'){
+      return '<ul style="margin:4px 0 8px;padding-left:17px;color:var(--text-2);font-size:11.5px;line-height:1.55">'+
+        b.items.map(function(li){ return '<li style="margin:2px 0">'+esc(li)+'</li>'; }).join('')+'</ul>';
+    }
+    if(b.kind==='h'){
+      return '<div style="margin:10px 0 3px;font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">'+esc(b.text)+'</div>';
+    }
+    return '<p style="margin:4px 0;font-size:11.5px;color:var(--text-2);line-height:1.55">'+esc(b.text)+'</p>';
+  }).join('');
+}
+
+/* A message body in its bubble. Same shapes, but sized in `em` and tinted with
+   `opacity` rather than named colours, so whatever `bubbleStyle` decided for this
+   message type still wins \u2014 a bubble already carries its own colour.
+
+   A ONE-LINE body renders exactly as it always did: bare escaped text, no wrapper.
+   That is the overwhelmingly common message and it must not gain a layout box just
+   because multi-paragraph ones now read better. Spacing is `gap` on a flex column,
+   not margins, so there is no first/last-child problem an inline style cannot fix. */
+function bodyHTML(text){
+  var blocks=proseBlocks(text);
+  if(blocks.length<2 && (blocks[0]||{}).kind==='p') return esc(String(text||'').trim());
+  return '<div style="display:flex;flex-direction:column;gap:6px">'+blocks.map(function(b){
+    if(b.kind==='ul'){
+      return '<ul style="margin:0;padding-left:18px">'+
+        b.items.map(function(li){ return '<li style="margin:2px 0">'+esc(li)+'</li>'; }).join('')+'</ul>';
+    }
+    if(b.kind==='h'){
+      return '<div style="margin:0;font-size:.85em;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.7">'+esc(b.text)+'</div>';
+    }
+    return '<p style="margin:0">'+esc(b.text)+'</p>';
+  }).join('')+'</div>';
 }
 
 /* The headline a human actually reads. A todo with no summary says so rather than

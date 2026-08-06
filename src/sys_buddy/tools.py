@@ -96,6 +96,53 @@ def _local_identity(task: str, agent: str) -> Identity:
         conn.close()
 
 
+# The one thing about a message body worth saying back to its sender, and it is a
+# RENDERING FACT rather than a taste one: ui.html's `proseBlocks` splits on newlines and
+# on nothing else, so a body containing no newline renders as a single unbroken block on
+# the dashboard no matter how well the sentences inside it are written. Everything an
+# editor might otherwise flag — bullet density, sentence length, tone — is opinion, and a
+# nudge that fires on opinion is one every agent learns to scroll past within a session.
+# So: exactly one check, and a well-shaped message must come back with a clean receipt.
+#
+# 400 characters. The thread bubble is ~740px of 13.5px text on the task page, so an
+# unbroken block passes ~4-5 rendered lines there and ~10 on a phone at that length —
+# past the point where a reader's eye has anything to land on. Below it a single block
+# still reads as one paragraph, which is exactly what a short answer SHOULD be, and the
+# short answer is the overwhelmingly common message.
+_WALL_OF_TEXT_CHARS = 400
+
+
+def _shape_note(body: object) -> str:
+    """A trailing line for a receipt when the body will render as one block, else ``''``.
+
+    Deliberately TERSER than ``onboarding.WRITING_A_MESSAGE`` rather than sharing it, and
+    the difference is not laziness: that constant is a briefing paragraph that teaches all
+    three shapes plus when *not* to use them, and printing ten lines of it after every long
+    message is the noise this nudge exists to avoid. A receipt arrives at the moment of the
+    mistake and only has to name the fix for THAT mistake — the two shapes that create a
+    line break. Headings are irrelevant to a body that has no lines yet.
+
+    The ``SHORTCODES`` / ``types_sentence()`` rule this looks like an exception to is about
+    spellings the BROKER must answer to, where a second hand-typed copy teaches a command
+    that does not exist. Nothing here is a command; the authority on the shapes is
+    ``proseBlocks``, and ``test_send_shape_nudge`` pins this wording to the briefing so the
+    two cannot say different things.
+
+    Never raises. A receipt is a courtesy and must survive any input — ``None``, a
+    non-string, or one 50,000-character line.
+    """
+    text = body.strip() if isinstance(body, str) else ""
+    # Strip first: a wall of text with a trailing newline still renders as one block, and
+    # `\n` alone is the test because that is precisely what `proseBlocks` splits on.
+    if len(text) <= _WALL_OF_TEXT_CHARS or "\n" in text:
+        return ""
+    return (
+        f"\nNOTE: {len(text)} characters with no line breaks — that renders as one "
+        f"unbroken block on your human's dashboard. A blank line starts a new "
+        f"paragraph; a line starting `- ` becomes a bullet."
+    )
+
+
 def _op_send(ident: Identity, type: str, body: str, to_role: str | None = None) -> str:
     service.assert_sendable(type)  # lifecycle types must go through report_status
     conn = connect()
@@ -103,7 +150,12 @@ def _op_send(ident: Identity, type: str, body: str, to_role: str | None = None) 
         r = service.post_message(conn, ident, type, body, to_role)
     finally:
         conn.close()
-    return f"Delivered to task '{ident.task_id}' ({r['recipients']} recipient(s)). id={r['id']}"
+    # Both registrations call this op, so the nudge lands on remote and local alike — and
+    # it lands AFTER delivery, on the receipt, because shape is never grounds to refuse.
+    return (
+        f"Delivered to task '{ident.task_id}' ({r['recipients']} recipient(s)). id={r['id']}"
+        + _shape_note(body)
+    )
 
 
 def _op_check(ident: Identity) -> list[dict]:
@@ -789,7 +841,18 @@ def _register_remote(mcp: FastMCP) -> None:
         broker records the transition and counts strikes. Batch related content
         into ONE message. Be concrete. Optionally set `to_role` to send privately
         to ONE role on the task (e.g. "mobile"); leave empty to broadcast to
-        everyone (the default)."""
+        everyone (the default).
+
+        A LONG body should carry shape, because a human reads this thread on the
+        dashboard. Three shapes render, and they are NOT markdown — `**bold**` and
+        `#` come out as the literal characters:
+
+            blank line       -> new paragraph
+            line with `- `   -> bullet
+            SHORT ALL-CAPS line, or one ending ':'  -> heading
+
+        A one-line message stays one line; this is for the paragraph nobody would
+        otherwise finish."""
         return _op_send(require_current(), type, body, to_role or None)
 
     @mcp.tool
@@ -1481,7 +1544,12 @@ def _register_local(mcp: FastMCP) -> None:
         Use conversational types (question/answer/status_update/contract_proposal);
         lifecycle events go through report_status, not here. Optionally set `to_role`
         to send privately to ONE role on the task (e.g. "mobile"); leave empty to
-        broadcast to everyone (the default)."""
+        broadcast to everyone (the default).
+
+        A LONG body should carry shape — a blank line starts a paragraph, `- ` makes
+        a bullet, and a SHORT ALL-CAPS line (or one ending ':') becomes a heading.
+        Not markdown: `**bold**` renders as the literal asterisks. One-liners stay
+        one line."""
         return _op_send(_local_identity(task, agent), type, body, to_role or None)
 
     @mcp.tool
