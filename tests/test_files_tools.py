@@ -163,17 +163,29 @@ def test_the_charter_teaches_file_sharing():
     assert "never run" in r
 
 
-def test_the_charter_leads_with_the_cheap_route_not_base64():
-    """The charter taught ``upload_file`` as the ONLY way to share a file until v2.5.x,
-    three releases after the byte routes landed — so an agent briefed by the broker went
-    on paying ~128k tokens for a screenshot that a curl moves for nothing. The route has
-    to come FIRST, and base64 has to be named as the fallback it is."""
+def test_the_charter_shows_the_route_and_makes_the_choice_a_SIZE_one():
+    """Two failures, one line of guidance, pulling in opposite directions.
+
+    Before v2.5.1 the charter taught ``upload_file`` as the ONLY way to share a file —
+    three releases after the byte routes landed — so an agent paid ~128k tokens for a
+    screenshot a curl moves for nothing. v2.5.1 fixed that with "use the tool ONLY if
+    you cannot run a shell", and OVERSHOT: an agent then refused to call ``get_file``
+    for a 37 KB file, went hunting for a token to curl with instead, and cost its human
+    five permission prompts to read something one tool call would have returned.
+
+    So the route must still come FIRST (the big-file case is the expensive one), but the
+    rule has to be a NUMBER rather than a prohibition — "expensive" with no threshold
+    gets applied to everything.
+    """
     r = RULES_OF_ENGAGEMENT
     assert "/files/<task-id>" in r, "the charter never shows the byte route"
     assert r.index("/files/<task-id>") < r.index("upload_file"), (
         "base64 is presented before the cheap route — an agent reads the first thing"
     )
-    assert "ONLY if you cannot run a shell" in r
+    assert "100 KB" in r, "no size threshold — 'expensive' alone gets applied to a 37 KB file"
+    assert "ONLY if you cannot run a shell" not in r, (
+        "the prohibition is back; it is what made an agent avoid a cheap tool call"
+    )
 
 
 def test_every_accepted_type_appears_in_every_briefing():

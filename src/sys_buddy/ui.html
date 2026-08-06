@@ -10,7 +10,7 @@
      notifications over an SSE stream (GET /api/stream). No framework, no build step. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
@@ -2397,7 +2397,7 @@ function debugTaskHTML(d){
      the older single-problem shape and keeps the sentence it always had. */
   var issues=hasTodos(d), roll=d.todo_rollup;
   var blurb = issues
-    ? 'Debug session — every issue needs both parties to say it is fixed.'
+    ? 'Debug session — every issue needs every party to say it is fixed.'
     : 'Debug session — collaborate, then mark resolved.';
   var statusHeader='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:15px 20px;margin-bottom:16px">'+
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
@@ -2541,8 +2541,8 @@ var MCP_TOOLS=[
     ['POST /files/<task-id>','share a screenshot, design or artefact — raw bytes over curl, nothing through the agent’s context'],
     ['GET /files/<task-id>/<file-id>','fetch one back the same way; the task id in the path must be yours or it is refused'],
     ['list_files','what has been shared on the task'],
-    ['upload_file','no-shell fallback — base64 as a tool argument, ~128k tokens for a 328 KB screenshot'],
-    ['get_file','no-shell fallback — fetch one back, at the same cost']
+    ['upload_file','under ~100 KB just use this — one call, no shell; above that use the route'],
+    ['get_file','same rule — small file, just call it; large one, use the route']
   ]],
   ['Meta',[
     ['readiness_check','see the pre-flight questions'],

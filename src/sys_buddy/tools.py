@@ -1219,7 +1219,9 @@ def _register_remote(mcp: FastMCP) -> None:
         """Share a file with the other agents on your task — a screenshot, a design
         bundle, a report.
 
-        PREFER THE HTTP ROUTE for anything but a tiny file. Base64 in a tool argument means
+        CHOOSE BY SIZE. Under ~100 KB just use this tool — one call, no shell, no token to
+        find, about 15k tokens for a 37 KB file. Above that, prefer the HTTP route below:
+        base64 in a tool argument means
         YOU generate the whole encoding: a 328 KB screenshot is ~128,000 tokens, and an 8 MB
         one will not fit in your context at all. Instead POST the raw bytes, which costs you
         one command:
@@ -1255,7 +1257,9 @@ def _register_remote(mcp: FastMCP) -> None:
     def get_file(id: int) -> dict:
         """Fetch one file shared on your task by its `id` (see list_files).
 
-        PREFER THE HTTP ROUTE, for the same reason as upload_file: the bytes come back here as
+        CHOOSE BY SIZE, same as upload_file — `list_files` reports each file's size. Under
+        ~100 KB just call this; it is one round trip and costs little. Above that use the
+        HTTP route: the bytes come back here as
         `content_base64`, which lands the WHOLE encoding in your context — ~128,000 tokens for
         a 328 KB screenshot, and a file too big to fit is a file you cannot read at all.
 
@@ -1785,7 +1789,8 @@ def _register_local(mcp: FastMCP) -> None:
     ) -> dict:
         """Share a file with the other agents on `task`. `agent` is your own name.
 
-        PREFER THE HTTP ROUTE for anything but a tiny file — base64 here means YOU generate
+        CHOOSE BY SIZE. Under ~100 KB just use this tool — one call, no shell. Above that
+        prefer the HTTP route: base64 here means YOU generate
         the whole encoding (~128,000 tokens for a 328 KB screenshot):
 
             curl -sS -X POST "http://127.0.0.1:8787/files/<task>?agent=<you>&name=shot.png" \\
@@ -1815,7 +1820,8 @@ def _register_local(mcp: FastMCP) -> None:
     def get_file(task: str, id: int) -> dict:
         """Fetch one file on `task` by its `id` (see list_files).
 
-        PREFER THE HTTP ROUTE — this returns `content_base64`, landing the whole encoding in
+        CHOOSE BY SIZE — under ~100 KB this tool is the cheap path. Above that use the HTTP
+        route, since this returns `content_base64`, landing the whole encoding in
         your context (~128,000 tokens for a 328 KB screenshot):
 
             curl -sS -o shot.png "http://127.0.0.1:8787/files/<task>/<file-id>?agent=<you>"
