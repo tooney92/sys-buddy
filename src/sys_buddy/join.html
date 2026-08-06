@@ -183,6 +183,54 @@ pre.code{
   white-space:pre-wrap;        /* keep the remove/add line break, but wrap long lines */
   overflow-wrap:anywhere;      /* break the long bearer-token line rather than clipping */
 }
+/* --- alias for the Claude binary (claude-personal / claude-work) --- */
+.alias{margin-top:10px}
+.alias-toggle{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-2);cursor:pointer}
+.alias-toggle code{font-size:11.5px}
+.alias-row{margin-top:8px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.alias-row input{
+  padding:7px 10px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;min-width:190px}
+.alias-row input:focus{outline:2px solid var(--accent);outline-offset:1px}
+.alias-err{font-size:12px;color:#e5484d}
+
+/* --- "what we're asking" --- */
+.asking{
+  margin:0 0 12px;border:1px solid var(--border);border-radius:11px;
+  background:var(--surface-2,rgba(127,127,127,.05));overflow:hidden}
+.asking>summary{
+  cursor:pointer;list-style:none;padding:11px 14px;display:flex;align-items:center;
+  justify-content:space-between;gap:10px}
+.asking>summary::-webkit-details-marker{display:none}
+.asking-t{font-size:13px;font-weight:650;color:var(--text)}
+.asking-x{font-size:11.5px;color:var(--text-3)}
+.asking[open] .asking-x::after{content:" ▾"}
+.asking:not([open]) .asking-x::after{content:" ▸"}
+.asking-body{padding:0 14px 13px}
+.asking-lede{margin:0 0 11px;font-size:12.5px;color:var(--text-2);line-height:1.5}
+.asking-dl{display:grid;grid-template-columns:74px 1fr;gap:6px 12px;margin:0}
+.asking-dl dt{
+  font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-3);padding-top:2px}
+.asking-dl dd{margin:0;font-size:12.5px;color:var(--text-2);line-height:1.5}
+.asking-dl ul{margin:0;padding-left:16px}
+.asking-dl li{margin:2px 0}
+.asking-verify{
+  margin:12px 0 0;padding-top:11px;border-top:1px solid var(--border);
+  font-size:12.5px;color:var(--text-2);line-height:1.5}
+.asking-full{margin-top:9px}
+.asking-full>summary{cursor:pointer;font-size:12.5px;color:var(--accent)}
+.rules-pre{
+  margin:9px 0 0;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  padding:11px 12px;background:var(--bg);border:1px solid var(--border);border-radius:9px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.5;
+  color:var(--text-2)}
+/* One column on a phone: 74px of label beside wrapped prose is unreadable. */
+@media (max-width:520px){
+  .asking-dl{grid-template-columns:1fr;gap:2px}
+  .asking-dl dt{padding-top:8px}
+}
+
 textarea.prompt{
   font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   font-size:.84rem;line-height:1.55;color:var(--text);
@@ -356,11 +404,29 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
         <div class="copy-row">
           <button type="button" class="btn copy" data-copy="cmd-claude-cli">Copy command</button>
         </div>
+        <!-- The command assumes the binary is `claude`. People who run more than one
+             install (claude-personal / claude-work) were editing every pasted command by
+             hand. Free text, not a picker: an alias cannot be enumerated. Substituted
+             live in the page rather than re-fetched, the same way the URL is rebased. -->
+        <div class="alias">
+          <label class="alias-toggle">
+            <input type="checkbox" id="alias-on">
+            <span>My Claude command isn’t <code>claude</code></span>
+          </label>
+          <div class="alias-row" id="alias-row" hidden>
+            <input type="text" id="alias-name" spellcheck="false" autocapitalize="off"
+                   autocomplete="off" placeholder="claude-work" aria-label="Your Claude command">
+            <span class="alias-err" id="alias-err" hidden></span>
+          </div>
+        </div>
         <p class="hint">Run it <strong>in the folder you'll open your agent in</strong>, then
            restart your session.</p>
         <div class="verify">
           <span class="vh">How to know it worked</span>
-          <code>claude mcp list</code> — run it from that same folder; it should list
+          <!-- Follows the alias too. Telling someone their command is `claude-work` and
+               then, one line down, to run `claude mcp list` is the same hand-edit we
+               just removed — and this is the line they run when something looks wrong. -->
+          <code id="verify-cmd">claude mcp list</code> — run it from that same folder; it should list
           <strong>sys-buddy</strong>. Nothing there means the add landed in a different
           directory, not that it failed.
         </div>
@@ -511,13 +577,18 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
         <div class="pw-body">
           <p class="hint">Lets your agent drive a real browser, so it can <em>prove</em> the UI works against the API instead of asserting it. <strong>Optional</strong> — not required to pair, and you can add it later.</p>
           <p class="hint">Prerequisite: <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a> installed (it provides <code>npx</code>).</p>
+          <!-- `.mcp.json` LEADS, and `--scope user` is the alternative. This ordering was
+               the other way round and cost a real setup session: `--scope user` does not
+               resolve to a fixed path — it writes to $CLAUDE_CONFIG_DIR/.claude.json,
+               falling back to ~/.claude.json. On a machine where the var is set for Claude
+               sessions but not for a plain terminal, the add lands in a file the session
+               never reads. It reports success, and the tools are still missing.
+               A project-root file is read relative to the working directory, so
+               CLAUDE_CONFIG_DIR cannot affect it. -->
           <ol>
-            <li>Add the Playwright MCP:</li>
+            <li><strong>Put this at your project root</strong> as <code>.mcp.json</code>. Read from the folder you work in, so it cannot land somewhere your session doesn't look — and you can commit it, so your whole team gets the identical setup:</li>
           </ol>
-          <pre class="code" id="pw-cmd">claude mcp add --scope user playwright npx '@playwright/mcp@0.0.77'</pre>
-          <div class="copy-row"><button type="button" class="btn copy" id="copy-pw">Copy command</button></div>
-          <p class="hint">Prefer a file you can commit and share with the rest of your team? Put this at your project root instead — same result, and everyone gets the identical setup:</p>
-          <pre class="code">.mcp.json
+          <pre class="code" id="pw-cmd">.mcp.json
 {
   "mcpServers": {
     "playwright": {
@@ -526,10 +597,27 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     }
   }
 }</pre>
+          <div class="copy-row"><button type="button" class="btn copy" id="copy-pw">Copy file</button></div>
+          <p class="hint">No terminal needed — Claude can write the file itself. The first time it loads you'll be asked to approve the server; that prompt is normal, not a failure.</p>
+          <p class="hint">Prefer the CLI? <code>claude mcp add --scope user playwright npx '@playwright/mcp@0.0.77'</code> — but see the warning below about where <code>--scope user</code> actually writes.</p>
           <ol start="2">
             <li><strong>Restart your Claude session.</strong> MCP servers only load at start-up — without a restart the tools simply won't be there, which is the usual reason this looks broken.</li>
-            <li>Verify with <code>claude mcp list</code> — it should list <strong>playwright</strong>.</li>
+            <li><strong>Verify from inside the session</strong>, not a separate terminal: ask your agent <em>“what Playwright tools do you have?”</em>, or type <code>! claude mcp list</code> in the session so it runs in the session's own environment.</li>
           </ol>
+          <div class="verify">
+            <span class="vh">“It said it added, but the tools aren't there”</span>
+            <code>--scope user</code> writes to <code>$CLAUDE_CONFIG_DIR/.claude.json</code>, or
+            <code>~/.claude.json</code> when that variable is unset. If it is set for your Claude
+            sessions but not for the terminal you typed the command in, those are two different
+            files and the add landed in the one nothing reads.
+            Compare <code>echo $CLAUDE_CONFIG_DIR</code> in both. If they differ, re-run the add
+            from inside the session — or use the <code>.mcp.json</code> above, which sidesteps it
+            entirely.
+            <br><br>
+            This is also why <code>claude mcp list</code> in a separate terminal proves nothing:
+            it reads the same file the add wrote, so it agrees with itself whether or not your
+            session can see the server.
+          </div>
           <p class="hint"><strong>What to expect.</strong> The first run downloads the package, so it's slow once and needs a network connection. It then opens <em>its own</em> browser window on a throwaway profile — not your everyday browser, so none of your saved sessions, extensions, or history are visible to it. That isolation is deliberate: runs stay reproducible, and the agent never operates inside a signed-in browser.</p>
           <p class="hint">The version is <strong>pinned on purpose</strong>. Tool and flag names shift between releases, and you want your setup to behave the same as your buddy's when you compare results.</p>
           <p class="hint">If you also run a browser <em>extension</em>-based tool, that's a different thing driving your real browser. Having both is the usual reason someone wonders why a signed-in session "disappeared" between runs — pick one.</p>
@@ -540,6 +628,39 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     <!-- Step 2 — brief the agent -->
     <div class="blk">
       <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your agent's chat</span>
+
+      <!-- "What we're asking" — ABOVE the prompt, not beside it. Beside puts the
+           reassurance in peripheral vision while the eye goes to the scrolling box and
+           then the Copy button; above is the thing you pass through on the way to
+           copying. It also needs no second layout for a phone.
+           Every line under "Never" is PARSED from the charter server-side
+           (onboarding.charter_summary) — a summary that drifts from the rules it
+           summarises is a false assurance, and this is where trust is decided. -->
+      <details class="asking" id="asking" open>
+        <summary><span class="asking-t">What we’re asking</span><span class="asking-x">details</span></summary>
+        <div class="asking-body">
+          <p class="asking-lede">This prompt teaches your agent how to <em>use</em> sys-buddy.
+             It does not tell it what to build — you do that, in your own words.</p>
+          <dl class="asking-dl">
+            <dt>Grants</dt>   <dd id="asking-grants"></dd>
+            <dt>Sends</dt>    <dd id="asking-sends"></dd>
+            <dt>Never</dt>    <dd id="asking-never"></dd>
+            <dt>Seen by</dt>  <dd id="asking-seen"></dd>
+          </dl>
+          <p class="asking-verify">
+            Don’t take our word for it — paste the prompt into a <strong>different</strong>
+            Claude (not the one you’ll use for this task) and ask what it does.
+          </p>
+          <!-- The full charter, inline. The page already receives it and was throwing it
+               away; a "read the full rules" link that goes nowhere is worse than none,
+               and this is the one panel where that would actually matter. -->
+          <details class="asking-full" id="rules-full">
+            <summary>Read the full charter</summary>
+            <pre class="rules-pre" id="rules-text"></pre>
+          </details>
+        </div>
+      </details>
+
       <textarea class="prompt" id="prompt-text" readonly rows="10" aria-label="Agent briefing prompt"></textarea>
       <div class="copy-row">
         <button type="button" class="btn copy" id="copy-prompt">Copy prompt</button>
@@ -840,7 +961,48 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       return e ? rebase(e[name], e) : '';
     }
 
-    put('cmd-claude-cli', field('claude-cli', 'command'));
+    /* ---------- the Claude binary alias ----------
+       The connect blocks are generated server-side with `claude` as the FIRST token of
+       every line (onboarding.DEFAULT_CLI, pinned by a test), so swapping in a user's
+       alias is one line-anchored substitution — no round trip, and it updates as they
+       type. Anchored to line starts on purpose: a blind replace of "claude" would also
+       rewrite any occurrence inside the bearer token.
+       Validated to the same character set the server enforces
+       (onboarding.assert_cli_binary), because this string is pasted into a shell. */
+    var CLI_RE = /^[A-Za-z0-9._+-]{1,64}$/;
+    var claudeCliCmd = field('claude-cli', 'command');
+    var aliasOn   = document.getElementById('alias-on');
+    var aliasRow  = document.getElementById('alias-row');
+    var aliasName = document.getElementById('alias-name');
+    var aliasErr  = document.getElementById('alias-err');
+
+    function currentCli(){
+      if (!aliasOn.checked) return '';
+      var v = (aliasName.value || '').trim();
+      if (!v) return '';
+      return CLI_RE.test(v) ? v : null;   // null = typed but invalid
+    }
+    function paintCmd(){
+      var cli = currentCli();
+      var bad = cli === null;
+      aliasErr.hidden = !bad;
+      if (bad) aliasErr.textContent = 'Letters, digits, dot, underscore, + or - only.';
+      // An invalid alias leaves the default command on screen rather than rendering a
+      // half-substituted one — a broken command someone pastes is worse than no change.
+      var use = (cli && !bad) ? cli : 'claude';
+      put('cmd-claude-cli', use === 'claude' ? claudeCliCmd
+                                             : claudeCliCmd.replace(/^claude\b/gm, use));
+      var v = document.getElementById('verify-cmd');
+      if (v) v.textContent = use + ' mcp list';
+    }
+    aliasOn.onchange = function(){
+      aliasRow.hidden = !aliasOn.checked;
+      if (aliasOn.checked) aliasName.focus();
+      paintCmd();
+    };
+    aliasName.oninput = paintCmd;
+
+    put('cmd-claude-cli', claudeCliCmd);
     put('cmd-claude-app', field('claude-desktop', 'paste'));
     put('cmd-cursor',     field('cursor', 'paste'));
     put('cmd-gemini',     field('gemini-cli', 'command'));
@@ -900,6 +1062,30 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     var pwCmdEl = document.getElementById('pw-cmd');
     var copyPwBtn = document.getElementById('copy-pw');
     copyPwBtn.onclick = function(){ copyText(pwCmdEl.textContent, copyPwBtn); };
+
+    /* ---------- "what we're asking" ----------
+       Rendered from the server's `asking` payload — never written here. The `never`
+       lines are the charter's own opening sentences, parsed from RULES_OF_ENGAGEMENT,
+       so editing a rule moves this panel. Everything goes through esc(): it is our own
+       text today, but a panel about safety is the last place to build an HTML sink. */
+    var asking = res.asking;
+    if (asking) {
+      var ul = function(items){
+        return '<ul>' + items.map(function(t){ return '<li>' + esc(t) + '</li>'; }).join('') + '</ul>';
+      };
+      document.getElementById('asking-grants').innerHTML = ul(asking.grants || []);
+      document.getElementById('asking-sends').innerHTML  = ul(asking.sends || []);
+      document.getElementById('asking-never').innerHTML  = ul(
+        (asking.never || []).map(function(r){ return r.text; }));
+      document.getElementById('asking-seen').textContent = asking.seen_by || '';
+      // textContent, not innerHTML: the charter is plain text and must stay that way.
+      document.getElementById('rules-text').textContent = res.rules || '';
+      document.getElementById('rules-full').hidden = !res.rules;
+    } else {
+      // An older broker sends no `asking`. Hide the panel rather than show an empty
+      // one — a blank "what we're asking" says something worse than nothing.
+      document.getElementById('asking').hidden = true;
+    }
 
     // Step 2 — briefing prompt (readonly textarea).
     promptTa.value = res.prompt || '';

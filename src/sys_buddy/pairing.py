@@ -372,7 +372,7 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
 
         # Lazy import: onboarding imports pairing at module top, so importing it here
         # (inside the handler) avoids a circular import.
-        from .onboarding import connect_clients, role_prompt
+        from .onboarding import asking_summary, connect_clients, role_prompt
 
         viewer_token = result["viewer_token"]
         mcp_url = f"{cfg.base_url}/mcp"
@@ -393,6 +393,11 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
                 ),
                 # The broker's non-negotiable charter, handed to the agent at setup.
                 "rules": RULES_OF_ENGAGEMENT,
+                # Plain-language "what we're asking", for the panel above the prompt.
+                # Its `never` list is PARSED from the charter above rather than written
+                # twice — a summary that drifts from the rules it summarises is a false
+                # assurance, shown exactly where trust is being decided.
+                "asking": asking_summary(),
                 # How to connect, for EVERY client we support — rendered here rather
                 # than in the page, for the same reason `prompt` and `rules` are: these
                 # literals fail silently when they drift, so there is exactly one copy.

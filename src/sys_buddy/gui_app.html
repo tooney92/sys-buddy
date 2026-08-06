@@ -327,6 +327,16 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 .connect-tab:hover{border-color:var(--accent);color:var(--text)}
 .connect-tab.is-on{background:var(--accent);border-color:var(--accent);color:#1a1512;font-weight:600}
 .connect-tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* the Claude-binary alias — mirrors join.html's block, same rule, same validator */
+.alias{margin-top:10px}
+.alias-toggle{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-2);cursor:pointer}
+.alias-toggle code{font-size:11.5px}
+.alias-row{margin-top:8px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.alias-row input{
+  padding:7px 10px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;min-width:190px}
+.alias-row input:focus{outline:2px solid var(--accent);outline-offset:1px}
+.alias-err{font-size:12px;color:#e5484d}
 .pick{display:flex;flex-direction:column;gap:7px;margin:2px 0 6px}
 .pick-q{font-size:.84rem;font-weight:600;color:var(--text-2)}
 .pick.sub{margin-top:4px}
@@ -919,10 +929,25 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     </div>
     <p class="hint">Run it <strong>in the folder you'll open your agent in</strong>, then
        restart your session.</p>
+    <!-- Same alias affordance as the buddy's join page: someone running more than one
+         install (claude-personal / claude-work) was editing every pasted command by hand.
+         Free text, not a picker — an alias cannot be enumerated. -->
+    <div class="alias">
+      <label class="alias-toggle">
+        <input type="checkbox" data-slot="alias-on">
+        <span>My Claude command isn't <code>claude</code></span>
+      </label>
+      <div class="alias-row" data-slot="alias-row" hidden>
+        <input type="text" data-slot="alias-name" spellcheck="false" autocapitalize="off"
+               autocomplete="off" placeholder="claude-work" aria-label="Your Claude command">
+        <span class="alias-err" data-slot="alias-err" hidden></span>
+      </div>
+    </div>
     <div data-slot="autocfg"></div>
     <div class="verify">
       <span class="vh">How to know it worked</span>
-      <code>claude mcp list</code> — run it from that same folder; it should list
+      <!-- Follows the alias too — see the note in join.html. -->
+      <code data-slot="verify-cmd">claude mcp list</code> — run it from that same folder; it should list
       <strong>sys-buddy</strong>. Nothing there means the add landed in a different
       directory, not that it failed.
     </div>
@@ -1230,6 +1255,39 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     // Older bridge with no client list: show the one path we can still fill from the
     // legacy field, rather than four empty boxes.
     if (!haveClients) put('claude-cli', seat.config_command || '');
+
+    /* ---------- the Claude binary alias ----------
+       Identical rule to join.html: the broker generates every connect line with the
+       binary as its FIRST token (onboarding.DEFAULT_CLI, pinned by
+       test_every_connect_line_starts_with_the_binary), so one line-anchored swap covers
+       both lines and updates as the operator types. Anchored on purpose — a blind
+       replace of "claude" would also rewrite an occurrence inside the bearer token.
+       The character set matches onboarding.assert_cli_binary, because this string is
+       pasted into a shell. */
+    var CLI_RE = /^[A-Za-z0-9._+-]{1,64}$/;
+    var baseCliCmd = (slot('claude-cli') || {}).textContent || '';
+    var aOn = slot('alias-on'), aRow = slot('alias-row'),
+        aName = slot('alias-name'), aErr = slot('alias-err');
+    if (aOn && aRow && aName && aErr) {
+      var paintCli = function(){
+        var v = aOn.checked ? (aName.value || '').trim() : '';
+        var bad = !!v && !CLI_RE.test(v);
+        aErr.hidden = !bad;
+        if (bad) aErr.textContent = 'Letters, digits, dot, underscore, + or - only.';
+        // Invalid leaves the default on screen: a broken command someone pastes is
+        // worse than one that simply was not personalised.
+        var use = (v && !bad) ? v : 'claude';
+        put('claude-cli', use === 'claude' ? baseCliCmd
+                                           : baseCliCmd.replace(/^claude\b/gm, use));
+        put('verify-cmd', use + ' mcp list');
+      };
+      aOn.onchange = function(){
+        aRow.hidden = !aOn.checked;
+        if (aOn.checked) aName.focus();
+        paintCli();
+      };
+      aName.oninput = paintCli;
+    }
 
     // Every copy button names the <pre> it copies, so the two can never drift apart.
     Array.prototype.forEach.call(container.querySelectorAll('[data-copy-slot]'), function(btn){
