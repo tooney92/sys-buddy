@@ -44,4 +44,11 @@ enterprise/
 ideas/
 demo/
 # Machine-local: a personal permission allowlist plus agent worktrees and scratch.
-.claude/
+# NOTE the `/*`: git does not descend into an ignored DIRECTORY, so `.claude/` followed
+# by a negation would silently do nothing. Ignoring the CONTENTS lets the negation below
+# actually apply.
+.claude/*
+# ...except skills. A skill is a procedure the whole team (and every agent) should get —
+# same reason docs/release-playbook.md is tracked. Machine-local would mean the person
+# who wrote it is the only one who benefits.
+!.claude/skills/
