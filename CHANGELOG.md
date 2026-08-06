@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.6.0](https://github.com/tooney92/sys-buddy/compare/v2.5.1...v2.6.0) (2026-08-06)
+
+
+### Added
+
+* a debug task carries issues, and both parties agree each fix ([#65](https://github.com/tooney92/sys-buddy/issues/65)) ([418ea9b](https://github.com/tooney92/sys-buddy/commit/418ea9b6a03adf2ff3b0a55d40753d54a14d87e4))
+
 ## [2.5.1](https://github.com/tooney92/sys-buddy/compare/v2.5.0...v2.5.1) (2026-08-05)
 
 
