@@ -97,11 +97,34 @@ def test_every_tool_named_in_the_table_is_a_real_broker_tool(tmp_path):
 
 
 def test_the_contract_vocabulary_is_absent_from_a_debug_task():
-    """A debug task has no contract and never carries todos, so a code that needs either
-    must not be offered on one."""
+    """A debug task has no CONTRACT, so a code that needs one must not be offered on it.
+
+    It does carry numbered work — its rows are ISSUES, a todo with the contract half
+    removed — so being todo-scoped is no longer disqualifying there. What still is: every
+    command in the contract half of the vocabulary. `#N` on a debug task always names an
+    issue, never a contract.
+    """
     debug = {s["id"] for s in shortcodes() if "debug" in s["modes"]}
     assert not debug & {"pc", "gc", "sign", "ship", "decline", "reopen"}
-    assert not [s for s in shortcodes() if "debug" in s["modes"] and s["scope"] != "none"]
+    # The scoped debug codes are exactly the issue ones, and nothing sneaks in beside them.
+    scoped = {s["id"] for s in shortcodes() if "debug" in s["modes"] and s["scope"] != "none"}
+    assert scoped == {"yes", "no", "fixed", "stuck"}
+
+
+def test_the_debug_vocabulary_carries_the_issue_flow():
+    """The four moves of an issue must all be offered on a debug task, or the cheatsheet
+    teaches a session whose work a human cannot act on: raise it, agree it, say it is
+    fixed, and (for a session with none) close the whole thing."""
+    by_id = {s["id"]: s for s in shortcodes()}
+    for code_id in ("issue", "yes", "fixed", "resolved"):
+        assert "debug" in by_id[code_id]["modes"], code_id
+    assert by_id["issue"]["tools"] == ["propose_issue"]
+    # `fixed` is per-ISSUE and says so — "it's fixed" is meaningless with three open.
+    assert by_id["fixed"]["code"] == "fixed #N"
+    assert by_id["fixed"]["scope"] == "required"
+    # …and the bare `resolved` is not offered as an issue-scoped command, because the
+    # broker refuses it once a session carries issues.
+    assert by_id["resolved"]["scope"] == "none"
 
 
 # --------------------------------------------------------------------------- #
@@ -233,12 +256,19 @@ def test_every_shorthand_in_the_table_is_taught_to_the_agent():
 
 def test_every_todo_scoped_command_is_taught_with_exactly_the_tables_notation():
     """Verbatim, not paraphrased: these strings are typed by a human and parsed by an
-    agent, so `sign #N` and `sign [#N]` are different instructions."""
-    prompt = _prompt("contract")
+    agent, so `sign #N` and `sign [#N]` are different instructions.
+
+    Per MODE, because the vocabularies are not the same: `fixed #N` exists only on a debug
+    task and `pc #N` only on a contract one, so checking every row against one briefing
+    would demand each teach the other's commands.
+    """
     for s in shortcodes():
         if s["scope"] == "none" or s.get("gen"):
             continue
-        assert f"`{s['code']}`" in prompt, f"the briefing spells {s['id']} differently"
+        for mode in s["modes"]:
+            assert f"`{s['code']}`" in _prompt(mode), (
+                f"the {mode} briefing spells {s['id']} differently"
+            )
 
 
 def test_the_briefing_never_teaches_an_optional_id_for_a_required_command():

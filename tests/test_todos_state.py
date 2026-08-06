@@ -686,11 +686,16 @@ def test_a_task_with_no_todos_has_nothing_to_contract(conn):
         state.lock_contract(conn, ag["backend"], 1)
 
 
-def test_a_debug_task_is_behaviourally_unchanged(conn):
+def test_a_debug_task_with_no_issues_is_behaviourally_unchanged(conn):
+    """A debug session that has raised NO issues behaves exactly as it did before issues
+    existed — bare `resolved`, terminal. There are live sessions running that way and the
+    feature is opt-in per task; the opt-in is raising the first issue."""
     ag = _agents(conn, roles=("backend", "frontend"), mode="debug")
-    with pytest.raises(ValueError, match="debug tasks don't carry todos"):
+    # `propose_todo` is the wrong NAME here now, not a refused capability: a debug task's
+    # work is issues, and the refusal redirects rather than saying "not supported".
+    with pytest.raises(ValueError, match="propose_issue"):
         todos.propose_todo(conn, ag["backend"], "api123", "scope", ["backend", "frontend"])
-    with pytest.raises(ValueError, match="debug tasks don't carry todos"):
+    with pytest.raises(ValueError, match="takes no number"):
         state.report_status(conn, ag["backend"], "resolved", "fixed", 1)
     with pytest.raises(ValueError, match="this is a debug task"):
         state.report_status(conn, ag["backend"], "ready", "live")

@@ -31,7 +31,11 @@ from .seats import OWNER_ROLE
 def _status_question(role: str, mode: str) -> dict:
     """The role/mode-aware status question (id="status")."""
     if mode == "debug":
-        return {"id": "status", "q": "How do you tell the broker the issue is fixed?"}
+        return {
+            "id": "status",
+            "q": "How do you tell the broker an issue is fixed, and who else has to say so "
+                 "before it counts as resolved?",
+        }
     # Model B: the producer is whoever proposes the contract, so we don't yet know
     # which half this agent will play — ask about the whole progress vocabulary.
     return {
@@ -366,8 +370,17 @@ def _grade_receive(answer: str, role: str, task_id: str, mode: str) -> tuple[boo
 
 def _grade_status(answer: str, role: str, task_id: str, mode: str) -> tuple[bool, str]:
     if mode == "debug":
-        ok = _contains(answer, "report_status") and _contains(answer, "resolved")
-        return ok, 'On a debug task, call report_status("resolved") when the issue is fixed.'
+        # EITHER word passes. A debug session's work is issues — `fixed`, per issue, from
+        # every party — but a session that carries none still closes with a bare
+        # `resolved`, so an agent that names that one is not wrong either. Failing it for
+        # picking the older word would be a trap, not a check.
+        ok = _contains(answer, "report_status") and _contains_any(answer, ("fixed", "resolved"))
+        return ok, (
+            'On a debug task the work is ISSUES: report_status("fixed", detail, todo=N) '
+            'when your side of issue N is fixed — EVERY party reports it, and the issue '
+            'resolves on the last one. A session carrying no issues at all closes with a '
+            'bare report_status("resolved").'
+        )
     # Model B: producer or consumer isn't known yet — accept the generalized vocabulary
     # (ready/checked/blocked/verified), and the legacy aliases (deployed/test_*) too.
     ok = _contains(answer, "report_status") and _contains_any(

@@ -132,7 +132,7 @@ var TODO_MARCH={open:0,contract_proposed:0,contract_locked:1,backend_live:2,test
 /* The AGREEMENT stage (todo.status) — NOT the march above. `pending` borrows the amber
    `testing` palette on purpose: it is the one row on this screen asking a human for
    something, so it reads as a request, and it is the row that carries the ⚠. */
-var TODO_STATUS={pending:'testing',accepted:'proposed',contracted:'locked',verified:'verified',dropped:'open'};
+var TODO_STATUS={pending:'testing',accepted:'proposed',contracted:'locked',verified:'verified',resolved:'verified',dropped:'open'};
 var MAX_STRIKES=3;
 var MONO="'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace";
 
@@ -165,16 +165,23 @@ var MONO="'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace";
             structure. "Todo Contract" is one heading naming one concept — there is no
             other kind of contract to distinguish it from, and the same words head the
             long-form tool list (MCP_TOOLS) so the two panels read as one vocabulary.
+     debugGroup  optional: the heading this row sits under on a DEBUG task, where the
+            rows are ISSUES rather than todos. Only for the rows both modes share
+            (`yes #N`, `no #N`) — one command, one notation, two places a reader looks.
      modes  the task modes that show it: 'contract', 'debug', or both. A debug task has
-            no contract and never carries todos.
+            no CONTRACT — but it does carry numbered work: its rows are ISSUES, a todo
+            with the contract half removed, so the `#N` vocabulary applies there too.
      scope  how the todo number attaches — the notation rule, as DATA:
               'required' — `#N` is mandatory. Every task is delivered by one or more
-                           todos and there is no task-wide form, so this is the norm:
-                           a single-deliverable task simply has one todo.
+                           todos (issues, on a debug task) and there is no task-wide
+                           form, so this is the norm: a single-deliverable task simply
+                           has one todo.
               'optional' — `stuck` ONLY, the single exception in the whole vocabulary:
                            `stuck #N` flags one deliverable and the others keep
                            marching, a bare `stuck` escalates the whole task.
-              'none'     — not todo-scoped at all.
+              'none'     — not todo-scoped at all. `resolved` is one: it is about the
+                           whole debug session, and it is refused once that session
+                           carries issues.
    `stuck` also carries `bare` and `scoped` spellings, because prose has to name both
    halves of its exception: SH('stuck','bare') / SH('stuck','scoped').
    The role-tag row carries gen:'roleTags' — its code and description are BUILT from
@@ -198,15 +205,17 @@ var SHORTCODES=[
   {"id":"reopen","code":"reopen <why> #N","tools":["reopen_negotiations"],"group":"Todo Contract","modes":["contract"],"scope":"required","desc":"reopen planning to re-sign a new version"},
   {"id":"todos","code":"todos","tools":["get_todos"],"group":"Todos","modes":["contract"],"scope":"none","desc":"list the deliverables (todos) on this task"},
   {"id":"todo","code":"todo <title>","tools":["propose_todo"],"group":"Todos","modes":["contract"],"scope":"none","desc":"propose a new todo"},
-  {"id":"yes","code":"yes #N","tools":["accept_todo"],"group":"Todos","modes":["contract"],"scope":"required","desc":"accept todo N"},
-  {"id":"no","code":"no #N <why>","tools":["decline_todo"],"group":"Todos","modes":["contract"],"scope":"required","desc":"decline todo N"},
+  {"id":"issues","code":"issues","tools":["get_todos"],"group":"Issues","modes":["debug"],"scope":"none","desc":"list the issues on this debug session"},
+  {"id":"issue","code":"issue <title>","tools":["propose_issue"],"group":"Issues","modes":["debug"],"scope":"none","desc":"raise a new issue — raising it IS your own acceptance"},
+  {"id":"yes","code":"yes #N","tools":["accept_todo"],"group":"Todos","debugGroup":"Issues","modes":["contract","debug"],"scope":"required","desc":"accept todo N — on a debug session, agree issue N is real"},
+  {"id":"no","code":"no #N <why>","tools":["decline_todo"],"group":"Todos","debugGroup":"Issues","modes":["contract","debug"],"scope":"required","desc":"decline todo N — on a debug session, “that is not a bug”"},
   {"id":"ready","code":"ready #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"required","desc":"producer: my side is ready to build on"},
   {"id":"ok","code":"ok #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"required","desc":"consumer: it works against the producer’s side"},
   {"id":"block","code":"block #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"required","desc":"consumer: it doesn’t work (a strike — 3 → stuck)"},
   {"id":"done","code":"done #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"required","desc":"todo N is verified end to end"},
-  {"id":"stuck","code":"stuck [#N]","bare":"stuck","scoped":"stuck #N","tools":["report_status"],"group":"Status","modes":["contract"],"scope":"optional","desc":"give up; ping the humans — the one command #N is optional on: with #N just that todo, bare escalates the whole task"},
-  {"id":"resolved","code":"resolved","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"none","desc":"the issue is fixed (debug tasks)"},
-  {"id":"stuck-debug","code":"stuck","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"none","desc":"give up; ping the humans"},
+  {"id":"fixed","code":"fixed #N","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"required","desc":"YOUR side of issue N is fixed — EVERY party reports it, and the last one resolves the issue"},
+  {"id":"resolved","code":"resolved","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"none","desc":"closes a debug session that carries NO issues; once it has any, name one with fixed #N"},
+  {"id":"stuck","code":"stuck [#N]","bare":"stuck","scoped":"stuck #N","tools":["report_status"],"group":"Status","modes":["contract","debug"],"scope":"optional","desc":"give up; ping the humans — the one command #N is optional on: with #N just that todo (or issue), bare escalates the whole task"},
   {"id":"files","code":"files","tools":["list_files"],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"what has been shared on the task"},
   {"id":"upload","code":"upload <path>","tools":[],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"share a file — the agent POSTs the raw bytes to /files/&lt;task-id&gt;, so nothing goes through its context"},
   {"id":"getfile","code":"getfile <id>","tools":[],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"fetch one back the same cheap way"},
@@ -237,13 +246,24 @@ function typeChip(type,pass){
        one bubble in the thread that closes the whole task rendered as an anonymous grey
        "message" — `resolved` has done that since debug tasks shipped. */
     confirmed:['confirmed','verified'],resolved:['resolved','verified'],
+    /* ISSUES (debug tasks): one party's "my side is fixed". It is NOT `test_result` —
+       there is no test and no strike here — and it must not fall through to the grey
+       default, because it is the bubble the whole issue flow turns on. The issue's
+       CLOSING bubble is `resolved` above, so the two endings share one palette. */
+    fixed:['fixed','proposed'],
     /* the todo conversation (v2). Additive: no pre-todo task ever carries these types. */
     todo_proposal:['todo proposed','proposed'],todo_accept:['todo accepted','verified'],
     todo_decline:['todo declined','stuck'],todo_drop:['todo drop','open'],
     todo_dropped:['todo dropped','open']};
+  /* The todo chips read "issue …" on a debug task, where these rows ARE issues. Read off
+     the payload already on screen (`state.detail.mode`), the same way todoChipHTML reads
+     it — one message type, one palette, the word the reader's task actually uses. */
+  var ISSUE_LABEL={todo_proposal:'issue raised',todo_accept:'issue accepted',
+    todo_decline:'issue declined',todo_drop:'issue drop',todo_dropped:'issue dropped'};
   var label,key;
   if(type==='test_result'){ label=pass?'test · pass':'test · fail'; key=pass?'verified':'stuck'; }
   else { var e=map[type]||['message','open']; label=e[0]; key=e[1]; }
+  if(isDebugTask(state.detail) && ISSUE_LABEL[type]) label=ISSUE_LABEL[type];
   return {label:label, bg:'var(--st-'+key+'-bg)', fg:'var(--st-'+key+'-fg)'};
 }
 /* `todo` is ONE event kind carrying the specific action inside (api._event), so this
@@ -953,7 +973,7 @@ function listHTML(){
     var strike = t.strikes>0 ? '<span style="display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;background:var(--st-stuck-bg);color:var(--st-stuck-fg)"><span style="width:5px;height:5px;border-radius:50%;background:var(--st-stuck-dot)"></span>strike '+t.strikes+' of '+MAX_STRIKES+'</span>' : '';
     /* the rollup, so a host triages the list without opening anything. `todo_rollup` is
        absent on a row with no live todos, so those rows are exactly as they were. */
-    var roll = t.todo_rollup ? rollupBadgeHTML(t.todo_rollup) : '';
+    var roll = t.todo_rollup ? rollupBadgeHTML(t.todo_rollup, isDebugTask(t)?'fixed':'verified') : '';
     return '<div data-open="'+esc(t.id)+'" class="sb-row" style="display:flex;align-items:center;gap:16px;padding:15px 18px;background:var(--surface);border:1px solid var(--border);border-radius:14px;cursor:pointer;transition:border-color .15s,box-shadow .15s">'+
       '<span style="width:10px;height:10px;border-radius:50%;background:'+c.dot+';flex:none"></span>'+
       '<div style="flex:1;min-width:0">'+
@@ -1368,6 +1388,14 @@ function contractHTML(d){
    todo keys for a pre-todo task, so none of it runs and that task's right column is
    still contractHTML(d), untouched. */
 function hasTodos(d){ return !!(d && d.has_todos && (d.todos||[]).length); }
+/* ---------- ISSUES: the same rows, one vocabulary over ----------------------
+   On a DEBUG task the rows in this panel are ISSUES — a todo with the contract half
+   removed. Nothing below is a second renderer: the list, the modal, the status chip and
+   the Next line are the same functions, asking this one question where the two genuinely
+   differ (the word, the count, and the fact that there is no contract column to draw).
+   Read off `d.mode`, which is the broker's own `tasks.mode` — never a second flag. */
+function isDebugTask(d){ return !!(d && d.mode==='debug'); }
+function todoNoun(d){ return isDebugTask(d) ? 'issue' : 'todo'; }
 function todoById(d,id){
   var ts=(d&&d.todos)||[];
   for(var i=0;i<ts.length;i++){ if(ts[i].id===id) return ts[i]; }
@@ -1451,8 +1479,12 @@ function summaryHTML(t){
   return '<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-3);font-style:italic">no summary — ask them for one sentence on what this is</p>';
 }
 
-function todoStatusChip(t){
-  if(!t.stuck && !TODO_STATUS_SHOWN[t.status]) return '';
+/* `always` is for an ISSUE. The chip is normally suppressed for anything the stepper
+   already says — but an issue has no stepper to say it (there is no contract chain to
+   march), so on a debug task the chip is the ONLY thing carrying pending → accepted →
+   resolved and it is drawn for every status. */
+function todoStatusChip(t, always){
+  if(!always && !t.stuck && !TODO_STATUS_SHOWN[t.status]) return '';
   var k = t.stuck ? 'stuck' : (TODO_STATUS[t.status]||'open');
   var label = t.stuck ? 'stuck' : t.status;
   return '<span style="display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:600;background:var(--st-'+k+'-bg);color:var(--st-'+k+'-fg);white-space:nowrap">'+
@@ -1463,13 +1495,18 @@ function todoStatusChip(t){
    host reads one rollup in both places and can triage without opening anything.
    `total` counts LIVE todos: a dropped deliverable is not work any more, so it is
    reported separately rather than padding the denominator. */
-function rollupBadgeHTML(r){
+/* `word` is the one thing that differs on a debug task: the SAME count of finished rows,
+   printed as "2/3 fixed" because that is what the broker's own rollup calls it there
+   (todos.rollup ships `verified` and `fixed` as one number under two names, so neither
+   surface has to translate). */
+function rollupBadgeHTML(r, word){
   if(!r) return '';
   var warn = r.pending ? '<span title="'+r.pending+' awaiting acceptance" style="color:var(--st-testing-fg);font-weight:700">⚠'+r.pending+'</span>' : '';
   var stuck = r.stuck ? '<span title="'+r.stuck+' stuck" style="color:var(--st-stuck-fg);font-weight:700">!'+r.stuck+'</span>' : '';
   var k = r.complete ? 'verified' : 'open';
+  var done = (word==='fixed' ? r.fixed : r.verified) || 0;
   return '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-family:'+MONO+';font-size:11px;font-weight:600;background:var(--st-'+k+'-bg);color:var(--st-'+k+'-fg);white-space:nowrap">'+
-    (r.verified||0)+'/'+(r.total||0)+' verified'+warn+stuck+'</span>';
+    done+'/'+(r.total||0)+' '+esc(word||'verified')+warn+stuck+'</span>';
 }
 
 /* The tail under the `todos` stepper node: the fan-out summarised as a bar + counts,
@@ -1504,6 +1541,7 @@ function todoChipHTML(id){
    pending-first / dropped-last). A pending todo is the only thing on this screen blocking
    a human — everything else is progress, that one is a request. */
 function todoListHTML(d){
+  var debug = isDebugTask(d);
   var rows=(d.todos||[]).map(function(t){
     var pending = t.status==='pending', dropped = t.status==='dropped';
     var parties=(t.parties||[]).map(function(p){
@@ -1519,10 +1557,21 @@ function todoListHTML(d){
       var who=(row&&row.name)?row.name:('@'+seatAddress(p));
       return never.indexOf(p)>=0 ? ('@'+seatAddress(p)+' — never joined') : who;
     }).join(', ');
+    /* An ISSUE's one useful line, once it is accepted, is WHO STILL HAS TO SAY IT IS
+       FIXED — the state the whole feature turns on, and the one a summary cannot carry.
+       `awaiting_fix` comes off the broker (todos.to_dict, debug tasks only). */
+    var fixNote = '';
+    if(debug && !dropped && !pending){
+      var waitFix=(t.awaiting_fix||[]), didFix=(t.fixed_by||[]);
+      var name=function(p){ var row=rosterRow(p); return (row&&row.name)?row.name:('@'+seatAddress(p)); };
+      if(t.status==='resolved') fixNote='resolved — every party reported it fixed';
+      else if(waitFix.length && didFix.length) fixNote=didFix.map(name).join(', ')+' says fixed — awaiting '+waitFix.map(name).join(', ');
+      else if(waitFix.length) fixNote='nobody has reported it fixed yet — awaiting '+waitFix.map(name).join(', ');
+    }
     var note = dropped ? ('dropped'+(t.drop_reason?' — '+t.drop_reason:''))
              : t.stuck ? (t.stuck_reason||'stuck — humans notified')
              : pending ? ('awaiting '+(awaitingLabel||'acceptance'))
-             : (t.summary || t.scope);
+             : (fixNote || t.summary || t.scope);
     var warn = pending ? '<span title="awaiting acceptance — this one is asking you for something" style="color:var(--st-testing-fg);font-size:13px;line-height:1;flex:none;padding-top:2px">⚠</span>' : '';
     return '<button data-todo="'+t.id+'" style="width:100%;display:flex;align-items:flex-start;gap:9px;padding:10px 13px;background:transparent;border:none;border-top:1px solid var(--border);cursor:pointer;text-align:left;font-family:inherit;opacity:'+(dropped?'.55':'1')+'">'+
       warn+
@@ -1530,7 +1579,9 @@ function todoListHTML(d){
         '<span style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">'+
           '<span style="font-size:12.5px;font-weight:600;color:var(--text)'+(dropped?';text-decoration:line-through':'')+'">'+esc(t.title)+'</span>'+
           '<span style="font-family:'+MONO+';font-size:10px;color:var(--text-3)">#'+esc(todoNo(t))+'</span>'+
-          todoStatusChip(t)+
+          /* On a debug task the chip is always drawn: an issue has no stepper anywhere on
+             this screen, so nothing else says pending / accepted / resolved. */
+          todoStatusChip(t, debug)+
         '</span>'+
         '<span style="display:block;font-size:11.5px;color:var(--text-2);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(note)+'</span>'+
       '</span>'+
@@ -1539,7 +1590,8 @@ function todoListHTML(d){
   }).join('');
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
     '<div style="padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">'+
-      '<span style="font-weight:600;font-size:14px;color:var(--text)">Todos</span>'+rollupBadgeHTML(d.todo_rollup)+'</div>'+
+      '<span style="font-weight:600;font-size:14px;color:var(--text)">'+(debug?'Issues':'Todos')+'</span>'+
+      rollupBadgeHTML(d.todo_rollup, debug?'fixed':'verified')+'</div>'+
     rows+'</div>';
 }
 
@@ -1656,8 +1708,12 @@ function dropTodoHTML(d,t){
   /* This panel says what DROPPING does. It does NOT re-explain why the todo is stuck —
      the NEXT card directly above already names who is blocking and why, and repeating it
      made a two-line situation read as a wall of text. One fact, one place. */
-  var why = 'Drops #'+todoNo(t)+' for everyone. Its scope, its contract and the whole '
-          + 'thread stay in the event log — dropping ends it, it does not erase it.';
+  var why = isDebugTask(d)
+    ? 'Drops #'+todoNo(t)+' for everyone — "this is not something we are fixing". Its '
+      + 'detail and the whole thread stay in the event log; dropping ends it, it does not '
+      + 'erase it, and it stops counting toward the session.'
+    : 'Drops #'+todoNo(t)+' for everyone. Its scope, its contract and the whole '
+      + 'thread stay in the event log — dropping ends it, it does not erase it.';
   /* A line the human TYPES, so it carries the per-task number — the CLI takes the same
      `#N` the agents do, not the global row id. */
   var cmd = 'sys-buddy todo drop '+d.id+' '+todoNo(t)+' --reason "…"';
@@ -1665,7 +1721,7 @@ function dropTodoHTML(d,t){
      is dropped into rather than with a card that no longer exists. */
   return '<div style="margin:14px 0 0;padding:11px 13px;border:1px dashed var(--border-strong);border-radius:11px">'+
     '<div style="display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;color:var(--text-2)">'+
-      '<span style="display:flex;color:var(--st-testing-fg)">'+IC.warn+'</span>Drop todo (host)</div>'+
+      '<span style="display:flex;color:var(--st-testing-fg)">'+IC.warn+'</span>Drop '+esc(todoNoun(d))+' (host)</div>'+
     '<p style="margin:6px 0 8px;font-size:11.5px;color:var(--text-2);line-height:1.5">'+why+
       ' Run it from your own terminal — this dashboard only ever reads.</p>'+
     '<div style="font-family:'+MONO+';font-size:11px;color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;overflow-x:auto;white-space:pre">'+esc(cmd)+'</div></div>';
@@ -1700,6 +1756,39 @@ function todoPartyPillsHTML(t){
       '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(who)+'</span>'+
       '<span style="flex:none">'+mark+'</span></span>';
   }).join('');
+}
+
+/* ---------- who has said "fixed" ----------
+   The debug counterpart of the contract card's signature row, and it belongs in the same
+   place for the same reason: an issue resolves only when EVERY party has reported it
+   fixed, so "who still has to" is the one fact that says what this row is waiting for.
+
+   Built from `fixed_by` / `awaiting_fix` (broker-side, todos.to_dict on a debug task) and
+   deliberately shaped like `todoPartyPillsHTML` — same pill, same ✓ / ○ marks, so a
+   reader who has learnt the acceptance row reads this one without being taught twice. */
+function todoFixPillsHTML(t){
+  var fixed=(t.fixed_by||[]), waiting=(t.awaiting_fix||[]);
+  var parties=(t.parties||[]);
+  if(!parties.length) return '';
+  var pills=parties.map(function(p){
+    var a=avSeat(p), who=seatIdentity(p), yes=fixed.indexOf(p)>=0;
+    var mark = yes ? '<span style="color:var(--st-verified-fg);font-weight:700">✓</span>'
+                   : '<span style="color:var(--text-3);font-weight:700">○</span>';
+    var tip = seatIdentity(p, true)+' — '+(yes?'reported it fixed':'has not reported it fixed yet');
+    return '<span title="'+esc(tip)+'" style="display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:2px 9px 2px 2px;border-radius:999px;background:var(--surface);border:1px solid var(--border);font-size:10.5px;font-weight:600;color:var(--text-2)">'+
+      '<span style="width:16px;height:16px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;display:inline-flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+
+      '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(who)+'</span>'+
+      '<span style="flex:none">'+mark+'</span></span>';
+  }).join('');
+  /* The count says the rule out loud. "1 of 2" is what makes a half-fixed issue read as
+     WAITING rather than as done — the partial state is normal, and a screen that hid it
+     would put the reader back where a single-party `resolved` left them. */
+  var label = waiting.length
+    ? fixed.length+' of '+parties.length+' said fixed'
+    : 'every party said fixed';
+  return '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0">'+
+    '<span style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);white-space:nowrap">'+esc(label)+'</span>'+
+    '<div style="display:flex;gap:5px;flex-wrap:wrap;min-width:0">'+pills+'</div></div>';
 }
 
 function todoPanelHTML(d){
@@ -1749,15 +1838,20 @@ function todoModalHTML(d){
   /* SCOPE is open, not behind a disclosure toggle. In the column it had to be collapsed
      because it shared that space with the contract; here it has a column of its own, and
      the whole point of the left side is that the ask is readable without a click. */
+  /* The two words that change on a debug task. An issue is not an "ask" and its prose is
+     not a "scope" — it is what is wrong and how to see it — and the labels are the cheapest
+     honest place to say so. Same renderers underneath. */
+  var askLabel = isDebugTask(d) ? 'The problem' : 'The ask';
+  var proseLabel = isDebugTask(d) ? 'Detail' : 'Scope';
   var left='<div style="min-width:0">'+
-      '<div style="'+sectionLabel+'">The ask</div>'+
+      '<div style="'+sectionLabel+'">'+askLabel+'</div>'+
       /* No `|| 'no summary'` fallback here: summaryHTML already says so itself, in one
          voice, and a second wording of the same sentence is how they drift apart. */
       summaryHTML(t)+
-      '<div style="margin-top:18px"><div style="'+sectionLabel+'">Scope</div>'+
+      '<div style="margin-top:18px"><div style="'+sectionLabel+'">'+proseLabel+'</div>'+
         '<div style="font-size:13px;color:var(--text-2);line-height:1.6">'+scopeHTML(t.scope)+'</div></div>'+
       '<div style="margin-top:18px"><div style="'+sectionLabel+'">Parties</div>'+
-        '<div style="font-size:11.5px;color:var(--text-3);margin-bottom:7px">proposed by '+esc(seatIdentity(t.proposed_by||'', true))+' · todo v'+esc(t.version)+'</div>'+
+        '<div style="font-size:11.5px;color:var(--text-3);margin-bottom:7px">'+(isDebugTask(d)?'raised by ':'proposed by ')+esc(seatIdentity(t.proposed_by||'', true))+' · '+esc(todoNoun(d))+' v'+esc(t.version)+'</div>'+
         '<div style="display:flex;gap:5px;flex-wrap:wrap">'+parties+'</div>'+
         declines+stuckLine+dropLine+'</div>'+
       /* NEXT is last on this side deliberately: it is the only actionable thing on the
@@ -1766,19 +1860,25 @@ function todoModalHTML(d){
       dropTodoHTML(d,t)+
     '</div>';
 
-  var right='<div style="min-width:0">'+
+  /* AN ISSUE HAS NO CONTRACT COLUMN AT ALL — not an empty one. There is no HOW to agree
+     on a bug, so the right-hand side would be a card explaining the absence of a thing
+     that cannot exist here, next to prose that already says so. One column, and the
+     status band carries who has said `fixed` instead of who signed. */
+  var debug = isDebugTask(d);
+  var right = debug ? '' : '<div style="min-width:0">'+
       contractHTML({id:d.id+'#'+t.id, contract:t.contract})+
       reviewAsideHTML(d,t)+
     '</div>';
 
   /* One column under `narrow` — two 46%-wide columns would make both unreadable, and the
-     order (ask, then contract) is the order they are meant to be read in anyway. */
-  var cols = state.narrow
-    ? '<div style="display:flex;flex-direction:column;gap:22px">'+left+right+'</div>'
+     order (ask, then contract) is the order they are meant to be read in anyway. On a
+     debug task it is one column for good: there is no second side. */
+  var cols = (state.narrow || debug)
+    ? '<div style="display:flex;flex-direction:column;gap:22px;max-width:'+(debug?'720px':'none')+'">'+left+right+'</div>'
     : '<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:26px;align-items:start">'+left+right+'</div>';
 
   return '<div data-tm-backdrop="1" style="position:fixed;inset:0;z-index:9997;background:rgba(20,15,10,.74);display:flex;align-items:flex-start;justify-content:center;padding:5vh 22px 22px">'+
-    '<div role="dialog" aria-modal="true" aria-label="'+esc('Todo #'+todoNo(t)+' — '+(t.title||''))+'" style="background:var(--bg);border:1px solid var(--border);border-radius:18px;box-shadow:0 28px 70px -20px rgba(0,0,0,.7);width:min(1080px,96vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden">'+
+    '<div role="dialog" aria-modal="true" aria-label="'+esc((isDebugTask(d)?'Issue #':'Todo #')+todoNo(t)+' — '+(t.title||''))+'" style="background:var(--bg);border:1px solid var(--border);border-radius:18px;box-shadow:0 28px 70px -20px rgba(0,0,0,.7);width:min(1080px,96vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden">'+
       /* header */
       '<div style="padding:15px 18px;display:flex;align-items:flex-start;gap:12px;border-bottom:1px solid var(--border);flex:none">'+
         '<div style="flex:1;min-width:0">'+
@@ -1791,8 +1891,14 @@ function todoModalHTML(d){
       /* STATUS BAND — spans both columns, because the two fields are a fact about the
          todo and not a property of either side. */
       '<div style="padding:12px 18px;border-bottom:1px solid var(--border);background:var(--surface-2);flex:none;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
-        todoStatusChip(t)+
-        '<div style="flex:1;min-width:220px">'+todoMiniStepperHTML(t)+'</div>'+
+        /* An ISSUE always shows its chip (nothing else carries pending/accepted/resolved
+           here) and shows the FIX ROW where a todo shows its stepper — an issue never
+           marches through a contract, so the stepper would draw five nodes it can never
+           light. Same band, same place, the fact that actually applies. */
+        todoStatusChip(t, debug)+
+        (debug
+          ? '<div style="flex:1;min-width:220px">'+todoFixPillsHTML(t)+'</div>'
+          : '<div style="flex:1;min-width:220px">'+todoMiniStepperHTML(t)+'</div>')+
         strikeChip+
       '</div>'+
       /* the scrolling body — one scroller for the pair, so the two sides stay aligned
@@ -2199,13 +2305,21 @@ function eventLogHTML(d){
    are `notify`. Dropping it would make old rows unfilterable. */
   /* The engagement kinds are appended rather than woven in, so a peer task's filter
    row is unchanged in both content and order. */
-  var FILTERS=['all','transition','lock','deploy','test','notify','slack','token','todo','deliverable','verification','guidelines'];
+  var FILTERS=['all','transition','lock','deploy','test','notify','slack','token','deliverable','verification','guidelines'];
   /* `todo` joins the vocabulary only for a task that HAS todos (incl. one whose todos
      were all dropped — its log still carries them), so a pre-todo task's filter row is
-     exactly the row that shipped. */
+     exactly the row that shipped. It was ALSO sitting in the base list above, which meant
+     a task with todos rendered the button twice — the conditional is the one that matches
+     the stated intent, so the base copy is gone rather than this. */
   if(d && (d.todos||[]).length) FILTERS=FILTERS.concat(['todo']);
   var filter=state.eventFilter;
-  var fbtns=FILTERS.map(function(f){ return '<button data-filter="'+f+'" style="'+filterStyle(filter===f)+'">'+f+'</button>'; }).join('');
+  /* The VALUE stays `todo` because that is the stored event kind; only the label follows
+     the task's vocabulary. Without this a debug task offered a `todo` filter above rows
+     that all read "Issue #N" — the same leak `api._render_detail` fixed one level down. */
+  var fbtns=FILTERS.map(function(f){
+    var label = (f==='todo' && isDebugTask(d)) ? 'issue' : f;
+    return '<button data-filter="'+f+'" style="'+filterStyle(filter===f)+'">'+label+'</button>';
+  }).join('');
   /* NEWEST-FIRST, matching the activity strip. The API hands events back oldest-first
      (api.py `ORDER BY id`) and this box is 320px tall, so rendering them in that order put
      the newest event permanently below the fold on any task with more than a handful — and
@@ -2245,10 +2359,17 @@ function debugChip(stateName){
 function debugTaskHTML(d){
   var chip=debugChip(d.state);
   var avs=castChips(d,22,10);
+  /* A session that carries ISSUES says what it is waiting for; one that carries none is
+     the older single-problem shape and keeps the sentence it always had. */
+  var issues=hasTodos(d), roll=d.todo_rollup;
+  var blurb = issues
+    ? 'Debug session — every issue needs both parties to say it is fixed.'
+    : 'Debug session — collaborate, then mark resolved.';
   var statusHeader='<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:15px 20px;margin-bottom:16px">'+
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
     '<span style="display:inline-flex;align-items:center;gap:7px;padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:7px;height:7px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
-    '<span style="font-size:12.5px;color:var(--text-2)">Debug session — collaborate, then mark resolved.</span>'+
+    (roll?rollupBadgeHTML(roll,'fixed'):'')+
+    '<span style="font-size:12.5px;color:var(--text-2)">'+esc(blurb)+'</span>'+
     '<div style="flex:1"></div><div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;gap:4px">'+avs+'</div></div></div>';
   return '<div style="max-width:1200px;margin:0 auto;padding:20px 20px 80px">'+
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px">'+
@@ -2258,6 +2379,11 @@ function debugTaskHTML(d){
     '</div>'+
     statusHeader+
     rosterPanel(d)+
+    /* THE ISSUES PANEL — the same `todoListHTML` the contract view renders, titled
+       "Issues" and counting "n/m fixed" because that is what these rows are here. Absent
+       (not empty) on a session that has raised none, so a debug task that predates issues
+       looks exactly as it did. */
+    (issues?'<div style="margin-bottom:16px">'+todoListHTML(d)+'</div>':'')+
     activityStripHTML(d)+
     readinessFailPanel(d)+
     threadHTML(d)+
@@ -2265,9 +2391,10 @@ function debugTaskHTML(d){
     eventLogHTML(d)+
     readinessPreviewHTML(d)+
   /* Both overlays hang off the END, outside the page container, so nothing above can
-     clip them. The debug view gets the todo modal too: a debug task grows no todo list,
-     but its thread can still carry a ⟨#N⟩ chip, and a chip that opens nothing is worse
-     than no chip. Both render '' when closed. */
+     clip them. The debug view needs the todo modal for the same reason the contract view
+     does — its ISSUES open in it (with no contract column; see `todoModalHTML`) — and it
+     needed it even before issues existed, because the thread can carry a ⟨#N⟩ chip and a
+     chip that opens nothing is worse than no chip. Both render '' when closed. */
   '</div>'+todoModalHTML(d)+lightboxHTML();
 }
 
@@ -2307,7 +2434,13 @@ function shortcodesHTML(d){
         return '<b>' + t.toUpperCase() + '</b> ' + ROLE_TAGS[t];
       }).join(' · ');
     }
-    if(s.group!==group){ group=s.group; rows+=grp(s.group); }
+    /* A row shared by both modes can sit under a different HEADING in each: `yes #N`
+       accepts a todo on a contract task and an ISSUE on a debug one, and it is the same
+       command with the same notation and the same tool — one row, `debugGroup` naming
+       where a debug reader expects to find it. Two rows would be two literals to keep in
+       step, which is what this table exists to prevent. */
+    var g=(mode==='debug' && s.debugGroup) ? s.debugGroup : s.group;
+    if(g!==group){ group=g; rows+=grp(g); }
     rows+=cmd(c, desc);
   });
   return '<div style="display:flex;flex-direction:column;gap:2px;font-size:12.5px;color:var(--text-2);line-height:1.45">'+
@@ -2321,8 +2454,11 @@ function shortcodesHTML(d){
    shorthand. EVERY name here is registered in `src/sys_buddy/tools.py` — read it out of
    there before adding a row. The sole exception is the pair of `/files/...` HTTP routes,
    flagged where they sit. There is a design mockup floating around with issue-tracker
-   tools on it (report_issue / resolve_issue / …); they have no implementation and MUST
-   NOT be listed, or this panel documents a feature that does not ship. */
+   tools on it (report_issue / resolve_issue / …); those names have no implementation and
+   MUST NOT be listed, or this panel documents a feature that does not ship. What DOES
+   ship is `propose_issue` plus the todo tools it shares — an issue is a todo with the
+   contract half removed, so accept/decline/repropose/drop are the same tools, and the
+   Issues group below lists them under the names a debug session uses. */
 var MCP_TOOLS=[
   ['Messaging',[
     ['send_message','post to the task (or to one role via to_role)'],
@@ -2349,6 +2485,14 @@ var MCP_TOOLS=[
     ['repropose_todo','new version — resets everyone’s acceptance'],
     ['drop_todo','consent to dropping it (every party must)']
   ]],
+  ['Issues',[
+    ['get_todos','list the issues on this debug session'],
+    ['propose_issue','raise one — raising IS your own acceptance'],
+    ['accept_todo','agree an issue is real'],
+    ['decline_todo','“that is not a bug”, with a reason'],
+    ['repropose_todo','restate it — resets everyone’s acceptance and every `fixed`'],
+    ['drop_todo','consent to dropping it (every party must)']
+  ]],
   ['Status',[
     ['report_status','ready / checked / blocked / verified / stuck, on todo N']
   ]],
@@ -2373,16 +2517,19 @@ var MCP_TOOLS=[
     ['rotate_token','rotate this agent’s own credential']
   ]]
 ];
-/* A debug task has no contract and never carries todos, so those groups are dropped for
-   one — same mode-awareness the shorthand rows already have, applied to the long form. */
+/* A debug task has no contract, and its numbered work is ISSUES rather than todos — so
+   `Todo Contract` and `Todos` are dropped for one and `Issues` takes their place (and is
+   dropped everywhere else). Same mode-awareness the shorthand rows already have, applied
+   to the long form. */
 function mcpToolsHTML(d){
   var debug = !!(d && d.mode==='debug');
   var out=MCP_TOOLS.filter(function(sec){
-    /* `Status` stays: report_status is how a debug task reaches `resolved`. */
+    /* `Status` stays: report_status is how an issue reaches `fixed`. */
+    if(sec[0]==='Issues') return debug;
     return !(debug && (sec[0]==='Todo Contract' || sec[0]==='Todos'));
   }).map(function(sec){
     var rows=sec[1].map(function(t){
-      if(debug && t[0]==='report_status') t=[t[0],'resolved / stuck on a debug task'];
+      if(debug && t[0]==='report_status') t=[t[0],'fixed on issue N (every party), or stuck'];
       return '<div style="display:flex;gap:9px;align-items:baseline;padding:2px 0">'+
         '<span style="flex:none;font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);white-space:nowrap">'+esc(t[0])+'</span>'+
         '<span style="color:var(--text-3)">·</span>'+
@@ -2601,11 +2748,16 @@ function workflowsPanelBody(d){
     wfNote('🐱','Think of it as the medical. Nobody gets in the house until they have passed — not even the cat.');
 
   var debugBody=
-    wfP('Nothing to agree on, nothing to sign, and no stepper. The whole life is <strong>open → resolved</strong>.')+
-    wfP('Talk it through in the thread. Either party types '+shChip(SH('resolved'))+', or '+shChip(SH('stuck-debug'))+' to give up and ping the humans.')+
-    '';  /* The debug section ends on the two commands, deliberately. It had a closing
-            "Briefly, allies." gag; a joke earns its place when it teaches something, and
-            this one only padded the shortest section in the panel. */
+    wfP('Nothing to sign and no stepper — a debug session has no contract, because there is no <em>how</em> to agree on a bug.')+
+    wfP('It carries <strong>issues</strong>. An issue is to a debug session what a todo is to a contract task, minus the contract: '+
+      'anyone raises one with '+shChip(SH('issue'))+' — and raising it <strong>is</strong> their own acceptance — every other party agrees it is real with '+
+      shChip(SH('yes'))+' (or '+shChip(SH('no'))+' for “that is not a bug”), and then the work happens.')+
+    wfP('<strong>'+shChip(SH('fixed'))+' takes every party.</strong> Each one reports it independently, so while anyone has not, the issue is still open — '+
+      'that is a normal state, not a fault. The last one resolves it, and the session resolves by itself once every live issue has.')+
+    wfNote('ⓘ','A session with <strong>no issues at all</strong> is the older, simpler shape and '+shChip(SH('resolved'))+
+      ' still closes it. Once it has issues that bare form is refused — “resolved” says nothing until you name which one. '+
+      shChip(SH('stuck','bare'))+' gives up and pings the humans either way.')+
+    wfNote('ⓘ','Because the session state is <strong>counted, not declared</strong>, raising a new issue on a resolved session reopens it. Nobody has to unlock anything.');
 
   var link='<a href="'+DOC_TODO_FLOW+'" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:7px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;font-size:11.5px;font-weight:600">'+
     '<span style="display:flex;color:var(--text-3)">'+IC.doc+'</span>Full reference — <span style="font-family:'+MONO+';font-weight:500">docs/todo-flow.md</span>'+
@@ -2615,7 +2767,7 @@ function workflowsPanelBody(d){
     '<div style="margin:0 0 18px">'+
       wfRow('data-wf-sec','todos',wfIsOpen('todos',mode),'How todos work','Agreeing what to build, then building it',todosBody)+
       wfRow('data-wf-sec','pre',wfIsOpen('pre',mode),'Pre-flight','Why your agent’s tools are locked',preBody)+
-      wfRow('data-wf-sec','debug',wfIsOpen('debug',mode),'Debug sessions','Nothing to agree — just fix the thing',debugBody)+
+      wfRow('data-wf-sec','debug',wfIsOpen('debug',mode),'Debug sessions','Issues, and the fix both sides have to agree on',debugBody)+
       '<div style="border-top:1px solid var(--border)"></div>'+
     '</div>'+
     link;

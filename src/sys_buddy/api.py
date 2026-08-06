@@ -106,13 +106,18 @@ def _time_ago(ts: float | None, *, now: float | None = None) -> str:
     return f"{int(delta // 86400)}d ago"
 
 
-def _render_detail(kind: str, detail: dict) -> str:
+def _render_detail(kind: str, detail: dict, noun: str = "Todo") -> str:
     """Render a short human string for the event log from ``detail_json``.
 
     The state machine writes a fixed detail shape per kind (see the task's
     EVENT-LOG CONVENTION); we mirror those shapes here. Unknown/partial details
     fall back to a compact JSON dump so a new event kind is still legible rather
     than blank.
+
+    ``noun`` is what a ``todo`` event calls its row — ``Todo``, or ``Issue`` on a debug
+    task, where the same rows ARE issues. The stored event is identical either way (one
+    kind, one shape); only the word the human reads changes, and it is read off
+    ``tasks.mode`` by the caller rather than baked into the log.
     """
     if kind == "transition":
         return f"{detail.get('from', '?')} → {detail.get('to', '?')}"
@@ -139,7 +144,7 @@ def _render_detail(kind: str, detail: dict) -> str:
         ref = detail.get("todo_number")
         if ref is None:
             ref = detail.get("todo_id", "?")
-        text = f"Todo #{ref}"
+        text = f"{noun} #{ref}"
         if title:
             text += f" '{title}'"
         text += f" {action}"
@@ -640,9 +645,12 @@ def _events_for(conn, task_id: str, filter: str = "all") -> list[dict]:
             "SELECT kind, detail_json, created_at FROM events WHERE task_id = ? ORDER BY id",
             (task_id,),
         ).fetchall()
+    # A debug task's todo rows ARE issues, so the log says so — one read of `tasks.mode`,
+    # never a second field on the event.
+    noun = "Issue" if todos.is_debug(conn, task_id) else "Todo"
     # 4th element is the raw created_at (float) so the client can sort the thread by
     # true creation time, not just minute precision. Existing consumers use [0:3].
-    return [[_hhmm(r["created_at"]), r["kind"], _render_detail(r["kind"], json.loads(r["detail_json"])), r["created_at"]] for r in rows]
+    return [[_hhmm(r["created_at"]), r["kind"], _render_detail(r["kind"], json.loads(r["detail_json"]), noun), r["created_at"]] for r in rows]
 
 
 def _agents_for(conn, task_id: str) -> list[dict]:

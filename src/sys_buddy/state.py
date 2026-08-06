@@ -69,7 +69,12 @@ STATUS_TEST_PASSED = "test_passed"  # client role: e2e suite went green
 STATUS_TEST_FAILED = "test_failed"  # client role: e2e suite went red (a strike)
 STATUS_VERIFIED = "verified"        # feature confirmed end-to-end (terminal)
 STATUS_STUCK = "stuck"              # give up; humans needed (terminal)
-STATUS_RESOLVED = "resolved"        # debug task: the issue is fixed (terminal)
+STATUS_RESOLVED = "resolved"        # debug task with NO issues: the problem is fixed (terminal)
+# DEBUG tasks, per ISSUE: "my side of #N is fixed". Every named party reports it
+# independently and the issue resolves on the LAST one — the same all-must-agree rule
+# `lock_contract` applies to signatures, over the same "all" (the issue's party list).
+# Partial is a normal state, not an error.
+STATUS_FIXED = "fixed"
 STATUS_WAITING = "waiting"          # soft nudge: needs a human's attention, NOT terminal
 
 TEST_STATUSES = frozenset({STATUS_TEST_PASSED, STATUS_TEST_FAILED})
@@ -282,6 +287,27 @@ def _reject_if_terminal(state: str) -> None:
         )
 
 
+def human_resolved(conn, task_id: str) -> bool:
+    """Did a PERSON's agent close this task, or did the issue counts?
+
+    ``_report_resolved`` writes a task-level ``resolved`` event and nothing else does, so
+    the event's presence is the provenance of a ``resolved`` state. That is the whole
+    distinction ``todos.apply_rollup`` and ``todos._assert_task_usable`` turn on: a
+    rollup-derived ``resolved`` goes backwards when a new issue appears (no human needed),
+    a human-escalated one is terminal and only a human reopens it.
+
+    No new column, deliberately — the log already knows, and a column would be a second
+    copy of the same fact with a chance to disagree.
+    """
+    return (
+        conn.execute(
+            "SELECT 1 FROM events WHERE task_id = ? AND kind = 'resolved' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        is not None
+    )
+
+
 def _assert_live(conn, task_id: str) -> str:
     """The terminal gate, todo-aware. Returns the current task state.
 
@@ -291,9 +317,15 @@ def _assert_live(conn, task_id: str) -> str:
     appears. Freezing the task there would turn the rollup into a one-way door that
     no new deliverable could reopen. A HUMAN-escalated ``stuck``/``resolved`` stays
     terminal in both worlds — only a human reopens one.
+
+    ``resolved`` splits the same way on a DEBUG task running on issues: reached by ROLLUP
+    it is "every issue is fixed", which is a count and not a verdict, so it must not brick
+    the task; reached by a bare ``report_status('resolved')`` it is a person's last word.
     """
     current = _state(conn, task_id)
     if current == VERIFIED and todos.has_todos(conn, task_id):
+        return current
+    if current == RESOLVED and todos.rollup_resolved(conn, task_id):
         return current
     _reject_if_terminal(current)
     return current
@@ -483,6 +515,8 @@ _NEXT_TOOLS = {
     "ok": "report_status('checked', detail, todo={n})",
     "block": "report_status('blocked', detail, todo={n})",
     "done": "report_status('verified', detail, todo={n})",
+    # DEBUG tasks: the only move an issue ever owes, and every party owes it.
+    "fixed": "report_status('fixed', detail, todo={n})",
 }
 
 
@@ -635,6 +669,11 @@ def _next_step(conn, task_id: str, todo_id: int) -> dict:
             "Dropped — it no longer counts toward this task. Nothing is owed.",
             number=num, done=True,
         )
+    # ISSUES have their own (much shorter) ladder, because they have no contract stage:
+    # agree it is real → every party says it is fixed. It is answered here, off the same
+    # predicates, so the card cannot advertise a move `report_status` would refuse.
+    if todos.is_debug(conn, task_id):
+        return _next_issue_step(conn, task_id, row, status, parties, unjoined)
     if row["state"] == VERIFIED:
         return _next(
             "verified", [], None,
@@ -745,6 +784,48 @@ def _next_step(conn, task_id: str, todo_id: int) -> dict:
     )
 
 
+def _next_issue_step(conn, task_id: str, row, status: str, parties, unjoined) -> dict:
+    """The one move an ISSUE owes. Three rungs, not seven — there is no contract on a bug.
+
+    Same discipline as ``_next_step`` proper: every branch is read off the predicates
+    ``_report_issue_fixed`` actually enforces (the derived status, the fix records, the
+    march), so the card can never print a command the broker would refuse. The stuck flag
+    is deliberately NOT a branch — a stuck issue still owes exactly the move it owed
+    before, it just has a ⚠ on it.
+    """
+    num = row["number"]
+    if row["state"] == VERIFIED:
+        return _next(
+            "resolved", [], None,
+            "Resolved — every party reported this fixed. Nothing left to do; if it comes "
+            "back, that is a NEW issue, and raising one reopens the task by itself.",
+            number=num, done=True,
+        )
+    if status == todos.PENDING:
+        d = todos.decisions(conn, row["id"], row["version"])
+        awaiting = [p for p in parties if d.get(p, {}).get("decision") != todos.ACCEPT]
+        return _next(
+            "pending", awaiting, f"yes #{num}",
+            f"{_who_label(awaiting)} still has to agree this is a real problem — their "
+            f"agent types `yes #{num}` (or `no #{num} <why>` to say it is not a bug). The "
+            f"work happens once it is accepted.",
+            alt=f"no #{num} <why>", number=num, unjoined=unjoined,
+        )
+    outstanding = todos.awaiting_fix(conn, row)
+    done_by = [p for p in parties if p not in outstanding]
+    said = (
+        f"{_who_label(done_by)} has already reported it fixed; " if done_by else ""
+    )
+    return _next(
+        "accepted", outstanding, f"fixed #{num}",
+        f"Everyone agrees this is real, so this is where the work happens. {said}"
+        f"{_who_label(outstanding)} still has to report it too — `fixed #{num}`. EVERY "
+        f"party says so independently, and the issue resolves on the last one; the task "
+        f"resolves when every live issue has.",
+        number=num, unjoined=unjoined,
+    )
+
+
 def _todo_march(conn, task_id: str, todo_id: int, from_state: str, to_state: str) -> str:
     """Advance ONE todo's march, logging it as a ``todo`` event.
 
@@ -783,9 +864,33 @@ def _todo_label(row) -> str:
     return f"[todo #{row['number']} {row['title']}]"
 
 
+def _issue_label(row) -> str:
+    """``[issue #2 refresh 500s]`` — the same prefix, in the debug vocabulary."""
+    return f"[issue #{row['number']} {row['title']}]"
+
+
 # --------------------------------------------------------------------------- #
 # contract lifecycle
 # --------------------------------------------------------------------------- #
+def _assert_contracts_apply(conn, task_id: str) -> None:
+    """A DEBUG task has no contracts — and the refusal has to say the right thing.
+
+    It used to say "debug tasks don't carry todos", which is now false: they carry ISSUES,
+    which are todos with the contract half removed. The true statement is the narrower one —
+    there is no HOW to agree on a bug, only whether it is real and whether it is fixed — so
+    the message names the move that does exist (`fixed #N`) rather than the one that never
+    did.
+    """
+    if todos.is_debug(conn, task_id):
+        raise ValueError(
+            f"debug tasks don't use contracts. An ISSUE has no HOW to agree — you agree it "
+            f"is real (accept_todo), fix it, and every party reports "
+            f"report_status('fixed', detail, todo=<N>); the issue resolves on the last of "
+            f"them. Live issues: {_live_todo_list(conn, task_id)}. Contracts are for a "
+            f"contract task's deliverables."
+        )
+
+
 def _require_contract_todo(conn, task_id: str, number: int | None, call: str):
     """Resolve the chain a contract operation names. Never ``None``.
 
@@ -801,6 +906,7 @@ def _require_contract_todo(conn, task_id: str, number: int | None, call: str):
     named version); ``get_contract`` deliberately stays unscoped, because the dashboard
     reads it to show a task's current contract whichever deliverable it belongs to.
     """
+    _assert_contracts_apply(conn, task_id)
     if number is None:
         if todos.has_todos(conn, task_id):
             raise ValueError(
@@ -832,6 +938,7 @@ def _resolve_contract_todo(conn, identity: Identity, number: int | None):
     Stage matters: agree on WHAT before HOW. A contract on a todo that not every party
     has accepted yet is a shape for work nobody signed up to.
     """
+    _assert_contracts_apply(conn, identity.task_id)
     if number is None:
         if todos.has_todos(conn, identity.task_id):
             raise ValueError(
@@ -1328,6 +1435,7 @@ def decline_contract(
     Anyone bound by the contract may decline, INCLUDING its proposer (who may spot their
     own mistake before a peer wastes time reviewing it).
     """
+    _assert_contracts_apply(conn, identity.task_id)
     _assert_live(conn, identity.task_id)
     service.assert_content_size(reason, "decline reason")
     if not (reason or "").strip():
@@ -1450,6 +1558,7 @@ def reopen_negotiations(
     reopen → propose a new version → every party re-signs (``repropose_todo`` refuses
     once a lock exists, because a locked contract is immutable).
     """
+    _assert_contracts_apply(conn, identity.task_id)
     current = _assert_live(conn, identity.task_id)
     if number is None and todos.has_todos(conn, identity.task_id):
         raise ValueError(
@@ -1721,22 +1830,47 @@ def report_status(
             )
         return _report_waiting(conn, identity, detail)
 
-    # Mode gate: debug tasks have a single 'resolved' status; contract tasks have
-    # the full deploy/test/verified vocabulary. Keep the two vocabularies disjoint.
+    # Mode gate: a debug task speaks `fixed` (per ISSUE) and `resolved` (the whole
+    # session); a contract task speaks the full deploy/test/verified vocabulary. The two
+    # vocabularies stay disjoint, and which one applies is read off `tasks.mode` — never
+    # taken as an argument, so there is no second place for it to disagree.
     mode = _task_mode(conn, identity.task_id)
-    if mode == "debug" and number is not None:
-        raise ValueError(
-            "debug tasks don't carry todos — they are a single problem you fix and "
-            "report_status('resolved'). Todos are for contract tasks."
-        )
-    if mode == "debug" and status != STATUS_RESOLVED:
-        raise ValueError(
-            "this is a debug task — report_status('resolved') when the issue is "
-            "fixed (deploy/test/verified don't apply)"
-        )
+    if mode == "debug":
+        if status == STATUS_FIXED:
+            if number is None:
+                raise ValueError(
+                    f"'fixed' is per-ISSUE — fixed WHICH one? Pass the number: "
+                    f"report_status('fixed', detail, todo=<N>). Live issues: "
+                    f"{_live_todo_list(conn, identity.task_id)} — call get_todos() for "
+                    f"their detail and parties."
+                )
+            return _report_on_todo(conn, identity, status, detail, number, requested)
+        if status == STATUS_RESOLVED and number is not None:
+            raise ValueError(
+                f"'resolved' is about the WHOLE debug session and takes no number. To close "
+                f"one issue, every party reports report_status('fixed', detail, todo="
+                f"{number}) — the issue resolves on the last of them, and the task resolves "
+                f"when every live issue has."
+            )
+        # `stuck` is valid at both levels here exactly as it is on a contract task: with a
+        # number it flags one issue, bare it escalates the whole session.
+        if status not in (STATUS_RESOLVED, STATUS_STUCK):
+            raise ValueError(
+                f"this is a debug task — its work is ISSUES, so the report is "
+                f"report_status('fixed', detail, todo=<N>) once your side of that "
+                f"issue is fixed, and it resolves when EVERY party has said so "
+                f"(deploy/test/verified don't apply here). Live issues: "
+                f"{_live_todo_list(conn, identity.task_id)}"
+            )
     if mode != "debug" and status == STATUS_RESOLVED:
         raise ValueError(
             "'resolved' is only for debug tasks; contract tasks finish with 'verified'"
+        )
+    if mode != "debug" and status == STATUS_FIXED:
+        raise ValueError(
+            f"'fixed' is for an ISSUE on a debug task; this is a {mode} task, where a "
+            f"deliverable is checked and then confirmed — report_status('checked', detail, "
+            f"todo=<N>) and report_status('verified', detail, todo=<N>)."
         )
 
     if number is not None:
@@ -1799,6 +1933,13 @@ def _report_on_todo(
     # "N of 6 verified" rollup — and its own conclusion — would become a lie. Follow-up
     # work on something already verified is a NEW todo.
     if row["state"] == VERIFIED:
+        if todos.is_debug(conn, identity.task_id):
+            raise ValueError(
+                f"issue #{row['number']} ('{row['title']}') is RESOLVED — every party said "
+                f"it was fixed, so nothing more is reported on it. If it is back, raise a "
+                f"NEW issue with propose_issue(title, scope, parties): a fresh issue on a "
+                f"resolved task reopens the task by itself."
+            )
         raise ValueError(
             f"todo #{row['number']} ('{row['title']}') is verified — nothing more is reported "
             f"on it. Propose a NEW todo for follow-up work, or escalate the whole task "
@@ -1807,6 +1948,8 @@ def _report_on_todo(
 
     if status == STATUS_STUCK:
         return _report_todo_stuck(conn, identity, row, detail)
+    if status == STATUS_FIXED:
+        return _report_issue_fixed(conn, identity, row, detail)
     if row["strikes"] >= MAX_STRIKES:
         raise ValueError(
             f"todo #{row['number']} ('{row['title']}') reached {MAX_STRIKES} fix cycles — the "
@@ -1980,6 +2123,97 @@ def _report_todo_verified(conn, identity: Identity, row, detail: str) -> dict:
     return out
 
 
+def _report_issue_fixed(conn, identity: Identity, row, detail: str) -> dict:
+    """ONE party says ONE issue is fixed. It RESOLVES only when every party has.
+
+    The debug counterpart of ``_report_todo_verified``, and deliberately built on the rule
+    ``lock_contract`` already applies to signatures rather than a new one: all-must-agree
+    over the issue's own party list. Two consequences that are features, not gaps:
+
+    * a PARTIAL fix is a normal state. The issue stays ``accepted`` with the outstanding
+      parties named, because "I've pushed the fix, has it actually fixed it for you?" is
+      most of the life of a bug. Nothing is refused and nobody is nagged;
+    * the reporter cannot resolve it alone. On a two-party issue the second report is the
+      other side confirming, which is exactly the accountability a debug session had none
+      of when the whole task was closed by whoever spoke first.
+
+    The gate is the SAME one ``_resolve_contract_todo`` applies before a contract: agree it
+    is real before declaring it fixed. An unaccepted issue is one somebody may still say is
+    not a bug at all, and ``fixed`` on it would resolve a disagreement by fiat.
+    """
+    status = todos.status_of(conn, row)
+    if status == todos.PENDING:
+        d = todos.decisions(conn, row["id"], row["version"])
+        awaiting = [
+            p for p in todos.parties_of(row) if d.get(p, {}).get("decision") != todos.ACCEPT
+        ]
+        raise ValueError(
+            f"issue #{row['number']} '{row['title']}' is not accepted yet — agree it is real "
+            f"before declaring it fixed. Waiting on {', '.join(awaiting)} to "
+            f"accept_todo({row['number']}) (or decline_todo({row['number']}, reason) if they "
+            f"think it is not a bug)."
+        )
+
+    todos.record_fix(conn, row["id"], row["version"], identity, detail)
+    todos._event(conn, identity.task_id, "todo_fixed", row["id"],
+                 {"by": identity.role, "detail": detail, "version": row["version"]})
+
+    outstanding = todos.awaiting_fix(conn, row)
+    if outstanding:
+        service.post_message(
+            conn, identity, "fixed",
+            f"{_issue_label(row)} {detail} — I'm reporting it FIXED. It stays open until "
+            f"{_who_label(outstanding)} also reports "
+            f"report_status('fixed', detail, todo={row['number']}): every party has to say "
+            f"so independently, so please check it against your own side rather than taking "
+            f"my word for it.",
+            todo_id=row["id"],
+        )
+        return _todo_result(
+            conn, identity, row, STATUS_FIXED,
+            fixed_by=[p for p in todos.parties_of(row) if p not in outstanding],
+            awaiting_fix=outstanding,
+            resolved=False,
+        )
+
+    # The last party lands it: this issue is done. Same march value a verified deliverable
+    # writes (`verified`), read back as `resolved` in the debug vocabulary — one stored
+    # fact, so a rollup can never disagree with a status.
+    _todo_march(conn, identity.task_id, row["id"], row["state"], VERIFIED)
+    conn.execute(
+        "UPDATE todos SET verified_at = ?, stuck_at = NULL, stuck_reason = NULL WHERE id = ?",
+        (_now(), row["id"]),
+    )
+    # `resolved`, not `verified`: the two vocabularies stay disjoint in the thread as well
+    # as in the tools, and this bubble is the one that ENDS an issue — the dashboard already
+    # gives `resolved` the closing palette.
+    service.post_message(
+        conn, identity, "resolved",
+        f"{_issue_label(row)} {detail} — every party ({', '.join(todos.parties_of(row))}) has "
+        f"now reported it fixed, so this issue is RESOLVED.",
+        todo_id=row["id"],
+    )
+    out = _todo_result(
+        conn, identity, row, STATUS_FIXED,
+        fixed_by=todos.parties_of(row), awaiting_fix=[], resolved=True,
+    )
+    roll = out["rollup"] or {}
+    if roll.get("complete"):
+        _notify(
+            conn, identity.task_id,
+            f"[{identity.name}] RESOLVED: every issue on '{identity.task_id}' is fixed "
+            f"({roll.get('total')}/{roll.get('total')}). Last one: {row['title']} — {detail}",
+        )
+    else:
+        _notify(
+            conn, identity.task_id,
+            f"[{identity.name}] issue #{row['number']} ({row['title']}) RESOLVED "
+            f"({roll.get('fixed')}/{roll.get('total')} on '{identity.task_id}'): {detail}",
+        )
+    conn.commit()
+    return out
+
+
 def _report_todo_stuck(conn, identity: Identity, row, detail: str) -> dict:
     """A stuck DELIVERABLE — a flag, never a state, and never terminal for the task.
 
@@ -2141,8 +2375,29 @@ def _report_verified(conn, identity: Identity, detail: str) -> dict:
 
 
 def _report_resolved(conn, identity: Identity, detail: str) -> dict:
-    """Debug task: the issue is fixed → terminal ``resolved``. Either party may
-    resolve, from any non-terminal state. Reopening after is a human's job."""
+    """Debug task with NO issues: the problem is fixed → terminal ``resolved``. Either
+    party may resolve, from any non-terminal state. Reopening after is a human's job.
+
+    THE BARE FORM SURVIVES UNCHANGED, and that is deliberate. A debug task that carries no
+    issues behaves exactly as every debug task did before issues existed — one problem,
+    fixed, closed, terminal. There are live sessions running that way and this feature must
+    not impose new rules on them mid-flight; issues are opt-in, per task, and the opt-in is
+    raising the first one.
+
+    Once a task HAS issues the bare form is refused, on the same shape of rule as the
+    contract-task guard in ``report_status``: name the deliverable. "The debug task is
+    resolved" is not answerable when three issues are open — resolved which? — and the
+    honest answer is per-issue, all-parties `fixed #N`, with the TASK resolving by rollup.
+    """
+    if todos.has_todos(conn, identity.task_id):
+        raise ValueError(
+            f"task '{identity.task_id}' runs on ISSUES, so a bare 'resolved' would close "
+            f"work the other parties have not agreed is fixed. Report the ISSUE instead: "
+            f"report_status('fixed', detail, todo=<N>) — every party reports it "
+            f"independently, and the TASK resolves by itself when every live issue has. "
+            f"Live issues: {_live_todo_list(conn, identity.task_id)} — call get_todos() for "
+            f"who still owes a `fixed` on each."
+        )
     state = _state(conn, identity.task_id)
     _reject_if_terminal(state)
     state = _transition(conn, identity.task_id, RESOLVED)

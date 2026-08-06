@@ -26,6 +26,10 @@ still `#1`. Every command that acts on a todo carries the `#N`. Both rules are �
 If you only read one thing, read [The two traps](#5-the-two-traps). They account for
 almost every "it's stuck and I don't know why".
 
+On a **debug** task the same rows are called **issues** and carry no contract — everything
+below applies except the `pc`/`sign` stage. See
+[§6 Issues](#6-issues--this-same-flow-on-a-debug-task-minus-the-contract).
+
 ---
 
 ## 1. A todo carries TWO state fields
@@ -314,6 +318,58 @@ When something looks stuck, ask the two questions in order:
 
 ---
 
+## 6. Issues — this same flow on a debug task, minus the contract
+
+A **debug** task carries **issues**, and an issue is a todo with the contract half
+removed. Not a parallel feature: the same `todos` table, the same per-task `#N`, the
+same party list, the same accept/decline/repropose/drop, the same `stuck` flag, the
+same rollup. There is no `issues` table and no second implementation — which is the
+whole reason this section is short.
+
+```
+issue <title>   anyone raises one; raising IS the raiser's own accept   → pending
+yes #2          every OTHER named party accepts                        → accepted  ← work happens here
+fixed #2        each party says independently that it is fixed          → still accepted
+fixed #2        the last party lands it                                 → resolved
+```
+
+What is different, and only this:
+
+- **There is no `pc`/`sign` stage.** A bug has no *how* to agree on, so a contract is
+  refused outright on a debug task — the message points at `fixed #N`.
+- **`fixed #N` requires EVERY named party**, which is the rule `lock_contract` already
+  applies to signatures, over the same "all" (the party list). A **partial** fix is a
+  normal, expected state, not an error: "I've pushed it, does it work for you?" is most
+  of the life of a bug. The records live in `todo_fixes`, keyed by version like the
+  acceptances, so a repropose resets them.
+- **The finish line is called `resolved`**, and it is the SAME stored fact as a
+  deliverable's `verified` (`todos.state`), read in the debug vocabulary by
+  `todos.status_of`. One fact, two words for it, so a status can never disagree with a
+  rollup.
+- **The task auto-resolves by rollup, and it does not latch.** Every live issue fixed →
+  the task reads `resolved`; raise a new issue and it drops back to `open` with **no
+  human needed**. That is the same distinction §3 draws for `verified`: a rollup is a
+  count and can go backwards, a **human-escalated** `stuck`/`resolved` is a verdict and
+  needs a person. The provenance is the task-level `resolved` **event** — written only
+  by a bare `report_status('resolved')` — read by `state.human_resolved`.
+- **The mode is never a parameter.** Todo or issue is read off `tasks.mode` every time
+  (`todos.task_mode`). A `debug=` argument would be a second statement of the same fact,
+  and two statements can disagree.
+
+**Backwards compatible, opt-in per task.** A debug task with **no issues** behaves
+exactly as it always did: bare `report_status('resolved')` closes it, terminal. Once it
+has issues that bare form is refused — "resolved" says nothing until you name which one —
+and existing debug tasks are **not** converted into a synthetic "the original problem"
+issue, because that would rewrite history and invent a title on the humans' behalf.
+
+`propose_issue` and `propose_todo` are **two names over one implementation**
+(`todos._propose`); each refuses on the other's mode with a redirect, so an agent taught
+"issue" is never fighting the tool name. On the dashboard the panel reads **Issues** with
+an `n/m fixed` count, and the todo modal drops its contract column entirely — the status
+band carries who has said `fixed` instead of who signed.
+
+---
+
 ## Where this lives in the code
 
 | Concept | Source |
@@ -323,6 +379,7 @@ When something looks stuck, ask the two questions in order:
 | resolving an internal `todos.id` from a join | `src/sys_buddy/todos.py` — `row_by_id(conn, task_id, todo_id)`. Foreign keys only, never a value a person typed |
 | both keys on the wire | `src/sys_buddy/todos.py` — `to_dict`; `src/sys_buddy/api.py` — `_todo_keys` for the thread's message chips |
 | the agreement stage, derived | `src/sys_buddy/todos.py` — `status_of`, `STATUSES` |
+| issues on a debug task | `src/sys_buddy/todos.py` — `task_mode`/`is_debug`, `propose_issue`, `fixes`/`record_fix`/`awaiting_fix`, `rollup_resolved`; `src/sys_buddy/state.py` — `_report_issue_fixed`, `human_resolved`, `_assert_contracts_apply` |
 | the march + its rollup | `src/sys_buddy/todos.py` — `_MARCH_RANK`, `rollup`, `apply_rollup` |
 | who the producer is | `src/sys_buddy/state.py` — `_producer_role` |
 | the gates | `src/sys_buddy/state.py` — `report_status`, `_report_on_todo`, `_resolve_contract_todo`, `lock_contract` |

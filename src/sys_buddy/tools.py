@@ -288,6 +288,22 @@ def _op_propose_todo(ident: Identity, title: str, scope: str, parties: list[str]
         conn.close()
 
 
+def _op_propose_issue(ident: Identity, title: str, scope: str, parties: list[str],
+                      summary: str = "") -> dict:
+    """The SAME domain call as ``_op_propose_todo``, under the name a debug session uses.
+
+    ``todos.propose_issue`` is ``todos.propose_todo``'s own implementation with the mode
+    check flipped — two names, one mechanism — so nothing is duplicated here either.
+    """
+    conn = connect()
+    try:
+        return _agent_view(
+            todos.propose_issue(conn, ident, title, scope, parties, summary=summary or None)
+        )
+    finally:
+        conn.close()
+
+
 def _op_accept_todo(ident: Identity, todo: int) -> dict:
     conn = connect()
     try:
@@ -501,7 +517,17 @@ def _op_submit_readiness(ident: Identity, answers: dict) -> dict:
                 "human directs; otherwise assess it and push back before you lock_contract."
             )
         else:
-            result["next"] = "Passed ✓ — your action tools are unlocked. Wait for your human's direction."
+            # DEBUG. The work here is ISSUES, and an agent that does not know that reaches
+            # for a bare `resolved` — which the broker refuses the moment the session
+            # carries one, so saying "just wait" would strand it at the first refusal.
+            result["next"] = (
+                "Passed ✓ — your action tools are unlocked. Wait for your human's "
+                "direction. This session's work is ISSUES: propose_issue(title, scope, "
+                "parties) raises one (raising IS your acceptance), the other parties "
+                "accept_todo(N), and then EVERY party reports report_status('fixed', "
+                "detail, todo=N) — the issue resolves on the last of them and the task "
+                "resolves when every issue has. There is no contract to agree here."
+            )
     return result
 
 
@@ -928,7 +954,14 @@ def _register_remote(mcp: FastMCP) -> None:
         deliverable only. `stuck` works both ways on purpose: with `todo` it flags that
         one deliverable and the rest carry on; without it you escalate the WHOLE
         collaboration and everything freezes until a human steps in — so only do that
-        for a task-wide problem (expired token, no idea what the goal is)."""
+        for a task-wide problem (expired token, no idea what the goal is).
+
+        ON A DEBUG TASK the vocabulary is `fixed` and `stuck` instead. `fixed` is
+        per-ISSUE, so `todo` is required there: it records YOUR side of it, and the issue
+        resolves only once EVERY party has reported it — partial is normal, not an error.
+        The task then resolves by itself when every live issue has. A bare `resolved` still
+        closes a debug task that carries NO issues (one problem, fixed, done); once it has
+        issues that is refused, because "resolved" says nothing until you name which one."""
         return _op_report_status(require_current(), status, detail, todo or None)
 
     @mcp.tool
@@ -945,7 +978,11 @@ def _register_remote(mcp: FastMCP) -> None:
         need the todo `number` — the `#N` you pass as `todo=`, numbered per task from 1,
         and the only deliverable handle in this reply. The todos you are a party to are
         the ones you owe work on. You can see todos that don't name you — you are simply
-        not bound by them and cannot act on them."""
+        not bound by them and cannot act on them.
+
+        ON A DEBUG TASK these rows are ISSUES, so `status` reads pending → accepted →
+        resolved (no `contracted` — there is no contract), and each entry also carries
+        `fixed_by` and `awaiting_fix`: who has reported it fixed and who still has to."""
         return _op_get_todos(require_current().task_id)
 
     @mcp.tool
@@ -974,8 +1011,37 @@ def _register_remote(mcp: FastMCP) -> None:
         return _op_propose_todo(require_current(), title, scope, parties, summary)
 
     @mcp.tool
+    def propose_issue(title: str, scope: str, parties: list[str],
+                      summary: str = "") -> dict:
+        """Raise an ISSUE on a DEBUG task: "login 500s on refresh".
+
+        An issue is to a debug task what a todo is to a contract task, minus the contract —
+        there is no HOW to agree on a bug. The life of one is:
+
+          you raise it            → status `pending`  (raising IS your own acceptance)
+          every OTHER party `yes` → status `accepted` ← the work happens here
+          each party `fixed #N`   → still accepted while any party has not
+          the last party `fixed`  → status `resolved`
+
+        `parties` names which of the task's existing seats it binds (at least two,
+        including YOU). `scope` is what is actually wrong — the symptom, how to reproduce
+        it, and what counts as fixed; the others accept THAT, not the title. `summary` is
+        one plain sentence for the humans reading the dashboard.
+
+        EVERY party has to report `fixed` independently, so nothing is closed on one
+        agent's word. The TASK resolves by itself once every live issue is resolved, and
+        raising a new issue on a resolved task reopens it — no human needed.
+
+        Refused on a contract task, where the equivalent is propose_todo(...) plus a
+        contract. Same call, other name."""
+        return _op_propose_issue(require_current(), title, scope, parties, summary)
+
+    @mcp.tool
     def accept_todo(todo: int) -> dict:
         """Agree to WHAT a todo is — read its scope in get_todos() first.
+
+        The same tool accepts an ISSUE on a debug task — "yes, that is a real bug". There
+        is nothing to sign afterwards there: the next move is `fixed #N`, from every party.
 
         This is not a lock and not a signature: it means "yes, let's do this piece of
         work". The HOW comes later, when its contract is proposed and the same parties
