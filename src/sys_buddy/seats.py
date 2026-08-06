@@ -175,7 +175,7 @@ def assert_name_free(conn: sqlite3.Connection, task_id: str, name: object) -> st
     display = " ".join(str(name or "").split())
     if not display:
         raise ValueError(
-            "pick a name — it is how your buddy's agent addresses you (`@sarah`)"
+            "pick a name — it is how the other agents address you (`@sarah`)"
         )
     if name_holder(conn, task_id, display) is not None:
         raise ValueError(

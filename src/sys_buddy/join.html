@@ -873,7 +873,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     if (!agentName){
       // No silent 'buddy' default any more: a name is unique per task and is how your
       // buddy's agent addresses you, so it is a choice, not a fallback.
-      setNameState('bad', '✗ pick a name — it is how your buddy addresses you');
+      setNameState('bad', '✗ pick a name — it is how the others address you');
       nameEl.focus();
       return;
     }
