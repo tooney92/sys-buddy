@@ -75,6 +75,10 @@ ACTION_TOOLS = frozenset({
     "repropose_todo",
     "drop_todo",
     "upload_file",
+    # Minting an upload URL IS the write, moved earlier: the signed POST that follows
+    # carries its own authorisation and never re-enters this middleware, so the readiness
+    # gate has to bite here or it does not bite at all.
+    "upload_url",
     "share_activity",
     # engagement mode: the scope, the standards, the claims and the verdicts
     "propose_deliverables",

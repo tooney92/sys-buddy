@@ -216,9 +216,9 @@ var SHORTCODES=[
   {"id":"fixed","code":"fixed #N","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"required","desc":"YOUR side of issue N is fixed — EVERY party reports it, and the last one resolves the issue"},
   {"id":"resolved","code":"resolved","tools":["report_status"],"group":"Status","modes":["debug"],"scope":"none","desc":"closes a debug session that carries NO issues; once it has any, name one with fixed #N"},
   {"id":"stuck","code":"stuck [#N]","bare":"stuck","scoped":"stuck #N","tools":["report_status"],"group":"Status","modes":["contract","debug"],"scope":"optional","desc":"give up; ping the humans — the one command #N is optional on: with #N just that todo (or issue), bare escalates the whole task"},
-  {"id":"files","code":"files","tools":["list_files"],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"what has been shared on the task"},
-  {"id":"upload","code":"upload <path>","tools":[],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"share a file — the agent POSTs the raw bytes to /files/&lt;task-id&gt;, so nothing goes through its context"},
-  {"id":"getfile","code":"getfile <id>","tools":[],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"fetch one back the same cheap way"},
+  {"id":"files","code":"files","tools":["list_files"],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"what has been shared on the task — each entry carries a signed download url"},
+  {"id":"upload","code":"upload <path>","tools":["upload_url"],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"share a file — the agent asks for a signed url and curls the raw bytes to it, so nothing goes through its context and it needs no token"},
+  {"id":"getfile","code":"getfile <id>","tools":["get_file"],"group":"Files","modes":["contract","debug"],"scope":"none","desc":"fetch one back — get_file for a small file, or curl the url from the listing for a large one"},
   {"id":"pf","code":"pf","tools":["readiness_check","submit_readiness"],"group":"Meta","modes":["contract","debug"],"scope":"none","desc":"re-run pre-flight"},
   {"id":"st","code":"st","tools":[],"group":"Meta","modes":["contract","debug"],"scope":"none","desc":"status recap (state, contract, unread)"},
   {"id":"rules","code":"rules","tools":["rules"],"group":"Meta","modes":["contract","debug"],"scope":"none","desc":"re-read the charter"}
@@ -339,6 +339,21 @@ var state = {
      only — neither panel has an input or a button that calls anything (DECISIONS D11).
      MUST appear in sig() below or opening/closing it would never re-render. */
   panel:null,
+  /* the HOST CLI list served by /api/cli — null until the Commands panel first asks for
+     it, {error:true} if that fetch failed. MUST appear in sig() or the panel would never
+     repaint when it arrives. */
+  cli:null, cliPending:false,
+  /* HOST-ONLY task-list controls. Every one of these becomes a QUERY PARAM on
+     /api/tasks — the filtering is a SQL WHERE on the broker, so a filtered board is a
+     smaller payload and not merely a smaller render. `status:'active'` is the default and
+     means "everything not closed": a closed task is finished and all its credentials are
+     revoked, so on a board of fifty it is only ever in the way.
+     `page` is whatever the API last reported (total/limit/offset) and is ABSENT for a
+     buddy, whose token resolves to exactly one task — which is what keeps these controls
+     off their screen instead of rendering as buttons that can never do anything. */
+  tasksFilter:{status:'active', from:'', to:''},
+  tasksOffset:0,
+  tasksPage:null,
   /* Workflows panel: which sections are expanded and which cast size the story tells.
      `sec`/`sub` hold only what the human has TOUCHED — an untouched key falls through to
      wfIsOpen()'s mode default, so a debug task can open with its own section already up
@@ -361,14 +376,27 @@ function api(path){
   /* auth rides the HttpOnly sb_view cookie — same-origin, sent automatically */
   return fetch(path,{headers:{'Accept':'application/json'},credentials:'same-origin'});
 }
+/* The host's filter/page state, as a query string. Only what DIFFERS from the default
+   travels: a plain /api/tasks is still a plain /api/tasks, so a buddy (and a host who has
+   touched nothing) makes exactly the request they always did. */
+function tasksQuery(){
+  var f=state.tasksFilter||{}, q=[];
+  if(f.status && f.status!=='active') q.push('status='+encodeURIComponent(f.status));
+  if(f.from) q.push('from='+encodeURIComponent(f.from));
+  if(f.to) q.push('to='+encodeURIComponent(f.to));
+  if(state.tasksOffset) q.push('offset='+state.tasksOffset);
+  return q.length ? ('?'+q.join('&')) : '';
+}
 function fetchTasks(){
   state.refreshing=true; patchVolatile();
-  return api('/api/tasks').then(function(r){
+  return api('/api/tasks'+tasksQuery()).then(function(r){
     if(r.status===401){ state.error='unauthorized'; throw 0; }
     if(!r.ok) throw 0;
     return r.json();
   }).then(function(d){
     state.tasks=d.tasks||[]; state.viewer=d.viewer||null;
+    /* Absent for a buddy, by design — see state.tasksPage. */
+    state.tasksPage=d.page||null;
     if(state.error==='unauthorized'||state.error==='network') state.error=null;
     state.lastRefresh=Date.now();
   }).catch(function(e){
@@ -392,6 +420,26 @@ function fetchDetail(id){
   }).catch(function(e){
     if(state.error==null) state.error='network';
   }).then(function(){ render(); });
+}
+
+/* The HOST CLI list, fetched once and kept. GENERATED by the broker from cli.py's own
+   argparse definitions (see api._cli_catalog), never typed into this file — this page has
+   no build step and cannot import Python, so the API is the seam. Fetched lazily, when
+   the Commands panel first opens: it is reference material, not something the list view
+   needs, and a dashboard nobody opens the panel on never asks for it. */
+function fetchCli(){
+  if(state.cli || state.cliPending) return Promise.resolve();
+  state.cliPending=true;
+  return api('/api/cli').then(function(r){
+    if(!r.ok) throw 0;
+    return r.json();
+  }).then(function(d){
+    state.cli=d;
+  }).catch(function(e){
+    /* A failure is not an error screen: the rest of the panel is still useful, and
+       hostCliHTML says plainly that this section could not load. */
+    state.cli={error:true};
+  }).then(function(){ state.cliPending=false; render(); });
 }
 
 /* ---------- navigation ---------- */
@@ -950,6 +998,58 @@ function messageScreen(icon,title,body,retry){
     '<p style="font-size:14px;color:var(--text-2);margin:0;line-height:1.55">'+esc(body)+'</p>'+btn+'</div>';
 }
 
+/* ---------- task list: filters + pagination (HOST ONLY) ----------
+   The chips, in the order they render. The VALUES are the ones `api._status_sql`
+   partitions on — a task is in exactly one bucket, so no chip can hide a row another one
+   also claims — and `tests/test_task_list_filters.py` pins this list against
+   `api.TASK_STATUS_FILTERS` so a bucket cannot exist on one side only.
+
+   `active` leads and is the default: hiding closed tasks is the behaviour, and a chip
+   that shows what the default is beats a filter whose off-state is invisible. */
+var TASK_FILTERS=[
+  ['active','Active'],['open','Open'],['in_flight','In flight'],
+  ['verified','Verified'],['stuck','Stuck'],['closed','Closed'],['all','All']
+];
+function tasksFiltered(){
+  var f=state.tasksFilter||{};
+  return (f.status&&f.status!=='active') || !!f.from || !!f.to;
+}
+/* Rendered only when the API sent a `page` block, which it does only for a host. A buddy's
+   token selects one task by id; a status chip on their screen could only ever hide the one
+   thing they came to look at. */
+function tasksControlsHTML(){
+  var p=state.tasksPage;
+  if(!p) return '';
+  var f=state.tasksFilter||{};
+  var chips=TASK_FILTERS.map(function(o){
+    return '<button data-tfilter="'+esc(o[0])+'" style="'+filterStyle((f.status||'active')===o[0])+';font-family:inherit">'+esc(o[1])+'</button>';
+  }).join('');
+  var dateInput='padding:3px 7px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text-2);font-size:11px;font-family:inherit;color-scheme:'+(state.theme==='dark'?'dark':'light');
+  var dates='<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-3)">'+
+    '<span>created</span>'+
+    '<input type="date" data-tfrom="1" value="'+esc(f.from||'')+'" style="'+dateInput+'">'+
+    '<span>to</span>'+
+    '<input type="date" data-tto="1" value="'+esc(f.to||'')+'" style="'+dateInput+'">'+
+    (tasksFiltered()?'<button data-tclear="1" style="'+filterStyle(false)+';font-family:inherit">clear</button>':'')+
+  '</div>';
+  return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 18px">'+
+    '<div style="display:flex;gap:5px;flex-wrap:wrap">'+chips+'</div>'+dates+'</div>';
+}
+function tasksPagerHTML(){
+  var p=state.tasksPage;
+  if(!p || !p.limit || (p.total||0)<=p.limit) return '';
+  var from=(p.offset||0)+1, to=(p.offset||0)+state.tasks.length;
+  var btn=function(dir,label,dead){
+    return '<button data-tpage="'+dir+'"'+(dead?' disabled':'')+' style="padding:5px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text-2);font-size:12px;font-family:inherit;cursor:'+(dead?'default':'pointer')+';opacity:'+(dead?'.4':'1')+'">'+label+'</button>';
+  };
+  return '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px">'+
+    '<span style="font-size:12px;color:var(--text-3)">'+from+'–'+to+' of '+(p.total||0)+'</span>'+
+    '<div style="display:flex;gap:6px">'+
+      btn('prev','← Newer',(p.offset||0)<=0)+
+      btn('next','Older →',to>=(p.total||0))+
+    '</div></div>';
+}
+
 /* ---------- task list ---------- */
 function listHTML(){
   /* ONE copy, referenced twice (empty-state and populated). It was hand-typed in both
@@ -960,12 +1060,18 @@ function listHTML(){
   var TASKS_BLURB = 'Your agents, working. Watch them agree what to build, sign a '
                   + 'contract for how, and ship — you’re just here to observe.';
   if(!state.tasks.length){
+    /* THE FILTER STAYS ON SCREEN when it matches nothing. An empty board that has eaten
+       its own controls is a dead end: the host cannot see why it is empty and has nothing
+       to click to get back. So the emptiness is attributed — "no tasks match" vs "no tasks
+       yet" — and `clear` is right there. */
+    var filtered=tasksFiltered();
     return '<div style="max-width:1040px;margin:0 auto;padding:30px 20px 70px">'+
       '<h1 style="font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;color:var(--text)">Tasks</h1>'+
       '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">'+TASKS_BLURB+'</p>'+
+      tasksControlsHTML()+
       '<div style="text-align:center;padding:60px 20px;border:1px dashed var(--border-strong);border-radius:14px;color:var(--text-2)">'+
-      '<p style="font-weight:600;font-size:15px;color:var(--text);margin:0 0 5px">No tasks yet</p>'+
-      '<p style="font-size:13.5px;margin:0">Nothing to observe on this token right now.</p></div></div>';
+      '<p style="font-weight:600;font-size:15px;color:var(--text);margin:0 0 5px">'+(filtered?'No tasks match this filter':'No tasks yet')+'</p>'+
+      '<p style="font-size:13.5px;margin:0">'+(filtered?'Widen the range, or pick <strong>All</strong> to see every task including closed ones.':'Nothing to observe on this token right now.')+'</p></div></div>';
   }
   var rows = state.tasks.map(function(t){
     var c=stateChip(t.state);
@@ -974,12 +1080,16 @@ function listHTML(){
     /* the rollup, so a host triages the list without opening anything. `todo_rollup` is
        absent on a row with no live todos, so those rows are exactly as they were. */
     var roll = t.todo_rollup ? rollupBadgeHTML(t.todo_rollup, isDebugTask(t)?'fixed':'verified') : '';
+    /* CLOSED is not a `state` — a task is closed AT whatever state it had reached — so it
+       needs its own mark, or a closed row surfaced by the filter is indistinguishable from
+       a live one sitting at the same state. */
+    var closed = t.closed ? '<span style="display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;background:var(--surface-2);color:var(--text-3);border:1px solid var(--border)">closed</span>' : '';
     return '<div data-open="'+esc(t.id)+'" class="sb-row" style="display:flex;align-items:center;gap:16px;padding:15px 18px;background:var(--surface);border:1px solid var(--border);border-radius:14px;cursor:pointer;transition:border-color .15s,box-shadow .15s">'+
       '<span style="width:10px;height:10px;border-radius:50%;background:'+c.dot+';flex:none"></span>'+
       '<div style="flex:1;min-width:0">'+
         '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
           '<span style="font-size:15px;font-weight:600;color:var(--text)">'+esc(t.title)+'</span>'+
-          '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:600;background:'+c.bg+';color:'+c.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+c.dot+'"></span>'+esc(c.label)+'</span>'+roll+
+          '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:600;background:'+c.bg+';color:'+c.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+c.dot+'"></span>'+esc(c.label)+'</span>'+roll+closed+
         '</div>'+
         '<div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;align-items:center;gap:6px;margin-top:9px">'+avs+'</div>'+
       '</div>'+
@@ -991,13 +1101,24 @@ function listHTML(){
      used to print state.tasks.length, i.e. every row on the page, so a finished board of
      ten `verified`/`stuck`/`resolved` tasks announced "10 in flight". A `confirmed`
      engagement is the sharpest case: the client has signed it off and you have invoiced. */
-  var inFlight = state.tasks.filter(function(t){ return !TERMINAL[t.state]; }).length;
+  var inFlight = state.tasks.filter(function(t){ return !TERMINAL[t.state] && !t.closed; }).length;
+  /* Once the board is paged, "N in flight" would be counting ONE PAGE and reading like a
+     count of everything — the same defect this line was fixed for once already. So a
+     paged board says where it is in the set instead, and only an unpaged one makes the
+     claim it can actually stand behind. */
+  var p=state.tasksPage;
+  var paged = !!(p && p.limit && (p.total||0)>p.limit);
+  var count = paged
+    ? ((p.offset||0)+1)+'–'+((p.offset||0)+state.tasks.length)+' of '+(p.total||0)
+    : inFlight+' in flight';
   return '<div style="max-width:1040px;margin:0 auto;padding:30px 20px 70px">'+
     '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">'+
       '<h1 style="font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;color:var(--text)">Tasks</h1>'+
-      '<span style="font-size:13px;color:var(--text-2)">'+inFlight+' in flight</span></div>'+
+      '<span style="font-size:13px;color:var(--text-2)">'+esc(count)+'</span></div>'+
     '<p style="margin:6px 0 24px;font-size:14px;color:var(--text-2);max-width:560px">'+TASKS_BLURB+'</p>'+
-    '<div style="display:flex;flex-direction:column;gap:10px">'+rows+'</div></div>';
+    tasksControlsHTML()+
+    '<div style="display:flex;flex-direction:column;gap:10px">'+rows+'</div>'+
+    tasksPagerHTML()+'</div>';
 }
 
 /* ---------- thread (messages + interleaved broker dividers) ---------- */
@@ -1016,9 +1137,20 @@ function buildThread(d){
   // item; otherwise fall back to the legacy minute-granularity sort (keeps a stale
   // API — e.g. before a broker restart — from breaking the thread). `ord` breaks ties
   // stably so same-instant items keep the order the API returned them (id order).
+  //
+  // DESCENDING: NEWEST FIRST. The box is 640px tall and a working task outgrows it in an
+  // afternoon, so oldest-first meant scrolling to the bottom of a long thread every time
+  // you wanted the one thing you came to read. Both keys are negated together — `ts` and
+  // its `ord` tiebreak — so two items written in the same instant reverse as a pair and
+  // the ordering stays total, rather than newest-minute-first with stale order inside it.
+  //
+  // The dividers ride the same sort, so `Task created: …` now lands at the BOTTOM. That
+  // is correct rather than a glitch: the bottom of a newest-first thread is its
+  // beginning, and the divider says so in words ("Task created") instead of relying on
+  // position. The header labels the direction so nobody has to infer it.
   var allTs = items.length>0 && items.every(function(it){ return typeof it.ts==='number' && isFinite(it.ts); });
-  if(allTs){ items.sort(function(a,b){ return (a.ts-b.ts) || (a.ord-b.ord); }); }
-  else     { items.sort(function(a,b){ return (a.min-b.min) || (a.ord-b.ord); }); }
+  if(allTs){ items.sort(function(a,b){ return (b.ts-a.ts) || (b.ord-a.ord); }); }
+  else     { items.sort(function(a,b){ return (b.min-a.min) || (b.ord-a.ord); }); }
   return items;
 }
 function bubbleStyle(type,pass){
@@ -1106,7 +1238,12 @@ function threadHTML(d){
   var lps=((d&&d.agents)||[]).filter(isListening).map(listenPill).join('');
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
     '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">'+
-      '<span style="font-weight:600;font-size:14px;color:var(--text)">Message thread</span>'+
+      /* The direction is STATED, not left to be inferred. A reader who knows this thread
+         from before has to be told it turned around, and a new one meeting a
+         "Task created" divider at the bottom needs one word to read it as the beginning
+         rather than as a bug. */
+      '<span style="font-weight:600;font-size:14px;color:var(--text);display:flex;align-items:baseline;gap:8px">Message thread'+
+        '<span style="font-size:11px;font-weight:500;color:var(--text-3)">newest first</span></span>'+
       '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+lps+
         '<div title="'+esc(ROLE_COLOR_TIP)+'" style="display:flex;gap:4px">'+avs+'</div></div></div>'+
     threadLegendHTML()+
@@ -1375,12 +1512,51 @@ function contractHTML(d){
     : (dead ? null : data.staging_url);
   var stagingBlock = targetUrl
     ? '<div style="margin-top:11px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;min-width:0'+(dead?';opacity:.7':'')+'"><div style="display:flex;align-items:center;gap:9px;min-width:0"><span style="display:flex;color:var(--text-3);flex:none">'+IC.link+'</span><span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);flex:none">'+targetLabel+'</span><span style="font-family:'+MONO+';font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(targetUrl)+'">'+esc(targetUrl)+'</span></div>'+stale+'</div>'
-    : '';
+    /* NO TARGET ON A LOCKED CONTRACT — see noTargetHTML. The panel used to say nothing at
+       all here, which is the worst of the three cases it can be in: a target that MOVED
+       gets a line, a target that is present gets a line, and the one that actually blocks
+       the work got silence. */
+    : (!dead && data.locked ? noTargetHTML(d) : '');
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
     '<div style="padding:14px 16px;border-bottom:1px solid var(--border)">'+
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span style="font-weight:600;font-size:14px;color:var(--text)">'+esc(kindView.title)+'</span>'+
       '<div style="display:flex;gap:3px;background:var(--surface-2);padding:3px;border-radius:9px">'+vbtns+'</div></div>'+statusBlock+stagingBlock+'</div>'+
     '<div style="padding:6px">'+eps+'</div></div>';
+}
+
+/* ---------- locked, and pointing at nothing ----------
+   `state.resolve_staging_url` returning None on a LOCKED contract is a known-bad state,
+   not a neutral one: the shape is agreed, the parties have signed, and the consumer has
+   nowhere to point their tests. It resolves to None whenever neither the todo's override
+   nor the task's URL is set — which is the ordinary outcome of creating a task and never
+   running `task staging-url`, so it is not a corner case.
+
+   The panel already warns when the target MOVED since the lock ("the target moved, the
+   contract did not"). It said nothing when there was no target at all, so the host found
+   out two status reports later, from a peer who was blocked. This is the same fact one
+   step earlier, on the screen they are already looking at.
+
+   Read-only like everything else here (D11): the fix is the line the host types in their
+   OWN terminal, exactly as `dropTodoHTML` does it — and the command is `task staging-url`
+   with the per-todo `--todo N`, which is the very command whose invisibility cost a
+   session. A buddy is told the same fact without the command: they cannot run a host CLI,
+   and showing it to them would be a lie about who can unblock this. */
+function noTargetHTML(d){
+  var host = !!(state.viewer && state.viewer.mode!=='buddy');
+  /* The todo panel passes a SYNTHETIC {id:'<task>#<todo>', task, todoNo}; the task-level
+     card passes the task detail, whose `id` IS the task id. */
+  var taskId = d.task || d.id || '';
+  var scope = (d.todoNo!=null && d.todoNo!=='') ? ' --todo '+d.todoNo : '';
+  var cmd = 'sys-buddy task staging-url '+taskId+' https://…'+scope;
+  var fix = host
+    ? '<div style="margin-top:8px;font-family:'+MONO+';font-size:11px;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:7px 9px;overflow-x:auto;white-space:pre">'+esc(cmd)+'</div>'
+    : '<div style="margin-top:6px;font-size:11px;color:var(--text-2);line-height:1.5">Your host sets it — the target is host-owned configuration, so nothing here needs re-signing once they do.</div>';
+  return '<div style="margin-top:11px;padding:9px 11px;background:var(--st-stuck-bg);border:1px solid var(--st-stuck-dot);border-radius:10px;min-width:0">'+
+    '<div style="display:flex;align-items:center;gap:8px;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--st-stuck-fg)">'+
+      '<span style="display:flex;flex:none">'+IC.warn+'</span>No deployment target</div>'+
+    '<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-2);line-height:1.55">'+
+      'This contract is signed and locked, and there is nowhere to point at. '+
+      'Nobody can test it until one is set'+(host?'':' by your host')+'.</p>'+fix+'</div>';
 }
 
 /* ---------- todo panel (the right column, when a task has todos) ----------
@@ -1900,7 +2076,9 @@ function todoModalHTML(d){
      status band carries who has said `fixed` instead of who signed. */
   var debug = isDebugTask(d);
   var right = debug ? '' : '<div style="min-width:0">'+
-      contractHTML({id:d.id+'#'+t.id, contract:t.contract})+
+      /* `task`/`todoNo` ride along for noTargetHTML: the fix it prints is a CLI line, and
+         a CLI line needs the task id and the per-task `#N` the host actually types. */
+      contractHTML({id:d.id+'#'+t.id, contract:t.contract, task:d.id, todoNo:todoNo(t)})+
       reviewAsideHTML(d,t)+
     '</div>';
 
@@ -2530,19 +2708,21 @@ var MCP_TOOLS=[
   ['Status',[
     ['report_status','ready / checked / blocked / verified / stuck, on todo N']
   ]],
-  /* Files — the two HTTP routes lead because they are how bytes actually MOVE: the agent
-     shells out and the file never enters its context. They are the one exception to the
-     tools.py rule above (an HTTP route is not an MCP tool) and they earn it —
-     `upload_file`/`get_file` carry the file as a base64 tool ARGUMENT, so the agent has to
-     generate or swallow the whole encoding, and an 8 MB file will not fit in a context at
-     all. Same order, and the same reason, as the file-sharing section of
+  /* Files — `upload_url` leads because it is the whole upload story now, and the reason is
+     a security one rather than a cost one. The raw byte routes need a bearer token; an
+     agent HAS no bearer token (its MCP client attaches one it never sees), so the old
+     guidance sent agents hunting through config files for a credential — one of them
+     scraped seven other tasks' live tokens and tried each against the broker in turn. The
+     broker now mints a signed, 15-minute, single-purpose URL instead, and the raw routes
+     are no longer named to anybody. `upload_file`/`get_file` stay for a client that cannot
+     run a shell, and are listed last because they put the whole base64 encoding through
+     the agent's context. Same order, and the same reason, as the file-sharing section of
      RULES_OF_ENGAGEMENT in `rules.py`; keep the two agreeing. */
   ['Files',[
-    ['POST /files/<task-id>','share a screenshot, design or artefact — raw bytes over curl, nothing through the agent’s context'],
-    ['GET /files/<task-id>/<file-id>','fetch one back the same way; the task id in the path must be yours or it is refused'],
-    ['list_files','what has been shared on the task'],
-    ['upload_file','under ~100 KB just use this — one call, no shell; above that use the route'],
-    ['get_file','same rule — small file, just call it; large one, use the route']
+    ['upload_url','how you share a file: the broker returns a signed url, the agent curls the bytes to it — no token, nothing through its context'],
+    ['list_files','what has been shared, each entry with a signed download url'],
+    ['get_file','read one back — fine for a small file; for a large one curl the url from the listing'],
+    ['upload_file','base64 through a tool argument — only for a client that cannot run a shell']
   ]],
   ['Meta',[
     ['readiness_check','see the pre-flight questions'],
@@ -2807,6 +2987,63 @@ function workflowsPanelBody(d){
     link;
 }
 
+/* ---------- HOST CLI ----------
+   The third vocabulary in this panel, and the only one a HUMAN types into a TERMINAL:
+   `SHORTCODES` is what you say to your own agent, `MCP_TOOLS` is what that agent calls,
+   and this is what the host runs on the machine the broker is on.
+
+   EVERY ROW COMES OFF THE WIRE. `/api/cli` walks cli.py's argparse definitions, so this
+   list is the commands THIS broker accepts, by construction. That is not neatness: the
+   owner lost a working session hunting for `sys-buddy task staging-url --todo N`, which
+   had shipped in v2.0.0 and simply was not written down anywhere they were looking. A
+   hand-typed list would have had exactly the same hole — see the `upto` that went missing
+   from the cheatsheet, the file-types list that drifted twice, and the releases page that
+   sat four versions stale.
+
+   Rows keep REGISTRATION order (the API preserves it), so the `task` and `todo` families
+   arrive already clustered and the heading is emitted whenever `group` changes — the same
+   trick shortcodesHTML uses, and for the same reason: no second structure to keep in step.
+
+   Sits ABOVE Broker tools deliberately. The two sections a human acts on are the two at
+   the top; the long-form tool list is what the AGENT calls and belongs last. Burying the
+   CLI under it would reproduce the exact failure this section exists to fix. */
+function hostCliHTML(){
+  var c=state.cli;
+  if(!c) return '<div style="font-size:12px;color:var(--text-3)">Loading…</div>';
+  if(c.error || !(c.commands||[]).length){
+    return '<div style="font-size:12px;color:var(--text-3);line-height:1.5">Couldn’t load the command list from this broker. <span style="font-family:'+MONO+'">sys-buddy --help</span> lists the same thing in your terminal.</div>';
+  }
+  var group=null, rows='';
+  c.commands.forEach(function(cmd){
+    var g=cmd.group||'';
+    if(g!==group){
+      group=g;
+      if(g) rows+='<div style="color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:9px 0 1px">'+esc(g)+'</div>';
+      else rows+='<div style="height:7px"></div>';
+    }
+    /* The usage line carries its own brackets from the API (`<task>` required,
+       `[--todo N]` not), because the bracket convention IS the required/optional fact —
+       re-deriving it here would be a second opinion about the same argparse action. */
+    var args=(cmd.args||[]).filter(function(a){ return a.help; }).map(function(a){
+      return '<div style="display:flex;gap:8px;align-items:baseline;padding:1px 0 1px 13px">'+
+        '<span style="flex:none;min-width:104px;font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text-2);white-space:nowrap">'+esc(a.name)+'</span>'+
+        '<span style="min-width:0;font-size:11.5px;color:var(--text-3);line-height:1.45">'+esc(a.help)+'</span></div>';
+    }).join('');
+    rows+='<div style="padding:4px 0 5px">'+
+      '<div style="font-family:'+MONO+';font-size:11px;font-weight:600;color:var(--text);word-break:break-word;line-height:1.5">'+esc(cmd.usage)+'</div>'+
+      (cmd.help?'<div style="font-size:12px;color:var(--text-2);line-height:1.45;margin-top:1px">'+esc(cmd.help)+'</div>':'')+
+      args+'</div>';
+  });
+  var globals=(c.global_options||[]).filter(function(a){ return a.help; }).map(function(a){
+    return '<div style="display:flex;gap:8px;align-items:baseline;padding:1px 0"><span style="flex:none;min-width:104px;font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text-2)">'+esc(a.name)+'</span>'+
+      '<span style="min-width:0;font-size:11.5px;color:var(--text-3)">'+esc(a.help)+'</span></div>';
+  }).join('');
+  if(globals) globals='<div style="color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:11px 0 1px">any command</div>'+globals;
+  return '<div style="display:flex;flex-direction:column;font-size:12.5px;color:var(--text-2);line-height:1.45">'+
+    '<p style="margin:0 0 2px">What the <em>host</em> types in their own terminal, on the machine the broker runs on. Read straight off this broker’s CLI, so it lists what this version actually accepts.</p>'+
+    rows+globals+'</div>';
+}
+
 function commandsPanelBody(d){
   var mode = (d && d.mode==='debug') ? 'debug' : (d ? 'contract' : null);
   var modeNote = mode
@@ -2815,6 +3052,7 @@ function commandsPanelBody(d){
     : '<div style="margin:0 0 12px;font-size:11.5px;color:var(--text-3)">Open a task to see the codes for its mode.</div>';
   return modeNote+
     panelSection('Short commands', shortcodesHTML(d))+
+    panelSection('Host CLI', hostCliHTML())+
     panelSection('Broker tools', mcpToolsHTML(d));
 }
 
@@ -3074,6 +3312,13 @@ function sig(){
     viewer:state.viewer, tasks:tasksLite, detail:state.detail,
     expanded:state.expanded, version:state.version, todoModal:state.todoModal,
     lightbox:state.lightbox, panel:state.panel, narrow:state.narrow, wf:state.wf,
+    /* only whether it has ARRIVED — the list itself is static for the life of the
+       process, so hashing it every render would be pure work for a constant. */
+    cli:state.cli?1:0,
+    /* the host's list controls — without these a chip click would set state and never
+       repaint, because the ROWS may not have changed (a filter that matches the same
+       page). `tasksPage` carries the total/offset the pager prints. */
+    tasksFilter:state.tasksFilter, tasksOffset:state.tasksOffset, tasksPage:state.tasksPage,
     eventFilter:state.eventFilter,
     eventLogOpen:state.eventLogOpen, mobileTab:state.mobileTab, switcherOpen:state.switcherOpen,
     loading:state.detail?0:state.loadingDetail
@@ -3110,34 +3355,38 @@ function render(){
 }
 
 /* ---------- thread scroll ----------
-   The newest message is at the BOTTOM of the thread, because a conversation reads top-down
-   and reversing it would mean reading replies before the things they reply to. That only
-   works if the newest one is actually reachable, and it was not: the box is 640px tall and
-   `render()` replaces `app.innerHTML` wholesale whenever `sig()` changes — and a new message
-   IS a sig change. So the arrival of a message scrolled the reader away from the message
-   that had just arrived, back to the top of the thread.
+   The newest message is at the TOP of the thread (buildThread sorts descending), so the
+   thing you came to read is the thing you land on — no scrolling to the bottom of an
+   afternoon's conversation to find out what just happened.
 
-   Pinned to the bottom instead, UNLESS the reader has deliberately scrolled up to read
-   history — their position is theirs to keep, and yanking someone out of what they are
-   reading because a peer said something is the same defect pointing the other way.
+   The PIN is the same mechanism it has always been, pointing the other way, and the
+   property it protects is unchanged: `render()` replaces `app.innerHTML` wholesale
+   whenever `sig()` changes — and a new message IS a sig change — so without this the
+   arrival of a message would jump the reader somewhere they did not ask to be. Before
+   v2.2.0 that meant "away from the message that just arrived"; the same code with the
+   ends swapped now means "away from the history you scrolled down into".
 
-   The event log needs none of this: it is newest-first, so its newest row is already the one
-   you see. */
+   So: pinned to the top, UNLESS the reader has deliberately scrolled DOWN to read back.
+   Their position is theirs to keep, and yanking someone out of what they are reading
+   because a peer said something is the same defect either way round.
+
+   The event log needs none of this: it is newest-first too, so its newest row is already
+   the one you see. */
 var THREAD_ID='sb-thread-scroll';
 function threadScroll(){
   var el=document.getElementById(THREAD_ID);
   if(!el) return null;
-  /* 40px of slack. "At the bottom" has to survive fractional scrollHeight and the browser's
-     own rounding, or the pin quietly stops engaging for readers who are, visibly, at the
-     bottom. */
-  return {top:el.scrollTop, atBottom:(el.scrollHeight-el.scrollTop-el.clientHeight)<=40};
+  /* 40px of slack, for the same reason it was there on the other end: "at the top" has to
+     survive fractional scroll offsets and the browser's own rounding, or the pin quietly
+     stops engaging for readers who are, visibly, at the top. */
+  return {top:el.scrollTop, atTop:el.scrollTop<=40};
 }
 function restoreThreadScroll(prev){
   var el=document.getElementById(THREAD_ID);
   if(!el) return;
   /* No previous box means this is the thread's first paint — opening a task, or coming back
      to one. Open on the newest message, which is what someone checking in wants to see. */
-  if(!prev || prev.atBottom) el.scrollTop=el.scrollHeight;
+  if(!prev || prev.atTop) el.scrollTop=0;
   else el.scrollTop=prev.top;
 }
 function messageBody(title,body){
@@ -3192,6 +3441,9 @@ function bind(){
        close an open task switcher, so the two never sit on screen together. */
     var k=el.getAttribute('data-panel');
     state.panel = (state.panel===k) ? null : k;
+    /* The Commands panel is the only reader of /api/cli, so it is the only thing that
+       asks for it. fetchCli() is a no-op once it has landed. */
+    if(state.panel==='commands') fetchCli();
     render();
   }; });
   app.querySelectorAll('[data-panel-close]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.panel=null; render(); }; });
@@ -3211,6 +3463,33 @@ function bind(){
   app.querySelectorAll('[data-lb-close]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.lightbox=null; render(); }; });
   app.querySelectorAll('[data-ep]').forEach(function(el){ el.onclick=function(){ var k=el.getAttribute('data-ep'); state.expanded[k]=!state.expanded[k]; render(); }; });
   app.querySelectorAll('[data-filter]').forEach(function(el){ el.onclick=function(){ state.eventFilter=el.getAttribute('data-filter'); render(); }; });
+  /* Task-list filters (host only — the controls don't render without a `page` block).
+     Every one REFETCHES rather than filtering what is already loaded: the WHERE is on the
+     broker, which is what makes the payload shrink too. Changing a filter resets to the
+     first page — staying on page 4 of a set that now has one page shows an empty board. */
+  function setTasksFilter(fn){
+    fn(state.tasksFilter);
+    state.tasksOffset=0;
+    render(); fetchTasks();
+  }
+  app.querySelectorAll('[data-tfilter]').forEach(function(el){ el.onclick=function(){
+    var v=el.getAttribute('data-tfilter');
+    setTasksFilter(function(f){ f.status=v; });
+  }; });
+  var tf=app.querySelector('[data-tfrom]'); if(tf) tf.onchange=function(){ var v=tf.value; setTasksFilter(function(f){ f.from=v; }); };
+  var tt2=app.querySelector('[data-tto]'); if(tt2) tt2.onchange=function(){ var v=tt2.value; setTasksFilter(function(f){ f.to=v; }); };
+  var tc=app.querySelector('[data-tclear]'); if(tc) tc.onclick=function(){
+    setTasksFilter(function(f){ f.status='active'; f.from=''; f.to=''; });
+  };
+  app.querySelectorAll('[data-tpage]').forEach(function(el){ el.onclick=function(){
+    var p=state.tasksPage; if(!p||!p.limit) return;
+    var next = el.getAttribute('data-tpage')==='next'
+      ? (p.offset||0)+p.limit
+      : Math.max(0,(p.offset||0)-p.limit);
+    if(next===state.tasksOffset) return;
+    state.tasksOffset=next;
+    render(); fetchTasks();
+  }; });
   app.querySelectorAll('[data-tab]').forEach(function(el){ el.onclick=function(){ state.mobileTab=el.getAttribute('data-tab'); render(); }; });
   var elg=app.querySelector('[data-eventlog]'); if(elg) elg.onclick=function(){ state.eventLogOpen=!state.eventLogOpen; render(); };
   app.querySelectorAll('.sb-row').forEach(function(el){
