@@ -10,6 +10,14 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.8.0](https://github.com/tooney92/sys-buddy/compare/v2.7.1...v2.8.0) (2026-08-08)
+
+
+### Added
+
+* agents stop hunting for tokens, and the board stops hiding what you need ([#80](https://github.com/tooney92/sys-buddy/issues/80)) ([2edbac6](https://github.com/tooney92/sys-buddy/commit/2edbac683b66f05d6db92405e7dd435bca1ec983))
+* an agent can leave a todo, and a host can remove one that has gone silent ([#82](https://github.com/tooney92/sys-buddy/issues/82)) ([f91f2fc](https://github.com/tooney92/sys-buddy/commit/f91f2fcefeda4cafc6109718455252d81735bbde))
+
 ## [2.7.1](https://github.com/tooney92/sys-buddy/compare/v2.7.0...v2.7.1) (2026-08-06)
 
 
