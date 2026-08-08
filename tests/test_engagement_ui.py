@@ -336,7 +336,10 @@ def test_the_guidelines_sit_beside_the_contract_at_review_time():
     # aside directly under it, so a reviewer reads the rules and the thing they govern
     # without leaving the dialog.
     modal = _fn("todoModalHTML")
-    assert "contract:t.contract})+" in modal
+    # The synthetic object also carries `task`/`todoNo` now (noTargetHTML prints a CLI
+    # line, which needs them); what this holds is that the CONTRACT card is what the
+    # right-hand column renders.
+    assert "contract:t.contract" in modal
     assert "reviewAsideHTML(d,t)" in modal
     aside = _fn("reviewAsideHTML")
     assert "guidelinesCardHTML" in aside and "todoDeliverablesHTML" in aside
@@ -609,4 +612,7 @@ def test_the_in_flight_count_excludes_finished_tasks():
         "the header still counts every task as in flight"
     )
     assert "TERMINAL[t.state]" in src, "the count does not consult the terminal states"
-    assert "+inFlight+' in flight" in src
+    assert "inFlight+' in flight'" in src
+    # A PAGED board says where it is in the set instead of making a claim it can only
+    # stand behind for one page — the same defect this test was written for, one step on.
+    assert "of '+(p.total||0)" in src

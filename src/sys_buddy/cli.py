@@ -708,6 +708,122 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# --------------------------------------------------------------------------- #
+# command catalog — the HOST CLI, READ OUT OF THE PARSER ABOVE
+# --------------------------------------------------------------------------- #
+# The dashboard's Commands panel lists these, and it must never carry a second,
+# hand-typed copy of them. Every hand-maintained list in this codebase has drifted —
+# the shortcode cheatsheet lost `upto`, the file-types list drifted twice, the website's
+# releases page sat four versions stale — and a stale list of commands is worse than
+# those, because the reader concludes the capability does not exist. That is exactly
+# what happened with `task staging-url --todo N`, which had shipped in v2.0.0 and cost a
+# working session because nothing on screen said it was there.
+#
+# So the panel is GENERATED. `ui.html` is a static file and cannot import Python, so the
+# seam is the API: `api._cli_catalog` serves this, the page renders it. Nothing here is
+# written down twice — walk `build_parser()` and you have, by construction, exactly what
+# the CLI accepts.
+def _arg_entry(action: argparse.Action) -> dict:
+    """One argument, as the panel needs to read it: what to type, and why.
+
+    ``usage`` carries its own brackets — ``<task>`` is required, ``[--todo N]`` is not —
+    because the bracket convention IS the required/optional fact and splitting them
+    across two fields invites a renderer that disagrees with itself.
+    """
+    if action.option_strings:
+        flag = action.option_strings[0]
+        # nargs == 0 is argparse's spelling of a flag that takes no value (store_true).
+        takes_value = action.nargs != 0
+        metavar = action.metavar or action.dest.upper()
+        spelling = f"{flag} <{metavar}>" if takes_value else flag
+        return {
+            "name": flag,
+            "kind": "option",
+            "required": bool(action.required),
+            "usage": spelling if action.required else f"[{spelling}]",
+            "help": action.help or "",
+        }
+    name = action.metavar or action.dest
+    optional = action.nargs in ("?", "*")
+    return {
+        "name": name,
+        "kind": "positional",
+        "required": not optional,
+        "usage": f"[{name}]" if optional else f"<{name}>",
+        "help": action.help or "",
+    }
+
+
+def _visible_actions(parser: argparse.ArgumentParser) -> list[argparse.Action]:
+    """Everything a human types, minus argparse's own plumbing.
+
+    ``--help`` and ``--version`` are argparse furniture on every parser; listing them
+    once per command would bury the arguments that differ.
+    """
+    return [
+        a
+        for a in parser._actions
+        if not isinstance(a, (argparse._HelpAction, argparse._VersionAction,
+                              argparse._SubParsersAction))
+    ]
+
+
+def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction | None:
+    for a in parser._actions:
+        if isinstance(a, argparse._SubParsersAction):
+            return a
+    return None
+
+
+def _walk(parser: argparse.ArgumentParser, path: tuple[str, ...] = ()) -> list[dict]:
+    """Every LEAF command under ``parser``, in registration order.
+
+    A parser that itself has subcommands (``task``, ``todo``) is a grouping, not
+    something you can run, so it contributes its name to its children's path and no row
+    of its own. Registration order is preserved (argparse's ``choices`` is insertion
+    ordered), which is why the rows cluster by group without anything sorting them.
+    """
+    sub = _subparsers(parser)
+    if sub is None:
+        return []
+    # Subcommand help lives on the pseudo-actions argparse builds for the listing, not
+    # on the child parser — read it from there rather than restating it.
+    helps = {a.dest: (a.help or "") for a in sub._choices_actions}
+    out: list[dict] = []
+    for name, child in sub.choices.items():
+        child_path = path + (name,)
+        if _subparsers(child) is not None:
+            out.extend(_walk(child, child_path))
+            continue
+        args = [_arg_entry(a) for a in _visible_actions(child)]
+        out.append(
+            {
+                "name": " ".join(child_path),
+                # "" for a top-level command, else the parent it hangs under, so the
+                # panel can head `task create` / `task roster` with one `task` label
+                # without a second table saying which commands are nested.
+                "group": " ".join(child_path[:-1]),
+                "help": helps.get(name, "") or (child.description or ""),
+                "usage": " ".join(["sys-buddy", *child_path] + [a["usage"] for a in args]),
+                "args": args,
+            }
+        )
+    return out
+
+
+def command_catalog() -> dict:
+    """The host's whole CLI, derived from :func:`build_parser`.
+
+    ``{"commands": [...], "global_options": [...]}``. Pure and cheap; the API memoises
+    it because a parser is identical for the life of a process.
+    """
+    p = build_parser()
+    return {
+        "commands": _walk(p),
+        "global_options": [_arg_entry(a) for a in _visible_actions(p)],
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     import os
 

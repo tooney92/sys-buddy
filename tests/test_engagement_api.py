@@ -492,8 +492,11 @@ def test_the_task_list_row_is_untouched(conn):
     viewer = _viewer(conn)
 
     (row,) = api._list_tasks_for(conn, viewer)
+    # `closed` joined this set when the list learned to hide closed tasks: it is not a
+    # `state`, so the row has to carry it separately. Nothing about ENGAGEMENT is here,
+    # which is what this test is actually holding.
     assert set(row) == {
-        "id", "title", "state", "mode", "roles", "seat_roles", "last", "strikes"
+        "id", "title", "state", "mode", "roles", "seat_roles", "last", "strikes", "closed"
     }
     assert row["mode"] == "engagement"
 

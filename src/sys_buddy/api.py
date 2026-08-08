@@ -21,6 +21,7 @@ scope, open/close a connection, and serialise.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import re
 import time
@@ -182,6 +183,40 @@ def viewer_block(viewer: ViewerIdentity) -> dict:
     return block
 
 
+def _date_param(value: str | None, *, end_of_day: bool = False) -> float | None:
+    """A ``YYYY-MM-DD`` query param as a LOCAL-midnight epoch, or ``None``.
+
+    Local, not UTC: the human picking the date is looking at a dashboard whose every
+    other timestamp is local (``_hhmm`` uses ``localtime``), and a range that quietly
+    means UTC drops or adds a day's tasks at either end.
+
+    Garbage parses to ``None`` — an unparseable date means "no bound", never an error
+    screen and never a silent empty board.
+    """
+    if not value:
+        return None
+    try:
+        parts = [int(p) for p in value.split("-")]
+        if len(parts) != 3:
+            return None
+        y, m, d = parts
+        base = time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))
+    except (ValueError, OverflowError):
+        return None
+    return base + 86400 if end_of_day else base
+
+
+def _int_param(value: str | None, default: int | None) -> int | None:
+    """A non-negative int query param, or ``default`` for anything else."""
+    if value is None or value == "":
+        return default
+    try:
+        n = int(value)
+    except ValueError:
+        return default
+    return n if n >= 0 else default
+
+
 def viewer_can_see(viewer: ViewerIdentity, task_id: str) -> bool:
     """True iff this token is allowed to read ``task_id``. Host sees all; buddy one."""
     return viewer.is_host or viewer.task_id == task_id
@@ -206,23 +241,96 @@ def _last_activity(conn, task_id: str, created_at: float) -> float:
     return row["last"] if row and row["last"] is not None else created_at
 
 
-def _list_tasks_for(conn, viewer: ViewerIdentity, *, now: float | None = None) -> list[dict]:
+# Task-list status buckets, as SQL. Written as a partition, not as overlapping moods:
+# a task is exactly one of these, so picking one filter can never hide a row that another
+# one also claims. `closed` is orthogonal to the state machine (a task is closed AT
+# whatever state it had reached), which is why every other bucket carries
+# `closed_at IS NULL` — and why "hide closed" is the default rather than a state filter.
+#
+# Derived from `state`'s own constants, never retyped: a new terminal state must not
+# silently fall out of every bucket and become invisible to the filter that exists to
+# find it.
+_TERMINAL_DONE = (state.VERIFIED, state.CONFIRMED, state.RESOLVED)
+
+
+def _status_sql(status: str | None) -> tuple[str, list]:
+    """``(sql_fragment, params)`` for one status bucket. Unknown/absent → the default.
+
+    The DEFAULT is "everything not closed". A closed task is finished AND its credentials
+    are all revoked (``admin.close_task``), so it is history — on a board of fifty it is
+    only ever in the way, and it is one filter click from view.
+    """
+    done = ",".join("?" for _ in _TERMINAL_DONE)
+    if status == "closed":
+        return "closed_at IS NOT NULL", []
+    if status == "all":
+        return "1=1", []
+    if status == "open":
+        return "closed_at IS NULL AND state = ?", [state.OPEN]
+    if status == "in_flight":
+        return (
+            f"closed_at IS NULL AND state != ? AND state NOT IN ({done}) AND state != ?",
+            [state.OPEN, *_TERMINAL_DONE, state.STUCK],
+        )
+    if status == "verified":
+        return f"closed_at IS NULL AND state IN ({done})", list(_TERMINAL_DONE)
+    if status == "stuck":
+        return "closed_at IS NULL AND state = ?", [state.STUCK]
+    return "closed_at IS NULL", []
+
+
+# What `?status=` accepts. Named here so the route can reject a typo rather than
+# silently serve the default, and so a test can hold the dashboard's chips to this set.
+TASK_STATUS_FILTERS = ("active", "open", "in_flight", "verified", "stuck", "closed", "all")
+# One page of the host's board. Big enough that most hosts never page at all.
+TASK_PAGE_LIMIT = 25
+
+
+def _list_tasks_for(
+    conn,
+    viewer: ViewerIdentity,
+    *,
+    now: float | None = None,
+    status: str | None = None,
+    since: float | None = None,
+    until: float | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict]:
     """The task list the token is allowed to see (SPEC §11 ``/api/tasks``).
 
     Scoping is a SQL ``WHERE``, not a post-filter: a buddy's query selects only
     their one task, so no other task's existence is even observable to them.
+
+    NEWEST FIRST. A host's board grows and never shrinks, so ``ORDER BY created_at``
+    ascending put the tasks they are actually working on at the bottom of a scroll.
+
+    Every filter below applies to the HOST branch only, and that is not a shortcut. A
+    buddy's token resolves to exactly one task; filtering it would mean a buddy whose
+    task is closed (or falls outside a date range they never chose) gets an empty list
+    and a broken dashboard. Their query stays the one it has always been.
     """
+    cols = (
+        "SELECT id, title, state, mode, roles_json, seat_roles_json, strikes, created_at, "
+        "closed_at FROM tasks "
+    )
     if viewer.is_host:
-        rows = conn.execute(
-            "SELECT id, title, state, mode, roles_json, seat_roles_json, strikes, created_at "
-            "FROM tasks ORDER BY created_at"
-        ).fetchall()
+        where, params = _status_sql(status)
+        if since is not None:
+            where += " AND created_at >= ?"
+            params.append(since)
+        if until is not None:
+            where += " AND created_at < ?"
+            params.append(until)
+        # `id` breaks the tie so a page boundary is stable: two tasks created in the
+        # same second must not swap places between one page request and the next.
+        sql = cols + f"WHERE {where} ORDER BY created_at DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params += [limit, max(0, offset)]
+        rows = conn.execute(sql, params).fetchall()
     else:
-        rows = conn.execute(
-            "SELECT id, title, state, mode, roles_json, seat_roles_json, strikes, created_at "
-            "FROM tasks WHERE id = ?",
-            (viewer.task_id,),
-        ).fetchall()
+        rows = conn.execute(cols + "WHERE id = ?", (viewer.task_id,)).fetchall()
 
     out = []
     for r in rows:
@@ -238,6 +346,10 @@ def _list_tasks_for(conn, viewer: ViewerIdentity, *, now: float | None = None) -
             "seat_roles": seats.seat_roles_of(conn, r["id"]),
             "last": _time_ago(_last_activity(conn, r["id"], r["created_at"]), now=now),
             "strikes": r["strikes"],
+            # Closed is not a `state` — a task is closed AT whatever state it reached —
+            # so the row has to carry it separately or a closed task is indistinguishable
+            # from a live one the moment the filter lets one through.
+            "closed": r["closed_at"] is not None,
         }
         # The list row carries the same rollup as the task view ("2/6 verified ⚠1") so a
         # host can triage without opening anything. ABSENT — not empty — for a task with
@@ -247,6 +359,85 @@ def _list_tasks_for(conn, viewer: ViewerIdentity, *, now: float | None = None) -
             row["todo_rollup"] = roll
         out.append(row)
     return out
+
+
+def _count_tasks_for(
+    conn,
+    viewer: ViewerIdentity,
+    *,
+    status: str | None = None,
+    since: float | None = None,
+    until: float | None = None,
+) -> int:
+    """How many tasks the filter matches, ignoring the page window.
+
+    Same ``WHERE`` as :func:`_list_tasks_for` — deliberately the same helper, so the
+    count and the rows can never describe different populations. A buddy counts their
+    one task and nothing else: the count must not become the side channel that tells
+    them how many tasks exist.
+    """
+    if not viewer.is_host:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE id = ?", (viewer.task_id,)
+        ).fetchone()
+        return row["n"]
+    where, params = _status_sql(status)
+    if since is not None:
+        where += " AND created_at >= ?"
+        params.append(since)
+    if until is not None:
+        where += " AND created_at < ?"
+        params.append(until)
+    row = conn.execute(f"SELECT COUNT(*) AS n FROM tasks WHERE {where}", params).fetchone()
+    return row["n"]
+
+
+def _tasks_payload(
+    conn,
+    viewer: ViewerIdentity,
+    *,
+    status: str | None = None,
+    since: float | None = None,
+    until: float | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict:
+    """The ``/api/tasks`` body: the rows, plus the page a HOST is looking at.
+
+    ``page`` is present for a host and absent for a buddy, and the dashboard keys its
+    filter/pagination controls off exactly that. A buddy's token resolves to one task, so
+    a status chip or a "next page" button on their screen would be a control that can
+    only ever do nothing — the reason the filters are a host-side WHERE and not a
+    client-side filter over a payload everyone gets.
+    """
+    tasks = _list_tasks_for(
+        conn, viewer, status=status, since=since, until=until, limit=limit, offset=offset
+    )
+    body = {"viewer": viewer_block(viewer), "tasks": tasks}
+    if viewer.is_host:
+        body["page"] = {
+            "total": _count_tasks_for(conn, viewer, status=status, since=since, until=until),
+            "limit": limit,
+            "offset": max(0, offset),
+            "status": status or "active",
+        }
+    return body
+
+
+# --------------------------------------------------------------------------- #
+# the host's CLI, for the dashboard's Commands panel
+# --------------------------------------------------------------------------- #
+@functools.lru_cache(maxsize=1)
+def _cli_catalog() -> dict:
+    """Every host CLI command, WALKED OUT OF ``cli.build_parser`` (see its catalog
+    section for why this is generated and never hand-listed).
+
+    Memoised: the parser is identical for the life of the process, and building it
+    imports ``admin`` for ``--mode``'s choices.
+    """
+    from . import cli
+
+    return cli.command_catalog()
 
 
 # --------------------------------------------------------------------------- #
@@ -1319,16 +1510,58 @@ def register_api_routes(mcp, cfg: Config) -> None:
 
     @mcp.custom_route("/api/tasks", methods=["GET"])
     async def api_tasks(request):
+        """The task list, newest first, closed hidden unless asked for.
+
+        ``?status=`` / ``?from=`` / ``?to=`` / ``?limit=`` / ``?offset=`` are SERVER-side
+        (see ``_list_tasks_for``): the filter shrinks the payload, it does not hide rows
+        the browser was sent anyway. They are honoured for a host only — a buddy's token
+        already selects exactly one task by id, and that WHERE is the scoping guarantee.
+        """
         conn = connect()
         try:
             viewer = _resolve(request, conn)
             if viewer is None:
                 return _unauthorized(request)
+            q = request.query_params
+            status = q.get("status")
+            if status is not None and status not in TASK_STATUS_FILTERS:
+                return JSONResponse({"error": "bad status"}, status_code=400)
             return JSONResponse(
-                {"viewer": viewer_block(viewer), "tasks": _list_tasks_for(conn, viewer)}
+                _tasks_payload(
+                    conn,
+                    viewer,
+                    status=status,
+                    since=_date_param(q.get("from")),
+                    # `to` is INCLUSIVE of the day the human picked: they mean "up to and
+                    # including the 5th", so the bound is midnight at the START of the 6th
+                    # (`created_at < until`). A naive `<= the 5th` matches nothing created
+                    # after 00:00:00 that morning.
+                    until=_date_param(q.get("to"), end_of_day=True),
+                    limit=_int_param(q.get("limit"), TASK_PAGE_LIMIT),
+                    offset=_int_param(q.get("offset"), 0) or 0,
+                )
             )
         finally:
             conn.close()
+
+    @mcp.custom_route("/api/cli", methods=["GET"])
+    async def api_cli(request):
+        """The host's CLI commands, generated from ``cli.build_parser``.
+
+        Authenticated like every other ``/api/*`` route (it is served to the dashboard,
+        which always has a viewer token) though it carries no task data at all — just the
+        commands this broker's own version accepts. That last part is the point: a
+        dashboard served by an older broker documents THAT broker's CLI, not a list
+        someone typed into the page months ago.
+        """
+        conn = connect()
+        try:
+            viewer = _resolve(request, conn)
+            if viewer is None:
+                return _unauthorized(request)
+        finally:
+            conn.close()
+        return JSONResponse(_cli_catalog())
 
     @mcp.custom_route("/api/task/{id}", methods=["GET"])
     async def api_task(request):

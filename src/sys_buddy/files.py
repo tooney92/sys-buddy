@@ -1,14 +1,17 @@
 """File sharing on a task — design bundles (zip), screenshots (png/jpg), HTML, PDFs. No video.
 
-Two ways in, one way out:
+Two ways in:
 
-* ``POST /files/{task_id}`` — raw bytes, the agent's own bearer token, task id in the path.
-  This is the one that should be used; see ``register_upload_route`` for why base64 through a
-  tool argument is so expensive.
+* a SIGNED URL from the ``upload_url`` tool, POSTed with ``curl --data-binary``. The broker
+  hands the agent the whole URL, already scoped to its task and expiring in 15 minutes, so
+  the agent needs no credential of its own and is never asked to find one. This is the
+  route agents should use, and ``signing.py`` explains at length what went wrong when they
+  were told to find a bearer token instead.
 * the MCP ``upload_file`` tool — base64 in an argument, for an agent with no shell.
 
-Out is always ``get_file`` / ``GET /api/file/{id}``, never a URL from chat — the same
-invariant that limits an agent to the signed ``staging_url``. An uploaded file is DATA: a
+Out is ``get_file``, the read ``url`` that ``list_files`` now carries on every entry, or the
+dashboard's ``GET /api/file/{id}`` — never a URL from chat, the same invariant that limits an
+agent to the broker-validated ``staging_url``. An uploaded file is DATA: a
 consumer inspects/extracts it, never runs it (Rules of Engagement). The broker only stores
 and serves bytes; it does NOT unpack archives, so there is no server-side zip-bomb or
 path-traversal surface — safe extraction is the consumer's job, just as interpreting a peer
@@ -23,7 +26,7 @@ from __future__ import annotations
 import re
 import time
 
-from . import service
+from . import service, signing
 from .identity import resolve_agent_token
 from .service import Identity
 
@@ -82,15 +85,14 @@ def _kind_for(content_type: str, kind: str | None) -> str:
     return ALLOWED_TYPES.get(content_type, "other")
 
 
-def upload_file(
-    conn, identity: Identity, name: str, data: bytes,
-    content_type: str, kind: str | None = None,
-) -> dict:
-    """Store a file on ``identity``'s task. ``data`` is raw bytes (the tool layer
-    base64-decodes before calling). Returns a small receipt (no bytes).
+def check_uploadable(conn, task_id: str, name: str, content_type: str) -> str:
+    """Everything about an upload that can be judged BEFORE the bytes exist. Returns the
+    cleaned name; raises a clear, agent-readable ValueError otherwise.
 
-    Rejects — with a clear, agent-readable ValueError — an unsupported type, an empty or
-    oversized file, or a missing name; and refuses a closed/unknown task.
+    Split out so ``upload_url`` can run exactly these checks at MINT time. An agent that
+    asks for a URL with a bad name, an unsupported type or a closed task should be told
+    immediately — not after it has shelled out and POSTed 8 MB at a URL that was never
+    going to work. Same function, so the two answers can never diverge.
     """
     name = (name or "").strip()
     if not name:
@@ -104,6 +106,26 @@ def upload_file(
             f"unsupported file type '{content_type}'. Allowed: "
             f"{', '.join(sorted(ALLOWED_TYPES))} — no video."
         )
+    task = conn.execute(
+        "SELECT closed_at FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if task is None:
+        raise ValueError(f"unknown task '{task_id}'")
+    if task["closed_at"] is not None:
+        raise ValueError(f"task '{task_id}' is closed")
+    return name
+
+
+def upload_file(
+    conn, identity: Identity, name: str, data: bytes,
+    content_type: str, kind: str | None = None,
+) -> dict:
+    """Store a file on ``identity``'s task. ``data`` is raw bytes (the tool layer
+    base64-decodes before calling). Returns a small receipt (no bytes).
+
+    Rejects — with a clear, agent-readable ValueError — an unsupported type, an empty or
+    oversized file, or a missing name; and refuses a closed/unknown task.
+    """
     if not data:
         raise ValueError("empty file — nothing to upload")
     if len(data) > MAX_FILE_BYTES:
@@ -111,14 +133,7 @@ def upload_file(
             f"file is ~{len(data) // 1024 // 1024} MB, over the "
             f"{MAX_FILE_BYTES // 1024 // 1024} MB limit"
         )
-
-    task = conn.execute(
-        "SELECT closed_at FROM tasks WHERE id = ?", (identity.task_id,)
-    ).fetchone()
-    if task is None:
-        raise ValueError(f"unknown task '{identity.task_id}'")
-    if task["closed_at"] is not None:
-        raise ValueError(f"task '{identity.task_id}' is closed")
+    name = check_uploadable(conn, identity.task_id, name, content_type)
 
     resolved_kind = _kind_for(content_type, kind)
     now = time.time()
@@ -236,6 +251,15 @@ def file_response(f: dict):
 # either. Same rule the contract tools follow with `todo=N`: name the target, and be told
 # when you named the wrong one. It holds on the way OUT too, where it is also the scoping
 # rule: an agent may only read files on the task its own token belongs to.
+#
+# THE CREDENTIAL, THOUGH, WAS THE PROBLEM. These routes need `Authorization: Bearer <token>`
+# and an agent DOES NOT HAVE ONE — the MCP client attaches it, and the model never sees it.
+# Telling agents to find it in their config produced two incidents, one of them an agent
+# harvesting seven other tasks' live tokens and trying each against the broker in turn. So
+# the broker now MINTS the URL: `upload_url` and the `url` on each `list_files` entry are
+# signed, scoped and 15-minute, and the functions below have a second lane that verifies a
+# signature instead of a token. The token lane stays for anything already wired to it; the
+# briefings no longer point anyone at it. `signing.py` has the full story.
 def _bare_content_type(header: str) -> str:
     """``text/html; charset=utf-8`` → ``text/html``. Callers set charsets and boundaries and
     are not wrong to; the allow-list is about the type, not its parameters."""
@@ -330,6 +354,93 @@ def handle_download(
     return rec
 
 
+# --------------------------------------------------------------------------- #
+# the SIGNED lane — the one an agent actually uses
+# --------------------------------------------------------------------------- #
+# A signed URL carries its own authorisation, so these two never look at a bearer token or
+# at ``?agent=``. Everything that matters was decided when the URL was MINTED, by a tool
+# call the agent was already authenticated for: which task, which action, which file, which
+# name and content type, and when it stops working. See ``signing.py`` for why the broker
+# hands the credential out instead of telling the agent to go and find one.
+def _live_agent(conn, agent_id: int, task_id: str) -> Identity | None:
+    """The seat a signed URL was minted for, if it is still live and still on this task.
+
+    Re-checked at USE time rather than trusted from the claim set: a URL outlives the tool
+    call that made it, and a seat that was revoked in between must not still be able to
+    write. Liveness is judged exactly as ``identity.resolve_agent_token`` judges it —
+    revoked and expired are the same answer as never-existed.
+    """
+    row = conn.execute(
+        "SELECT id, task_id, name, role, handle, expires_at FROM agents "
+        "WHERE id = ? AND revoked_at IS NULL",
+        (int(agent_id),),
+    ).fetchone()
+    if row is None or row["task_id"] != task_id:
+        return None
+    if row["expires_at"] is not None and row["expires_at"] < time.time():
+        return None
+    return Identity(
+        agent_id=row["id"], task_id=row["task_id"], name=row["name"],
+        role=row["handle"] or row["role"], role_type=row["role"],
+    )
+
+
+def handle_signed_upload(conn, *, task_id: str, query, data: bytes) -> tuple[dict, int]:
+    """Store bytes POSTed to a signed upload URL, as ``(body, status)``.
+
+    The name, content type and kind come from the SIGNATURE, not from the request — so the
+    agent's command line is one line with nothing in it to get wrong, and the stored file is
+    exactly what the ``upload_url`` call described. A body that lies about its
+    ``Content-Type`` header cannot change what gets recorded.
+
+    Every signature failure — expired, tampered, minted for another task, minted for the
+    read route, minted before a key rotation — is the same opaque 401. There is nothing to
+    learn from telling them apart, and a distinguishable "expired" would confirm that the
+    rest of the URL was otherwise good.
+    """
+    claims = signing.verify(query, act=signing.UPLOAD, task_id=task_id)
+    if claims is None:
+        return {"error": "unauthorized"}, 401
+    ident = _live_agent(conn, claims["aid"], task_id)
+    if ident is None:
+        return {"error": "unauthorized"}, 401
+    try:
+        return upload_file(
+            conn, ident, claims["name"], data, claims["ct"], claims["kind"] or None
+        ), 201
+    except ValueError as e:
+        # Same rule as the token lane: every rejection here is the caller's to fix, and the
+        # message is already written to be read by an agent.
+        return {"error": str(e)}, 400
+
+
+def handle_signed_download(conn, *, task_id: str, file_id, query) -> tuple[dict, int] | dict:
+    """Serve one file's bytes to a signed read URL, or ``(body, status)`` to refuse.
+
+    **Every** refusal is ``404 not found`` — a bad signature, an expired one, one minted for
+    the upload route, one dragged onto another task's path, and a file that simply does not
+    exist all answer identically. That is the same deliberate indistinguishability
+    ``handle_download`` and ``api._file_for`` keep, and for the same reason: a 403 that
+    means "right signature, wrong file" is an oracle for enumerating file ids.
+
+    A read URL names no seat — see ``signing.read_url`` for why — so there is no agent to
+    look up here; the signature over (task, file, expiry) is the whole authorisation.
+    """
+    claims = signing.verify(
+        query, act=signing.READ, task_id=task_id, file_id=str(file_id)
+    )
+    if claims is None:
+        return {"error": "not found"}, 404
+    try:
+        fid = int(claims["fid"])
+    except (TypeError, ValueError):
+        return {"error": "not found"}, 404
+    rec = get_file(conn, task_id, fid)
+    if rec is None:
+        return {"error": "not found"}, 404
+    return rec
+
+
 def register_upload_route(mcp, cfg) -> None:
     """Mount the two ``/files`` routes — the only ones that move raw bytes for an AGENT.
 
@@ -342,8 +453,16 @@ def register_upload_route(mcp, cfg) -> None:
         POST /files/{task_id}            store bytes, receipt back
         GET  /files/{task_id}/{file_id}  read bytes back
 
-    The dashboard keeps its own reader at ``GET /api/file/{id}`` under a viewer token; both
-    serve through ``file_response`` so the HTML hardening is written once.
+    Each has TWO lanes, chosen by whether the request carries a signature:
+
+    * SIGNED (``sb_sig=…``) — the URL was minted by ``upload_url`` / ``list_files`` for an
+      already-authenticated agent, and carries its own scope and expiry. This is what
+      agents use; they hold no credential of their own.
+    * TOKEN (``Authorization: Bearer``, or ``?agent=`` in local mode) — the original lane,
+      still here so nothing already wired to it breaks, and no longer named in any briefing.
+
+    The dashboard keeps its own reader at ``GET /api/file/{id}`` under a viewer token; all
+    three serve through ``file_response`` so the HTML hardening is written once.
     """
     from starlette.responses import JSONResponse
 
@@ -357,6 +476,17 @@ def register_upload_route(mcp, cfg) -> None:
     async def upload(request):
         conn = connect()
         try:
+            # Signed lane first. A request with no signature falls through to the token /
+            # ?agent= lane exactly as before — the signed URL ADDS a door, it does not
+            # close one, so an existing integration keeps working.
+            if signing.present(request.query_params):
+                body, status = handle_signed_upload(
+                    conn,
+                    task_id=request.path_params["task_id"],
+                    query=request.query_params,
+                    data=await request.body(),
+                )
+                return JSONResponse(body, status_code=status)
             body, status = handle_upload(
                 conn,
                 is_remote=cfg.is_remote,
@@ -376,14 +506,22 @@ def register_upload_route(mcp, cfg) -> None:
     async def download(request):
         conn = connect()
         try:
-            result = handle_download(
-                conn,
-                is_remote=cfg.is_remote,
-                task_id=request.path_params["task_id"],
-                file_id=request.path_params["file_id"],
-                token=_token(request),
-                agent=request.query_params.get("agent", ""),
-            )
+            if signing.present(request.query_params):
+                result = handle_signed_download(
+                    conn,
+                    task_id=request.path_params["task_id"],
+                    file_id=request.path_params["file_id"],
+                    query=request.query_params,
+                )
+            else:
+                result = handle_download(
+                    conn,
+                    is_remote=cfg.is_remote,
+                    task_id=request.path_params["task_id"],
+                    file_id=request.path_params["file_id"],
+                    token=_token(request),
+                    agent=request.query_params.get("agent", ""),
+                )
             if isinstance(result, tuple):
                 body, status = result
                 return JSONResponse(body, status_code=status)

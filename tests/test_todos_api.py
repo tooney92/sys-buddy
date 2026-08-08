@@ -89,8 +89,11 @@ def test_task_list_row_has_no_todo_key_without_todos(conn):
     seed_viewer(conn, "host", "sbv_host", task_id=None)
     viewer = resolve_viewer_token(conn, "sbv_host")
     (row,) = api._list_tasks_for(conn, viewer)
+    # `closed` is part of the base row (the list hides closed tasks by default and has to
+    # be able to mark one when the filter lets it through). `todo_rollup` is what must be
+    # ABSENT here.
     assert set(row) == {
-        "id", "title", "state", "mode", "roles", "seat_roles", "last", "strikes"
+        "id", "title", "state", "mode", "roles", "seat_roles", "last", "strikes", "closed"
     }
 
 
