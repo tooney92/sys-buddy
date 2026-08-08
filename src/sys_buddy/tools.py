@@ -395,6 +395,21 @@ def _op_drop_todo(ident: Identity, todo: int, reason: str) -> dict:
         conn.close()
 
 
+def _op_leave_todo(ident: Identity, todo: int, reason: str) -> dict:
+    """SELF-removal, and note what is NOT in this signature: a seat.
+
+    ``ident`` is stamped by the broker from the caller's token, so the seat that leaves
+    is never something the caller supplies. Both tool bodies below are one line over
+    this, which is what makes "no agent removes a peer" a property of the shape rather
+    than a check somebody could be argued past.
+    """
+    conn = connect()
+    try:
+        return _agent_view(todos.leave_todo(conn, ident, todo, reason))
+    finally:
+        conn.close()
+
+
 # --- file-sharing ops (storage rules live in files.py) --------------------- #
 # JSON can't carry raw bytes, so an upload arrives base64-encoded and a fetch goes
 # back the same way. The base64 <-> bytes conversion is the ONLY thing this layer
@@ -1208,6 +1223,32 @@ def _register_remote(mcp: FastMCP, cfg: Config) -> None:
         return _op_drop_todo(require_current(), todo, reason)
 
     @mcp.tool
+    def leave_todo(todo: int, reason: str) -> dict:
+        """Take YOURSELF off a todo, leaving it alive for everyone else. "We don't need
+        mobile after all" — when mobile is here and agrees.
+
+        This removes only YOU. There is no seat argument and there is no tool that takes
+        one: no agent can remove a peer from a todo, because the moment one could, "both
+        sides sign" would become "whoever proposes wins". If a party has gone SILENT you
+        cannot fix it from here either — their agent cannot call anything, which is what
+        an outage is — so a human does it: their host runs `sys-buddy todo drop-party`
+        from the CLI or the desktop app, and everyone is told who was removed and why.
+
+        The todo's quorum is recalculated over whoever is left, immediately: a contract
+        that was only waiting on your signature-mates locks, an issue everyone else has
+        already reported fixed resolves. Nothing you already did is erased — your
+        acceptance and any signature stay on the record, and `get_contract` says out loud
+        that a signatory has left rather than showing the signature as if you were still
+        bound.
+
+        Refused if you are the last party (that todo would be orphaned — `drop_todo` is
+        the move for abandoning one), if leaving would drop it below the two seats a todo
+        must bind (a solo deliverable has nobody to sign against and nobody who may check
+        it), and once the todo is verified. To come back, a remaining party names you in
+        `repropose_todo(N, parties=[...])`; you cannot re-add yourself."""
+        return _op_leave_todo(require_current(), todo, reason)
+
+    @mcp.tool
     def roster() -> dict:
         """WHO is on this task — every SEAT, including the ones nobody has taken yet.
 
@@ -1806,6 +1847,20 @@ def _register_local(mcp: FastMCP, cfg: Config) -> None:
         if a party has gone silent, their human drops it from the CLI/desktop app.
         Refused once the todo is verified."""
         return _op_drop_todo(_local_identity(task, agent), todo, reason)
+
+    @mcp.tool
+    def leave_todo(task: str, agent: str, todo: int, reason: str) -> dict:
+        """Take YOURSELF off a todo on `task`, leaving it alive for the others. `agent`
+        is YOUR name — it is how you identify yourself on the loopback broker, exactly as
+        in every other local tool, and there is deliberately no seat argument: you can
+        only ever remove yourself, never a peer.
+
+        The todo's quorum is recalculated over whoever is left, so a contract that was
+        only waiting on you locks and an issue everyone else called fixed resolves.
+        Refused if you are the last party, if it would leave the todo below two parties,
+        or once it is verified. A party who has gone SILENT is a human's job:
+        `sys-buddy todo drop-party`."""
+        return _op_leave_todo(_local_identity(task, agent), todo, reason)
 
     @mcp.tool
     def roster(task: str) -> dict:

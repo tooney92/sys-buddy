@@ -74,6 +74,11 @@ ACTION_TOOLS = frozenset({
     "decline_todo",
     "repropose_todo",
     "drop_todo",
+    # Leaving a todo is a WRITE on an agreement — it changes who is bound and therefore
+    # what its quorum is measured over, which can lock a contract on its own. An agent
+    # that never proved it read the briefing has no business editing the cast of an
+    # agreement, exactly as it has no business making one.
+    "leave_todo",
     "upload_file",
     # Minting an upload URL IS the write, moved earlier: the signed POST that follows
     # carries its own authorisation and never re-enters this middleware, so the readiness

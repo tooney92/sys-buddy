@@ -1337,10 +1337,36 @@ def lock_contract(conn, identity: Identity, version: int, number: int | None = N
             "todo": todo["number"],
         }
 
-    # All roles have signed → the contract locks and the task advances. The UPDATE
-    # is conditional on status='draft' so that if two roles sign the final signature
-    # concurrently and both observe "all signed", exactly one wins the lock — the
-    # loser's rowcount is 0 and it returns the locked result WITHOUT a duplicate lock
+    # All roles have signed → the contract locks and the task advances.
+    return _finalise_lock(
+        conn, identity, todo, contract["id"], version, signed_set, scope_note
+    )
+
+
+def _finalise_lock(conn, author: Identity, todo, contract_id: int, version: int,
+                   signed_set: set, scope_note: str, because: str = "") -> dict:
+    """Every party has signed: lock the contract, advance the march, tell everyone.
+
+    Factored out of :func:`lock_contract` because there is now a SECOND way the "all
+    parties have signed" condition becomes true — a party leaving or being removed
+    shrinks the required set (``todos.settle_after_departure`` →
+    :func:`settle_todo_quorum`). Two copies of a lock would be two chances for the march,
+    the strike reset, the event and the broker push to fall out of step.
+
+    ``author`` is whose row the broker push is written on. From ``lock_contract`` that is
+    the finalising signer, so ``from_agent_id != me`` delivers it to exactly the roles
+    who signed EARLIER and not to the signer who already got ``{locked: true}``
+    synchronously. From the settle path there is no signer at all — the trigger was a
+    human at a terminal — so it is the broker's own seat and everybody hears it.
+
+    ``because`` is appended to that push when the lock was not caused by a signature. A
+    contract that locks with nobody having just signed is otherwise the most alarming
+    thing an agent can wake up to, and the answer ("the party we were waiting on is no
+    longer on this todo") is not guessable from the contract.
+    """
+    # The UPDATE is conditional on status='draft' so that if two roles sign the final
+    # signature concurrently and both observe "all signed", exactly one wins the lock —
+    # the loser's rowcount is 0 and it returns the locked result WITHOUT a duplicate lock
     # event or a second human Slack ping.
     # The lock also RECORDS the deployment target that was live at this moment, so
     # "what did we agree to?" keeps an answer after the host re-points a tunnel. It is
@@ -1348,21 +1374,20 @@ def lock_contract(conn, identity: Identity, version: int, number: int | None = N
     # and mutating a document at the instant it is signed would be the one thing a
     # signature must never permit. The recorded value and the live one are allowed to
     # diverge afterwards — that divergence IS the feature.
+    task_id = todo["task_id"]
     cur = conn.execute(
         "UPDATE contracts SET status = 'locked', locked_at = ?, staging_url_at_lock = ? "
         "WHERE id = ? AND status = 'draft'",
         (
             _now(),
-            resolve_staging_url(
-                conn, identity.task_id, todo["id"], _spec_of(conn, contract["id"])
-            ),
-            contract["id"],
+            resolve_staging_url(conn, task_id, todo["id"], _spec_of(conn, contract_id)),
+            contract_id,
         ),
     )
     if cur.rowcount != 1:
         conn.commit()
         return {"locked": True, "version": version, "signed": sorted(signed_set)}
-    _todo_march(conn, identity.task_id, todo["id"], todo["state"], CONTRACT_LOCKED)
+    _todo_march(conn, task_id, todo["id"], todo["state"], CONTRACT_LOCKED)
     # A newly locked version is a genuine new ATTEMPT, so the ping-pong counter starts
     # over (SPEC §8). The task-level `_report_deployed` has to derive that from event
     # timestamps (D3) because it cannot see the lock; here we ARE the lock, so we just
@@ -1370,15 +1395,15 @@ def lock_contract(conn, identity: Identity, version: int, number: int | None = N
     # todo reaches backend_live.
     conn.execute("UPDATE todos SET strikes = 0 WHERE id = ?", (todo["id"],))
     _clear_todo_stuck(conn, todo["id"])
-    state = todos.apply_rollup(conn, identity.task_id)
+    state = todos.apply_rollup(conn, task_id)
     _event(
-        conn, identity.task_id, "lock",
+        conn, task_id, "lock",
         {"version": version, "signed": sorted(signed_set), "todo_id": todo["id"]},
     )
     _notify(
         conn,
-        identity.task_id,
-        f"[{identity.task_id}] Contract v{version}{scope_note} locked — signed by "
+        task_id,
+        f"[{task_id}] Contract v{version}{scope_note} locked — signed by "
         f"{', '.join(sorted(signed_set))}",
     )
     conn.commit()
@@ -1389,19 +1414,17 @@ def lock_contract(conn, identity: Identity, version: int, number: int | None = N
     # queue). So the broker drops one broker-authored `contract_locked` notification:
     #   * `service.BROKER_TYPES` → delivered in the <broker trust="broker"> envelope,
     #     never framed as peer DATA, and unforgeable via send_message;
-    #   * authored on the finalising signer's row, so `from_agent_id != me` delivers it
-    #     to exactly the already-signed roles and not to the signer who just got
-    #     {locked: true} synchronously — no double-notify;
+    #   * authored on `author`'s row — see the docstring for the two cases;
     #   * exactly ONE message for exactly one `lock` event, so the dashboard thread
     #     shows a single lock bubble beside its divider (D10's 1:1 invariant holds).
     service.post_message(
         conn,
-        identity,
+        author,
         "contract_locked",
         f"Contract v{version}{scope_note} is LOCKED — signed by all parties "
-        f"({', '.join(sorted(signed_set))}). This is the blueprint to build against; read "
-        f"the frozen shape and the staging_url from get_contract(todo={todo['number']}). "
-        f"Report progress on this deliverable with "
+        f"({', '.join(sorted(signed_set))}).{because} This is the blueprint to build "
+        f"against; read the frozen shape and the staging_url from "
+        f"get_contract(todo={todo['number']}). Report progress on this deliverable with "
         f"report_status(..., todo={todo['number']}).",
         todo_id=todo["id"],
     )
@@ -1413,6 +1436,102 @@ def lock_contract(conn, identity: Identity, version: int, number: int | None = N
         "todo": todo["number"],
         "todo_state": CONTRACT_LOCKED,
     }
+
+
+def settle_todo_quorum(conn, task_id: str, row) -> dict:
+    """The two LATCHED gates, re-run after a todo's party list shrank.
+
+    Called only by ``todos.settle_after_departure`` — read its docstring for why a
+    smaller party list needs anything re-run at all. Everything else about a departure
+    is derived and fixes itself; a lock and a resolution do not, because they happen
+    inside the call that completes them and there is no later call to notice that
+    "everyone" now means fewer people.
+
+    Never refuses, never moves a todo backwards, and never touches a shape: a smaller
+    "all" can only satisfy an all-must-agree test that a bigger one did not. The broker
+    authors both outcomes, and both say WHY they happened with nobody having acted —
+    a contract that locks itself is otherwise the most alarming thing an agent can
+    return to.
+    """
+    if todos.is_debug(conn, task_id):
+        return _settle_issue_resolution(conn, task_id, row)
+    return _settle_contract_lock(conn, task_id, row)
+
+
+def _settle_contract_lock(conn, task_id: str, row) -> dict:
+    """Lock a draft every REMAINING party has already signed.
+
+    The rule is unchanged and is ``lock_contract``'s own: the required signatories are
+    exactly ``todos.parties_json``, so the departure did not lower a bar, it removed
+    somebody from the set the bar was measured over. A signature already on the draft
+    still means what it said — "I agree to this shape" — and the shape has not changed.
+
+    The remaining parties are NOT re-asked. That is the deliberate call and it is the one
+    that makes the outage case actually resolve: requiring a re-sign would leave the todo
+    exactly as frozen as before for anyone who does not know to go and re-sign. What
+    protects a party who no longer agrees now that the cast is smaller is the move that
+    already exists for a locked contract they want to change —
+    ``reopen_negotiations(reason, todo=N)`` — and the broker push below names it.
+    """
+    newest = _newest_contract(conn, task_id, todo_id=row["id"])
+    if newest is None or newest["status"] != "draft":
+        return {}
+    required = todos.parties_of(row)
+    signed_set = set(_signatures_for(conn, newest["id"]))
+    if not required or any(p not in signed_set for p in required):
+        return {}
+    broker = service.ensure_broker_identity(conn, task_id)
+    gone = todos.departed_seats(conn, row)
+    because = (
+        f" It locked with nobody having just signed: it was only waiting on "
+        f"{', '.join(gone)}, who {'is' if len(gone) == 1 else 'are'} no longer a party "
+        f"to this todo, so the signatures already on it are now every party's. If the "
+        f"smaller cast changes what you agreed to, say so — "
+        f"reopen_negotiations(reason, todo={row['number']}) and propose a version that "
+        f"fits."
+        if gone else ""
+    )
+    out = _finalise_lock(
+        conn, broker, row, newest["id"], newest["version"], signed_set,
+        f" on todo #{row['number']} ({row['title']})", because=because,
+    )
+    return {"contract_locked": out.get("version")}
+
+
+def _settle_issue_resolution(conn, task_id: str, row) -> dict:
+    """Resolve an issue every REMAINING party has already reported ``fixed``.
+
+    The debug half of the same recompute, over the same rule ``_report_issue_fixed``
+    applies: all-must-agree, over the issue's own party list. The march value written is
+    the same one a normal resolution writes (``verified``, read back as ``resolved`` in
+    debug vocabulary) so nothing downstream can tell the two apart — which is the point,
+    because there is nothing different about this issue except who was still on it.
+    """
+    if todos.status_of(conn, row) == todos.PENDING or not todos.all_fixed(conn, row):
+        return {}
+    parties = todos.parties_of(row)
+    _todo_march(conn, task_id, row["id"], row["state"], VERIFIED)
+    conn.execute(
+        "UPDATE todos SET verified_at = ?, stuck_at = NULL, stuck_reason = NULL WHERE id = ?",
+        (_now(), row["id"]),
+    )
+    conn.commit()
+    broker = service.ensure_broker_identity(conn, task_id)
+    gone = todos.departed_seats(conn, row)
+    who = f" It was only waiting on {', '.join(gone)}, no longer a party to it." if gone else ""
+    service.post_message(
+        conn, broker, "resolved",
+        f"Issue #{row['number']} ({row['title']}) is RESOLVED. Every party that is "
+        f"actually on it ({', '.join(parties)}) had already reported it fixed.{who}",
+        todo_id=row["id"],
+    )
+    roll = todos.rollup(conn, task_id) or {}
+    _notify(
+        conn, task_id,
+        f"[{task_id}] issue #{row['number']} ({row['title']}) RESOLVED "
+        f"({roll.get('fixed')}/{roll.get('total')}) — its last outstanding party left it.",
+    )
+    return {"issue_resolved": True}
 
 
 def decline_contract(
@@ -1724,6 +1843,30 @@ def get_contract(conn, task_id: str, number: int | None = None) -> dict:
         "todo_title": scoped["title"],
         "signatories": todos.parties_of(scoped),
     }
+    # A SIGNATURE FROM SOMEBODY THE TODO NO LONGER BINDS.
+    #
+    # A locked contract still STANDS when a signatory leaves: it was validly agreed by
+    # everyone it bound at the time, the shape has not changed, and the remaining parties
+    # are still holding themselves to it. Unlocking it would be worse than useless —
+    # it would void an agreement nobody withdrew from and strand a deliverable that is
+    # very likely already built against it.
+    #
+    # But `signatures` and `signatories` are then two lists that no longer match, and a
+    # reader has no way to tell whether that is a departure or a bug. So the difference
+    # is NAMED. Silence here would be the exact failure this whole feature exists to
+    # avoid, one level down: a signature displayed as though the person behind it were
+    # still bound. `get_todos()`/`departed` carries the reason and the date.
+    departed = todos.departed_seats(conn, scoped, among=signed)
+    if departed:
+        todo_block["departed_signatories"] = departed
+        todo_block["departed_note"] = (
+            f"{', '.join(departed)} signed this contract and {'has' if len(departed) == 1 else 'have'} "
+            f"since left the todo, so {'that signature is' if len(departed) == 1 else 'those signatures are'} "
+            f"on the record but no longer among its parties — the contract stands, it is "
+            f"the cast that changed. get_todos() shows when and why. If the agreement no "
+            f"longer makes sense with the seats actually on it, "
+            f"reopen_negotiations(reason, todo={scoped['number']})."
+        )
 
     if newest["status"] == "locked":
         return {

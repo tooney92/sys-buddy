@@ -633,6 +633,42 @@ def host_drop_todo(task: str, todo: int, reason: str) -> tuple[dict, dict | None
     return result, roll
 
 
+def host_remove_party(task: str, todo: int, seat: str, reason: str) -> tuple[dict, dict | None]:
+    """Remove ONE unresponsive party from a todo, as the HOST. The smaller escape hatch.
+
+    :func:`host_drop_todo` is the sledgehammer — it abandons the whole deliverable, which
+    is wrong when the OTHER parties are present, cooperative, and still want it. The
+    outage case ("mobile's agent is down") does not need the work thrown away; it needs
+    the one name that will never answer taken off the party list so the quorum can be
+    reached by the people who are actually here.
+
+    HOST-ONLY, and for a stronger reason than the drop is. "Eject a peer" is the most
+    abusable capability there is on a cross-org task: an agent that could do it would
+    remove whoever objected and lock without the dissent. A human typing a command cannot
+    be prompt-injected, which is why this sits beside `staging-url`, `add-seat`,
+    `revoke-agent` and `close` rather than in the tool registry. The self-service half —
+    a present, cooperative party taking itself off — IS an agent tool (`leave_todo`), and
+    it has no seat argument at all.
+
+    ``todos.host_remove_party`` posts the who/why to the thread as the BROKER's own seat,
+    then re-runs the todo's quorum, so the removal actually unblocks rather than merely
+    tidying a list.
+
+    Returns ``(todo, task_rollup)``.
+    """
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        result = todos.host_remove_party(conn, task, todo, seat, reason)
+        roll = todos.rollup(conn, task)
+    finally:
+        conn.close()
+    audit.event(
+        "todo_party_removed", task=task, todo=result["number"], seat=seat, by=todos.HOST
+    )
+    return result, roll
+
+
 def list_tasks() -> list[dict]:
     """All tasks, newest first, with the fields the CLI printer needs."""
     conn = connect()

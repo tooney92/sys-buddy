@@ -7,7 +7,10 @@ is the one network client: it runs on the *buddy's* machine and POSTs to /pair.
 
 This is also where the HOST's own writes live, and deliberately not on the dashboard
 (D11): ``todo drop`` is the escape hatch for a todo hanging on a party whose human
-went offline, and a host running ``sys-buddy serve`` headless has no GUI to click.
+went offline, ``todo drop-party`` the smaller one that removes only that party and
+lets the deliverable carry on, and a host running ``sys-buddy serve`` headless has no
+GUI to click. Both are host-only because no AGENT may remove a peer from an agreement
+(D14); the self-service half is the ``leave_todo`` tool, which cannot name anyone else.
 """
 
 from __future__ import annotations
@@ -427,9 +430,26 @@ def cmd_todo_list(args: argparse.Namespace) -> int:
         )
         if note:
             print(f"      {note}")
+        # WHO IS NO LONGER ON IT. Printed separately from the party list rather than
+        # struck through inside it: the list answers "who is bound", this answers "who
+        # used to be, and did they choose to go or did a human cut them loose" — and a
+        # host reading this screen is usually deciding whether to do exactly that.
+        latest = {d["seat"]: d for d in t.get("departed") or []}
+        gone = [d for seat, d in latest.items() if seat not in t["parties"]]
+        if gone:
+            print(
+                "      left: "
+                + ", ".join(f"{d['seat']} ({d['mode']}: {d['reason']})" for d in gone)
+            )
+    # TWO host moves, and the smaller one is listed first because it is almost always the
+    # right one: the usual situation is that ONE party went dark and the others still want
+    # the deliverable. Dropping the whole todo throws away work nobody asked to abandon.
     print(
-        "\nA todo hanging on a party whose human went offline is the host's to drop:\n"
-        f"  sys-buddy todo drop {args.task} <N> --reason \"...\""
+        "\nA todo hanging on a party whose human went offline is the host's to unblock:\n"
+        f"  sys-buddy todo drop-party {args.task} <N> --seat <handle> --reason \"...\"\n"
+        "      removes just that party; the todo lives on and its quorum recomputes\n"
+        f"  sys-buddy todo drop {args.task} <N> --reason \"...\"\n"
+        "      abandons the whole deliverable"
     )
     return 0
 
@@ -448,6 +468,63 @@ def cmd_todo_drop(args: argparse.Namespace) -> int:
     )
     if roll:
         print(f"\nTask rollup is now {roll['verified']}/{roll['total']} verified · state {roll['state']}.")
+    return 0
+
+
+def cmd_todo_drop_party(args: argparse.Namespace) -> int:
+    """Remove one party from a todo, and PRINT WHAT IT UNBLOCKED.
+
+    The last line matters as much as the removal. The host runs this because a todo is
+    frozen; "removed mobile" alone leaves them to go and check whether that actually
+    achieved anything, so the rollup and the todo's own status are printed back — a
+    contract that just locked or an issue that just resolved shows up as a changed
+    status right here rather than being discovered later on the dashboard.
+    """
+    from . import admin
+
+    _cfg_from_args(args)
+    number = args.todo if args.todo is not None else args.todo_flag
+    if number is None:
+        print(
+            "which todo? Give its number: "
+            f"sys-buddy todo drop-party {args.task} <N> --seat <handle> --reason \"...\"",
+            file=sys.stderr,
+        )
+        return 2
+    if args.todo is not None and args.todo_flag is not None:
+        print(
+            "todo number given twice (positionally and with --todo) — supply it once.",
+            file=sys.stderr,
+        )
+        return 2
+
+    before = {t["number"]: t for t in admin.list_todos(args.task)[0]}
+    t, roll = admin.host_remove_party(args.task, number, args.seat, args.reason)
+    was = before.get(t["number"], {})
+    gone = [d for d in t.get("departed") or [] if d["mode"] == "removed"]
+    seat = gone[-1]["seat"] if gone else args.seat
+    print(f"Removed {seat} from todo #{t['number']} '{t['title']}' on task '{args.task}'.")
+    print(f"  still bound: {', '.join(t['parties']) or '(nobody)'}")
+    print(f"  reason:      {args.reason}")
+    print(
+        "\nPosted to the task thread as 'broker' (a human decision, not a peer's), so "
+        f"the\nremoved party's agent finds an explanation rather than vanished work. "
+        f"{seat} is\nstill on the TASK — it is this one deliverable it is no longer bound "
+        "by."
+    )
+    # What the removal actually achieved. `status` is derived from the party list, the
+    # acceptances and the contracts, so a change here IS the recomputed quorum.
+    if was.get("status") and was["status"] != t["status"]:
+        print(f"\nTodo #{t['number']} moved {was['status']} → {t['status']}.")
+    else:
+        print(f"\nTodo #{t['number']} is {t['status']} (state {t['state']}).")
+    if t["awaiting"]:
+        print(f"  still awaiting: {', '.join(t['awaiting'])}")
+    if roll:
+        print(
+            f"Task rollup is now {roll['verified']}/{roll['total']} verified · "
+            f"state {roll['state']}."
+        )
     return 0
 
 
@@ -656,6 +733,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Why — posted to the task thread, and the only thing the agents will see.",
     )
     td.set_defaults(func=cmd_todo_drop)
+
+    # `drop-party` is `drop`'s smaller sibling and belongs beside it for the same reason:
+    # it is the answer to a party who went dark, and the agents cannot supply it (a
+    # silent agent cannot call `leave_todo`, and no agent may ever remove a peer).
+    #
+    # It takes the todo positionally, exactly like `drop` — the two sit next to each other
+    # and a host who has typed one should not have to re-learn the shape for the other.
+    # `--todo N` is accepted as an alias because that is how it reads in prose and in the
+    # dashboard's own hint; supplying both, or neither, is an error rather than a guess.
+    dp = tosub.add_parser(
+        "drop-party",
+        help="Remove ONE unresponsive party from a todo, leaving the todo alive",
+    )
+    dp.add_argument("task")
+    dp.add_argument(
+        "todo", nargs="?",
+        help="Todo NUMBER (#N per task), as shown by `sys-buddy todo list <task>`",
+    )
+    dp.add_argument("--todo", dest="todo_flag", help="Same thing, named.")
+    dp.add_argument(
+        "--seat", required=True,
+        help="The seat to remove (@handle, role, or that person's display name).",
+    )
+    dp.add_argument(
+        "--reason", required=True,
+        help="Why — posted to the task thread, and the only thing the agents will see.",
+    )
+    dp.set_defaults(func=cmd_todo_drop_party)
 
     sp = sub.add_parser("invite", help="Mint a single-use invite for a role")
     sp.add_argument("--task", required=True)

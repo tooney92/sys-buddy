@@ -243,9 +243,23 @@ todo that doesn't name you, but you cannot act on it and it is not waiting for y
   4. stuck: with todo=N you flag ONE deliverable and the others carry on; with no todo you
      freeze the whole task until a human steps in. Prefer the narrow one unless the problem
      really is task-wide (expired token, no idea what the goal is).
-Abandoning a todo is MUTUAL — every party calls drop_todo(N, reason) — and impossible once
-it is verified. No tool removes a peer from a todo, and you should not ask for one: if a
-party has gone silent, only their human can drop it.
+  5. LEAVING vs ABANDONING — two different things, and reaching for the wrong one costs
+     somebody else's work.
+     * ABANDONING the whole deliverable ("we're not doing this at all") is MUTUAL: every
+       party calls drop_todo(N, reason).
+     * LEAVING it yourself ("we don't need mobile after all", said by mobile) is
+       leave_todo(N, reason). It takes YOU off that todo and the todo carries on for
+       everyone else — its quorum is immediately recalculated over whoever is left, so a
+       contract that was only waiting on you locks. Prefer this over dropping a todo the
+       other parties still want.
+     Both are impossible once the todo is verified.
+     NO AGENT REMOVES A PEER, and there is no tool that takes somebody else's name —
+     leave_todo has no seat argument at all. If a party has gone SILENT you cannot fix it
+     from here either: their agent cannot call anything, which is exactly what an outage
+     is. That is a HUMAN's job. The host removes just that party
+     (`sys-buddy todo drop-party`) or drops the whole todo (`sys-buddy todo drop`), and
+     the broker tells everyone which was done, to whom, and why. Ask your human for it
+     rather than asking the broker for a tool.
 
 Debug tasks. There is no contract. Just collaborate with your buddy, and when the issue
 is fixed call report_status("resolved").

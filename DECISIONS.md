@@ -245,3 +245,114 @@ live db (29 tasks, 12 contracts, 9 todos): 4 tasks gained a target (`signin`,
 `rhema-demo-6389`, `leave-management-f17c`, `lightdey-v3-75d9`), 11 host-chosen targets
 were left alone, all 7 locked contracts recorded theirs, drafts recorded nothing, no
 `spec_json` changed, and a second and third boot were byte-for-byte no-ops.
+
+## D14 — *No **agent** removes a peer from a todo;* the host can, and it is recorded
+
+**Previously decided** (`todos.py` module docstring, `rules.py`, and the `drop_todo` tool
+description on both surfaces): *"No peer may remove a peer. You joined by accepting; you
+leave by your own call… the escape hatch is HUMAN: `host_drop_todo`, reachable from the
+CLI/GUI, never from a peer's tool."* The charter said it to the agents outright:
+**"No tool removes a peer from a todo, and you should not ask for one."**
+
+**What changed.** Removing a party is now possible, in two forms, and the sentence becomes
+**"no AGENT removes a peer; the host can, and it is recorded."** The self-service half —
+which the old rule never actually provided — is new too:
+
+| | who calls it | who can be removed |
+|---|---|---|
+| `leave_todo(N, reason)` | any party's agent, both tool surfaces | **only itself** — the tool has no seat argument |
+| `sys-buddy todo drop-party <task> <N> --seat X` | a HUMAN, CLI/desktop only | any one party |
+
+**Why the old rule was not enough.** It answered one question ("may backend delete
+mobile?" — no) and left two real situations with no move at all:
+
+* **"We don't need mobile after all."** Mobile is present and agrees. The only tool was
+  `drop_todo`, which is MUTUAL and abandons the *whole deliverable* — so removing one
+  party meant asking two other people to throw away work they still wanted. There was no
+  way to leave a todo, only to end it.
+* **"Mobile has an outage."** Its agent cannot call a tool — that is what an outage *is* —
+  so self-removal is useless at precisely the moment it is needed. The one hatch,
+  `host_drop_todo`, again destroys the deliverable. A locked contract and two-thirds of the
+  work went in the bin because one party's laptop was shut.
+
+**Why the property still holds.** `leave_todo` is not "removal with a permission check on
+top"; it takes no `seat`/`handle` argument on either surface, so naming a peer is
+*unspellable* rather than refused. The reason the original rule existed is untouched: if
+backend could remove mobile, then the moment mobile objects to a shape backend removes it
+and locks without the dissent, and "both sides sign" quietly becomes "whoever proposes
+wins". Nothing an agent can call changes anyone else's binding.
+
+**Why the ejection half is host-only, and not merely host-*preferred*.** "Eject a peer" is
+the most abusable capability on a cross-org broker — it is the one call that turns a
+disagreement into a deletion. A human typing a command at their own terminal cannot be
+prompt-injected. That is the same posture already taken for `staging_url`, `add-seat`,
+`revoke-agent` and `close`, and it is why this lives in `cli.py`/`admin.py` and not in the
+tool registry. The dashboard keeps D11: it *prints the command* and never issues it.
+
+**Quorum RECOMPUTES, and that is the feature.** Every all-must-agree gate reads
+`todos.parties_json` live (`status_of`, `awaiting`, `all_fixed`, `lock_contract`'s
+`required`, `drop_consents`), so shrinking the list fixes the derived readings for free.
+Three gates are LATCHED, however — they fire inside the call that completes them, and no
+later call notices that "everyone" now means fewer people. `todos.settle_after_departure`
+re-runs exactly those three, and only ever unblocks:
+
+1. a **mutual drop** whose last outstanding consent belonged to the departed party → the
+   drop completes;
+2. a **draft contract** every remaining party has already signed → it **locks**;
+3. an **issue** every remaining party has already reported `fixed` → it **resolves**.
+
+Without this the outage case ends with a todo that is unblocked on paper and still frozen
+in fact, which is the same as not shipping the feature.
+
+**A locked contract signed by a departing party STILL STANDS.** It was validly agreed by
+everyone it bound at the time and the shape has not changed; voiding it would revoke an
+agreement nobody withdrew from and strand work already built against it. But `signatures`
+and `signatories` then disagree, and a reader cannot tell a departure from a bug — so
+`get_contract` names the difference (`departed_signatories` + a note), and `get_todos`
+carries the mode, the reason and the date. Silence there would be this feature's own
+failure mode one level down: a signature displayed as though the person behind it were
+still bound.
+
+**A draft contract is NOT re-signed after a departure** — it locks on the signatures
+already there. Requiring a re-sign would leave the todo exactly as frozen as before for
+anyone who does not happen to know to go and re-sign it, which defeats the point. The
+protection for a party who no longer agrees now that the cast is smaller is the move that
+already exists — `reopen_negotiations(reason, todo=N)` — and the broker's `contract_locked`
+push says so, out loud, in the same breath as "this locked with nobody having signed".
+Contrast `repropose_todo`, which *does* reset draft signatures when parties change: there
+a PEER changes the shape and the cast together, and consent to a document nobody has read
+is worthless. Here the shape is untouched and the change is a human decision in the log.
+
+**A one-party todo stays ILLEGAL where it was already illegal.** `_validate_parties`
+refuses a peer todo with fewer than two seats; that same floor (`todos.min_parties`, one
+statement, both callers) now applies to a departure, so removal cannot manufacture a shape
+that could never have been proposed. This is not symmetry for its own sake — a solo peer
+todo **deadlocks**: the sole party proposes the contract, is therefore the producer, and
+`state._report_todo_test` refuses a producer checking its own work off an engagement, so
+the todo can never reach `testing` and `verified` is unreachable forever. On a debug task a
+one-party issue resolves on its author's word alone, which is the exact thing all-must-agree
+exists to prevent. An ENGAGEMENT keeps its documented exception (floor of one) because its
+outer ring — the client's agent verifying against the deliverable list — supplies the
+counterparty a peer task has to name. So a two-party todo minus one party is refused, and
+the refusal names the right move: `drop_todo`, which is what abandoning is called.
+
+**Terminal rules are unchanged.** Verified is terminal for departures exactly as it is for
+drops — the rollup already reports the deliverable as done and the record of who delivered
+it is part of that. The last party may not leave: a todo bound to nobody is orphaned,
+unactionable, and still counted, and that case already has a tool.
+
+**Rejoining is `repropose_todo`, unchanged.** It already resets every acceptance and every
+draft signature, so a returning party is indistinguishable from an original one. Note who
+may do it: the reproposer must itself be a party, so a departed seat **cannot re-add
+itself** — it comes back by invitation from somebody still on the todo. That falls out of
+the existing `assert_party` check rather than needing a new rule, and it is the right
+asymmetry: leaving is your own business, returning is the remaining parties'.
+
+**Nothing is deleted, ever.** A departure writes a `todo_departures` row (seat, `left` vs
+`removed`, who acted, reason, the todo version, the time), a `todo` event, and a message —
+peer-authored for a self-leave, BROKER-authored for a host removal (`todo_party_removed`
+joins `service.BROKER_TYPES`, so no agent can author a sentence claiming a peer was
+removed). Acceptances, fixes, drop consents and signatures are all left exactly where they
+are: they are statements somebody actually made, and ending an obligation is not the same
+as rewriting history. A party that vanishes from a list with no trace is worse than one
+that never left.
