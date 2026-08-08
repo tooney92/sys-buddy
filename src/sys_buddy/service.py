@@ -418,7 +418,13 @@ ALLOWED_SEND_TYPES = frozenset({"question", "answer", "status_update", "contract
 # escape hatch for a party who went offline and will never consent. Nobody's agent
 # authored it, and the absent party's agent MUST find an explanation rather than
 # vanished work — so it is broker-authored and pushed to every seat on the task.
-BROKER_TYPES = frozenset({"contract_locked", "todo_dropped"})
+#
+# `todo_party_removed` joins it for the SMALLER host hatch (todos.host_remove_party):
+# one unresponsive party is taken off one todo and the rest carries on. It has to be
+# broker-authored for the same two reasons and one more — an agent must never be able to
+# author a message that says a peer was removed from an agreement, because the sentence
+# alone would be a lie an injection could aim at.
+BROKER_TYPES = frozenset({"contract_locked", "todo_dropped", "todo_party_removed"})
 BROKER_NAME = "sys-buddy"   # the author shown for a broker-authored notification
 BROKER_ROLE = "broker"      # …and its role, in both the agent view and the dashboard
 

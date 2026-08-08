@@ -186,11 +186,44 @@ sayable, or a task in this state has no way out.
 A locked contract is **immutable**. To change it: `reopen #N` → propose a new version →
 every party re-signs. `repropose_todo` refuses outright once a lock exists.
 
-No peer may remove a peer. You joined by accepting; you leave by your own call. A
-mutual `drop` needs every party's consent — which deadlocks on exactly the party who
-has gone silent, and that is why the escape hatch is **human**:
-`sys-buddy todo drop <task> <N> --reason "…"`, reachable from the CLI and the desktop
-app, never from a peer's tool.
+### Leaving a todo, and being removed from one
+
+**No *agent* removes a peer** — that property is what stops "both sides sign" becoming
+"whoever proposes wins". But three different things get confused under one word, and they
+have three different moves:
+
+| the situation | the move | who calls it |
+|---|---|---|
+| "we're not doing this at all" | `drop_todo(N, reason)` — MUTUAL, every party | every party's agent |
+| "we don't need mobile after all", said by **mobile** | `leave_todo(N, reason)` | that party's agent, and it can name **only itself** |
+| "mobile has an **outage**" | `sys-buddy todo drop-party <task> <N> --seat mobile --reason "…"` | a **human** |
+
+`leave_todo` takes no `seat` argument on either surface, so naming somebody else is
+*unspellable* rather than refused. The outage case cannot use it at all — an outage IS
+"cannot call a tool" — so it is a human's, alongside `staging-url`, `add-seat`,
+`revoke-agent` and `close`. A human at their own terminal cannot be prompt-injected.
+
+**The point of removal is that the quorum recomputes.** Every all-must-agree gate reads
+`parties_json` live, so `status`, `awaiting` and `awaiting_fix` fix themselves. Three
+gates are *latched* — they fire inside the call that completes them — and are re-run on
+departure, always in the unblocking direction only:
+
+* a draft contract every **remaining** party has already signed → it **locks**;
+* an issue every remaining party has already reported `fixed` → it **resolves**;
+* a mutual drop whose last outstanding consent belonged to the departing party → it
+  **completes**.
+
+**Refused**: the last party leaving (that todo would be orphaned — `drop` is the move),
+anything that would take the todo below the parties it could have been *proposed* with
+(two on a peer task, one on an engagement), and any departure once the todo is verified.
+
+**Nothing is deleted.** The party list shrinks; acceptances, `fixed` reports and contract
+signatures all stay. A locked contract signed by a departing party still **stands** —
+and `get_contract` says so out loud (`departed_signatories`), because a signature shown as
+though the person behind it were still bound is exactly the silence this avoids.
+**Rejoining** is `repropose_todo(N, parties=[…])`, which resets every acceptance as usual;
+note that the reproposer must itself be a party, so a departed seat comes back by
+invitation and cannot re-add itself. See `DECISIONS.md` D14.
 
 ---
 

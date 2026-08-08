@@ -254,12 +254,21 @@ function typeChip(type,pass){
     /* the todo conversation (v2). Additive: no pre-todo task ever carries these types. */
     todo_proposal:['todo proposed','proposed'],todo_accept:['todo accepted','verified'],
     todo_decline:['todo declined','stuck'],todo_drop:['todo drop','open'],
-    todo_dropped:['todo dropped','open']};
+    todo_dropped:['todo dropped','open'],
+    /* A party stopping being a party. Two types because they are two facts: `todo_leave`
+       is peer-authored ("I've taken myself off this"), `todo_party_removed` is
+       BROKER-authored (a human removed a seat whose agent had gone dark) — which is why
+       no agent can send the second one at all. Both must be legible at a glance in the
+       thread; falling through to the grey default would hide the one bubble that explains
+       why a name disappeared from a party list. */
+    todo_leave:['left the todo','open'],
+    todo_party_removed:['party removed','stuck']};
   /* The todo chips read "issue …" on a debug task, where these rows ARE issues. Read off
      the payload already on screen (`state.detail.mode`), the same way todoChipHTML reads
      it — one message type, one palette, the word the reader's task actually uses. */
   var ISSUE_LABEL={todo_proposal:'issue raised',todo_accept:'issue accepted',
-    todo_decline:'issue declined',todo_drop:'issue drop',todo_dropped:'issue dropped'};
+    todo_decline:'issue declined',todo_drop:'issue drop',todo_dropped:'issue dropped',
+    todo_leave:'left the issue',todo_party_removed:'party removed'};
   var label,key;
   if(type==='test_result'){ label=pass?'test · pass':'test · fail'; key=pass?'verified':'stuck'; }
   else { var e=map[type]||['message','open']; label=e[0]; key=e[1]; }
@@ -1903,38 +1912,65 @@ function nextStepHTML(t){
   '</div>';
 }
 
-/* HOST [Drop todo] — READ-ONLY, per DECISIONS.md D11. The dashboard NEVER issues a
-   command: this prints the exact line the human types in their OWN terminal, exactly the
-   way shortcodesHTML teaches every other action. There is deliberately no button and no
-   write path — a leaked ?v= link must only ever be able to LOOK. Host viewers only; a
-   buddy can't run a host CLI, so showing it to them would be a lie. */
+/* HOST UNBLOCK — READ-ONLY, per DECISIONS.md D11. The dashboard NEVER issues a command:
+   this prints the exact lines the human types in their OWN terminal, exactly the way
+   shortcodesHTML teaches every other action. There is deliberately no button and no write
+   path — a leaked ?v= link must only ever be able to LOOK. Host viewers only; a buddy
+   can't run a host CLI, so showing it to them would be a lie.
+
+   TWO moves, and the SMALLER ONE LEADS. This panel used to offer only "drop the whole
+   thing", which is almost never what the situation calls for: the usual stall is ONE
+   party gone dark while the others are present and still want the deliverable, and
+   dropping it throws away their work to solve somebody else's outage. `drop-party` takes
+   off only the silent seat and the todo's quorum immediately recomputes over whoever is
+   left — a contract that was only waiting on them locks on the spot. So it is offered
+   first, and `drop` is framed as the bigger, rarer thing it is.
+
+   It also shows on more todos than it used to. The old gate was `pending || stuck`, which
+   missed the exact case the removal exists for: a todo whose scope everyone accepted and
+   whose CONTRACT is stuck one signature short. The gate now follows `next.who` — the
+   broker's own answer to "who owes the next move" — so the panel appears precisely when
+   somebody is being waited on, whatever stage that is. */
 function dropTodoHTML(d,t){
   if(t.status==='dropped'||t.status==='verified') return '';
-  if(!(t.status==='pending'||t.stuck)) return '';
   if(!(state.viewer && state.viewer.mode!=='buddy')) return '';
-  /* Name the seats nobody ever joined outright: that is the case where waiting is
-     pointless and dropping is the honest move, and it is exactly why this panel is
-     here. No timeout does it for you — a silently expiring todo is worse. */
-  /* This panel says what DROPPING does. It does NOT re-explain why the todo is stuck —
+  var nx=t.next||{}, waiting=(nx.who||[]).slice();
+  /* `human:true` means the next move is a PERSON's decision, not a stalled seat — no
+     host intervention is owed there. */
+  if(!(waiting.length && !nx.done && !nx.human) && !t.stuck) return '';
+  var noun=esc(todoNoun(d));
+  /* A line the human TYPES, so it carries the per-task number — the CLI takes the same
+     `#N` the agents do, not the global row id. */
+  var one = waiting.length===1 ? waiting[0] : '<handle>';
+  var partyCmd = 'sys-buddy todo drop-party '+d.id+' '+todoNo(t)+' --seat '+one+' --reason "…"';
+  var dropCmd  = 'sys-buddy todo drop '+d.id+' '+todoNo(t)+' --reason "…"';
+  /* This panel says what each move DOES. It does NOT re-explain why the todo is stuck —
      the NEXT card directly above already names who is blocking and why, and repeating it
      made a two-line situation read as a wall of text. One fact, one place. */
-  var why = isDebugTask(d)
+  var dropWhy = isDebugTask(d)
     ? 'Drops #'+todoNo(t)+' for everyone — "this is not something we are fixing". Its '
       + 'detail and the whole thread stay in the event log; dropping ends it, it does not '
       + 'erase it, and it stops counting toward the session.'
     : 'Drops #'+todoNo(t)+' for everyone. Its scope, its contract and the whole '
       + 'thread stay in the event log — dropping ends it, it does not erase it.';
-  /* A line the human TYPES, so it carries the per-task number — the CLI takes the same
-     `#N` the agents do, not the global row id. */
-  var cmd = 'sys-buddy todo drop '+d.id+' '+todoNo(t)+' --reason "…"';
-  /* Same as the NEXT card: no side inset of its own, so it lines up with the column it
-     is dropped into rather than with a card that no longer exists. */
+  var mono='font-family:'+MONO+';font-size:11px;color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;overflow-x:auto;white-space:pre';
+  var lbl='margin:11px 0 5px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)';
   return '<div style="margin:14px 0 0;padding:11px 13px;border:1px dashed var(--border-strong);border-radius:11px">'+
     '<div style="display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;color:var(--text-2)">'+
-      '<span style="display:flex;color:var(--st-testing-fg)">'+IC.warn+'</span>Drop '+esc(todoNoun(d))+' (host)</div>'+
-    '<p style="margin:6px 0 8px;font-size:11.5px;color:var(--text-2);line-height:1.5">'+why+
-      ' Run it from your own terminal — this dashboard only ever reads.</p>'+
-    '<div style="font-family:'+MONO+';font-size:11px;color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;overflow-x:auto;white-space:pre">'+esc(cmd)+'</div></div>';
+      '<span style="display:flex;color:var(--st-testing-fg)">'+IC.warn+'</span>Unblock this '+noun+' (host)</div>'+
+    '<p style="margin:6px 0 0;font-size:11.5px;color:var(--text-2);line-height:1.5">'+
+      'No agent can remove a peer from a '+noun+', and a party whose agent has gone silent '+
+      'cannot remove itself either — that is what an outage is. So these are yours. Run '+
+      'them from your own terminal; this dashboard only ever reads.</p>'+
+    '<div style="'+lbl+'">Remove just that party — the '+noun+' survives</div>'+
+    '<p style="margin:0 0 6px;font-size:11.5px;color:var(--text-2);line-height:1.5">'+
+      'Takes one seat off #'+todoNo(t)+' and recalculates its quorum over whoever is left, '+
+      'so anything that was only waiting on them unblocks immediately. Everything they '+
+      'already did stays on the record. Usually the right move.</p>'+
+    '<div style="'+mono+'">'+esc(partyCmd)+'</div>'+
+    '<div style="'+lbl+'">Or abandon the whole '+noun+'</div>'+
+    '<p style="margin:0 0 6px;font-size:11.5px;color:var(--text-2);line-height:1.5">'+dropWhy+'</p>'+
+    '<div style="'+mono+'">'+esc(dropCmd)+'</div></div>';
 }
 
 /* One pill per seat on the todo, carrying that seat's answer (✓ accepted / ✕ declined /
@@ -1966,6 +2002,60 @@ function todoPartyPillsHTML(t){
       '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(who)+'</span>'+
       '<span style="flex:none">'+mark+'</span></span>';
   }).join('');
+}
+
+/* WHO IS NO LONGER ON THIS TODO. A seat that simply disappears from the party list is
+   the worst outcome available here: the remaining humans cannot tell an outage from a
+   decision, and a signature already on a locked contract goes on reading as though the
+   person behind it were still bound. So a departure keeps a pill — struck through, in
+   the muted palette, never counted with the live ones — and the pill says WHICH of the
+   two things happened, because the reader's next move differs:
+     left     — they took themselves off (`leave_todo`). You message them.
+     removed  — a HUMAN took them off (`sys-buddy todo drop-party`) because their agent
+                had gone dark. You go and find them.
+   `departed` is append-only, so a seat that left and was later named again by a
+   repropose is filtered out here — the LIVE party list wins over the history. */
+/* HH:MM, the same mono clock the rest of the board prints, from the epoch the domain
+   stores. '' rather than `undefined` against a payload with no timestamp. */
+function depWhen(ts){
+  if(typeof ts!=='number' || !isFinite(ts)) return '';
+  var dt=new Date(ts*1000);
+  return ('0'+dt.getHours()).slice(-2)+':'+('0'+dt.getMinutes()).slice(-2);
+}
+function todoDepartedPillsHTML(t){
+  var live=(t.parties||[]), seen={}, rows=[];
+  (t.departed||[]).forEach(function(d){
+    if(live.indexOf(d.seat)>=0) return;   /* named again → they are back, not gone */
+    seen[d.seat]=d;
+  });
+  Object.keys(seen).forEach(function(s){ rows.push(seen[s]); });
+  if(!rows.length) return '';
+  return '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:7px">'+rows.map(function(d){
+    var a=avSeat(d.seat), removed=(d.mode==='removed');
+    var tip=seatIdentity(d.seat, true)+' — '+
+      (removed?('REMOVED by '+(d.by||'host')+' (their agent had gone silent)'):'LEFT this todo')+
+      ': '+(d.reason||'')+(depWhen(d.at)?' · '+depWhen(d.at):'');
+    return '<span title="'+esc(tip)+'" style="display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:2px 9px 2px 2px;border-radius:999px;background:transparent;border:1px dashed var(--border-strong);font-size:10.5px;font-weight:600;color:var(--text-3)">'+
+      '<span style="width:16px;height:16px;border-radius:5px;background:'+a.c+';color:#fff;font-size:8px;display:inline-flex;align-items:center;justify-content:center;flex:none;opacity:.5">'+esc(a.i)+'</span>'+
+      '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:line-through">'+esc(seatIdentity(d.seat))+'</span>'+
+      '<span style="flex:none;font-weight:700;letter-spacing:.04em;text-transform:uppercase;font-size:8.5px;color:'+(removed?'var(--st-stuck-fg)':'var(--text-3)')+'">'+(removed?'removed':'left')+'</span></span>';
+  }).join('')+'</div>';
+}
+
+/* The one-line WHY, under the pills. The pill carries who and which; this carries the
+   reason, which is the thing a person actually reads before deciding what to do next. */
+function todoDepartedNoteHTML(t){
+  var live=(t.parties||[]), seen={};
+  (t.departed||[]).forEach(function(d){ if(live.indexOf(d.seat)<0) seen[d.seat]=d; });
+  var rows=Object.keys(seen).map(function(s){ return seen[s]; });
+  if(!rows.length) return '';
+  return '<div style="margin-top:9px;padding:8px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;display:flex;flex-direction:column;gap:4px">'+
+    rows.map(function(d){
+      return '<div style="font-size:11.5px;color:var(--text-2);line-height:1.5"><strong>'+esc(seatIdentity(d.seat, true))+'</strong> '+
+        (d.mode==='removed'?('was removed by '+esc(d.by||'host')):'left')+': '+esc(d.reason||'')+
+        (depWhen(d.at)?' <span style="color:var(--text-3)">· '+esc(depWhen(d.at))+'</span>':'')+'</div>';
+    }).join('')+
+    '<div style="font-size:11px;color:var(--text-3);line-height:1.5">Everything they already did stays on the record — their acceptance, and any signature on a locked contract. What is left is measured over whoever is still on it.</div></div>';
 }
 
 /* ---------- who has said "fixed" ----------
@@ -2063,6 +2153,10 @@ function todoModalHTML(d){
       '<div style="margin-top:18px"><div style="'+sectionLabel+'">Parties</div>'+
         '<div style="font-size:11.5px;color:var(--text-3);margin-bottom:7px">'+(isDebugTask(d)?'raised by ':'proposed by ')+esc(seatIdentity(t.proposed_by||'', true))+' · '+esc(todoNoun(d))+' v'+esc(t.version)+'</div>'+
         '<div style="display:flex;gap:5px;flex-wrap:wrap">'+parties+'</div>'+
+        /* Departures sit UNDER the live parties, never mixed into them: the top row is
+           "who is bound", this is "who used to be". Mixing the two is how a struck-through
+           name gets counted as a party that has not answered yet. */
+        todoDepartedPillsHTML(t)+todoDepartedNoteHTML(t)+
         declines+stuckLine+dropLine+'</div>'+
       /* NEXT is last on this side deliberately: it is the only actionable thing on the
          screen, and it ends in the literal command a person types. */
@@ -2695,6 +2789,7 @@ var MCP_TOOLS=[
     ['accept_todo','accept a proposed todo'],
     ['decline_todo','decline with a reason (recorded, not a status)'],
     ['repropose_todo','new version — resets everyone’s acceptance'],
+    ['leave_todo','take YOURSELF off it — the todo lives on, its quorum recomputes'],
     ['drop_todo','consent to dropping it (every party must)']
   ]],
   ['Issues',[
@@ -2703,6 +2798,7 @@ var MCP_TOOLS=[
     ['accept_todo','agree an issue is real'],
     ['decline_todo','“that is not a bug”, with a reason'],
     ['repropose_todo','restate it — resets everyone’s acceptance and every `fixed`'],
+    ['leave_todo','take YOURSELF off it — the issue lives on, its `fixed` quorum recomputes'],
     ['drop_todo','consent to dropping it (every party must)']
   ]],
   ['Status',[

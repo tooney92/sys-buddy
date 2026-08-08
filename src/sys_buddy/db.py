@@ -207,6 +207,44 @@ CREATE TABLE IF NOT EXISTS todo_drop_consents (
     UNIQUE(todo_id, role)
 );
 
+-- WHO LEFT A TODO, AND HOW. A party can stop being bound by one deliverable without
+-- the deliverable being abandoned: they LEAVE it themselves (`leave_todo`), or their
+-- human's counterpart — the HOST — removes them when their agent has gone dark and
+-- cannot call anything (`sys-buddy todo drop-party`). Both write a row here.
+--
+-- It is a LOG, not a state: `todos.parties_json` is the live answer to "who is bound",
+-- and this table is the answer to "who used to be, and why aren't they". Without it a
+-- seat simply vanishes from a party list — and a party that disappears with no trace is
+-- worse than one that never left, because the remaining agents cannot tell an outage
+-- from a decision, and `get_contract` would show a signature from somebody the todo no
+-- longer binds with nothing to say so.
+--
+-- Deliberately NOT unique per (todo_id, role): a party can leave, be brought back by a
+-- `repropose_todo` that names them again, and leave a second time. Each departure is
+-- its own fact with its own reason, so the history appends.
+CREATE TABLE IF NOT EXISTS todo_departures (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    todo_id    INTEGER NOT NULL REFERENCES todos(id),
+    -- A SEAT HANDLE, exactly like `todo_decisions.role` — see the note there. This is
+    -- the seat that STOPPED being a party.
+    role       TEXT NOT NULL,
+    -- 'left'    — the seat removed ITSELF (leave_todo). No tool can spell anything else.
+    -- 'removed' — the HOST removed it from the CLI/desktop app, because its agent could
+    --             not call a tool. The distinction is the whole point of recording this:
+    --             "mobile decided it wasn't needed" and "mobile went dark and a human
+    --             cut it loose" are different facts about the same missing name.
+    mode       TEXT NOT NULL,
+    -- WHO acted: the departing seat's own handle for 'left', or 'host' for 'removed'.
+    acted_by   TEXT NOT NULL,
+    agent_id   INTEGER REFERENCES agents(id),
+    reason     TEXT NOT NULL,
+    -- The todo VERSION current when they left, so a later repropose is legible against it.
+    version    INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_todo_departures_todo ON todo_departures(todo_id);
+
 -- ISSUES ON A DEBUG TASK: who has said "fixed". An issue IS a todo (same table, same
 -- numbering, same party list, same accept/decline) with the contract half removed, so the
 -- one thing it needs that a contract todo does not is a place to record each party's

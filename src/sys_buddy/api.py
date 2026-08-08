@@ -148,6 +148,19 @@ def _render_detail(kind: str, detail: dict, noun: str = "Todo") -> str:
         text = f"{noun} #{ref}"
         if title:
             text += f" '{title}'"
+        # A DEPARTURE names the seat, not just the actor. Left to the generic renderer
+        # below, `todo_party_removed by host` reads as though the HOST were the one who
+        # left — the single fact a reader needs (WHO is no longer on it) would be the one
+        # fact the line omits.
+        if action in ("party_left", "party_removed"):
+            seat = detail.get("seat") or "?"
+            text += (
+                f" — {seat} LEFT" if action == "party_left"
+                else f" — {seat} REMOVED by {detail.get('by') or 'host'}"
+            )
+            if detail.get("reason"):
+                text += f": {detail['reason']}"
+            return text
         text += f" {action}"
         if detail.get("by"):
             text += f" by {detail['by']}"

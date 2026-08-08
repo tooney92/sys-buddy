@@ -19,12 +19,19 @@ stage carries both and is overloaded for it. The contract's signatory set comes
 STRAIGHT from the party list, which is why quorum needs no separate mechanism — it
 is the same "all must sign" rule over a smaller "all".
 
-**No peer may remove a peer.** You joined by accepting; you leave by your own call.
-If backend could remove mobile, then the moment mobile objects to a shape backend
-removes it and locks without the dissent — "both sides sign" quietly becomes
-"whoever proposes wins". The real problem is ABSENCE, not dissent, and a mutual
-drop deadlocks on the very party who is missing. So the escape hatch is HUMAN:
-:func:`host_drop_todo`, reachable from the CLI/GUI, never from a peer's tool.
+**No AGENT may remove a peer.** You joined by accepting; you leave by your own call
+(:func:`leave_todo`, which has no seat argument at all, so naming somebody else is
+unspellable rather than merely refused). If backend could remove mobile, then the
+moment mobile objects to a shape backend removes it and locks without the dissent —
+"both sides sign" quietly becomes "whoever proposes wins".
+
+The real problem is ABSENCE, not dissent, and neither a mutual drop nor a self-removal
+can answer it: both need a call from the very party who is missing. So absence has a
+HUMAN escape hatch, in two sizes, reachable from the CLI/GUI and never from a peer's
+tool — :func:`host_drop_todo` abandons the whole deliverable, and
+:func:`host_remove_party` removes only the silent party and lets the rest carry on.
+Both are recorded (``todo_departures``, plus an event and a broker-authored message):
+a party that vanishes with no trace is worse than one that never left.
 
 **TWO IDENTIFIERS, and they are not interchangeable.** ``todos.id`` is a global
 AUTOINCREMENT and the target of every foreign key in the schema; ``todos.number`` is
@@ -74,7 +81,17 @@ ALL_STATUSES = (PENDING, ACCEPTED, CONTRACTED, VERIFIED, RESOLVED, DROPPED)
 ACCEPT = "accepted"
 DECLINE = "declined"
 
-HOST = "host"  # the `dropped_by` value for a unilateral host drop
+HOST = "host"  # the `dropped_by` / `acted_by` value for a unilateral host action
+
+# --- how a party stopped being a party (todo_departures.mode) ----------------
+# Two words for the same missing name, and they are not interchangeable: LEFT is a
+# decision ("we don't need mobile after all", from mobile), REMOVED is an outage
+# ("mobile's agent cannot call anything", from a human). Every surface prints which,
+# because the reader's next move differs — you message someone who left, and you go
+# and find someone who was removed.
+LEFT = "left"        # the seat removed ITSELF, via leave_todo
+REMOVED = "removed"  # the HOST removed it, via `sys-buddy todo drop-party`
+DEPARTURE_MODES = (LEFT, REMOVED)
 
 # --- the per-todo march ------------------------------------------------------
 # Deliberately the SAME vocabulary as the task state machine: the UI's mini-stepper
@@ -304,6 +321,59 @@ def record_fix(conn, todo_id: int, version: int, identity: Identity, detail: str
     )
 
 
+def departures(conn, todo_id: int) -> list[dict]:
+    """Every party that has STOPPED being a party on this todo, oldest first.
+
+    The counterpart to ``parties_json``: that says who is bound now, this says who used
+    to be and why they aren't. Version-INDEPENDENT, unlike acceptances and fixes — you
+    left the deliverable, not a revision of it — and append-only, because a party can be
+    named again by a ``repropose_todo`` and leave a second time for a second reason.
+
+    Read by every surface that shows a party list, and by ``get_contract``: a locked
+    contract keeps a signature from a signatory who has since left, and displaying that
+    signature with nothing beside it would be the silent case this table exists to
+    prevent.
+    """
+    return [
+        {
+            "seat": r["role"],
+            "mode": r["mode"],
+            "by": r["acted_by"],
+            "reason": r["reason"],
+            "version": r["version"],
+            "at": r["created_at"],
+        }
+        for r in conn.execute(
+            "SELECT role, mode, acted_by, reason, version, created_at "
+            "FROM todo_departures WHERE todo_id = ? ORDER BY id",
+            (todo_id,),
+        ).fetchall()
+    ]
+
+
+def departed_seats(conn, row, among: list[str] | None = None) -> list[str]:
+    """The seats that left and are NOT parties again, in departure order.
+
+    A seat that left and was later named by a ``repropose_todo`` is bound again and must
+    not read as gone, so the CURRENT party list wins over the history — the log keeps
+    both facts, this answers only "who is missing right now".
+
+    ``among`` narrows it to a set the caller cares about: ``get_contract`` passes the
+    signatures on a contract, so it asks "which of the people who signed this are no
+    longer bound by it?" rather than "who has ever left this todo?".
+    """
+    current = set(parties_of(row))
+    out: list[str] = []
+    for d in departures(conn, row["id"]):
+        seat = d["seat"]
+        if seat in current or seat in out:
+            continue
+        if among is not None and seat not in among:
+            continue
+        out.append(seat)
+    return out
+
+
 def drop_consents(conn, todo_id: int) -> dict[str, str | None]:
     return {
         r["role"]: r["reason"]
@@ -405,6 +475,11 @@ def to_dict(conn, row) -> dict:
         # fixes, and without this field every surface renders them the same.
         "unjoined": unjoined_parties(conn, row["task_id"], parties),
         "decline_reasons": {r: v["reason"] for r, v in d.items() if v["decision"] == DECLINE},
+        # WHO IS NO LONGER BOUND, and whether they left or were removed. Shipped on every
+        # todo (an empty list when nobody has left) rather than only when non-empty: an
+        # agent reading its own todo has to be able to tell "mobile was never on this"
+        # from "mobile left", and a key that appears only sometimes teaches neither.
+        "departed": departures(conn, row["id"]),
         # The per-todo march + its own contract chain, for the mini-stepper.
         "state": row["state"],
         "strikes": row["strikes"],
@@ -590,6 +665,18 @@ def _assert_open(row, action: str) -> None:
         raise ValueError(f"todo #{row['number']} was dropped; cannot {action} it")
 
 
+def min_parties(conn, task_id: str) -> int:
+    """How few seats a todo on this task may bind — 2, or 1 on an engagement.
+
+    ONE statement of the rule, read by :func:`_validate_parties` when a party list is
+    PROPOSED and by :func:`_assert_departure_allowed` when one shrinks. They have to be
+    the same number or removal quietly manufactures a shape that could never have been
+    proposed — see the reasoning at the propose-time check below, which is where the
+    "why" lives.
+    """
+    return 1 if deliverables.is_engagement(conn, task_id) else 2
+
+
 def _validate_parties(conn, task_id: str, parties: object) -> list[str]:
     """Resolve a party list to SEAT HANDLES, refusing anything that names more than one.
 
@@ -622,6 +709,14 @@ def _validate_parties(conn, task_id: str, parties: object) -> list[str]:
     ]
     if len(cleaned) != len(set(cleaned)):
         raise ValueError("parties must be unique (no duplicates)")
+    # An EMPTY list first, and before the minimum below: on an engagement the minimum is
+    # one, so "you named nobody" would otherwise be answered with "a todo binds at least
+    # TWO seats" — a rule that does not apply there and a fix the caller cannot act on.
+    if not cleaned:
+        raise ValueError(
+            f"a {noun(conn, task_id)} binds at least one of the task's seats — name who "
+            f"is doing the work"
+        )
     # A SOLO todo is legitimate on an engagement, and only there.
     #
     # On a peer task the second seat IS the accountability: a contract with one
@@ -636,7 +731,7 @@ def _validate_parties(conn, task_id: str, parties: object) -> list[str]:
     # how we have built"); the counterparty is the client rather than a peer. Requiring a
     # second dev there would just be conscripting somebody to rubber-stamp work they had
     # nothing to do with, which is worse than no signature at all.
-    if len(cleaned) < 2 and not deliverables.is_engagement(conn, task_id):
+    if len(cleaned) < min_parties(conn, task_id):
         if is_debug(conn, task_id):
             raise ValueError(
                 "an issue binds at least TWO of the task's seats — one to raise it and one "
@@ -646,11 +741,6 @@ def _validate_parties(conn, task_id: str, parties: object) -> list[str]:
         raise ValueError(
             "a todo binds at least TWO of the task's seats — one to produce the "
             "deliverable and one to build against it (same rule as a contract task's cast)"
-        )
-    if not cleaned:
-        raise ValueError(
-            f"a {noun(conn, task_id)} binds at least one of the task's seats — name who "
-            f"is doing the work"
         )
     _assert_parties_ready(conn, task_id, cleaned)
     return cleaned
@@ -1192,6 +1282,310 @@ def host_drop_todo(conn, task_id: str, number: int, reason: str, by: str = HOST)
     apply_rollup(conn, task_id)
     conn.commit()
     return to_dict(conn, row_by_id(conn, task_id, row["id"]))
+
+
+# --------------------------------------------------------------------------- #
+# removing ONE party — the two situations, and why they need two mechanisms
+# --------------------------------------------------------------------------- #
+# "We don't need mobile after all" and "mobile has an outage" look identical from the
+# party list and are opposites underneath.
+#
+#   * PRESENT AND COOPERATIVE → the seat removes ITSELF. :func:`leave_todo` takes no
+#     seat argument at all, so "remove my peer" is not a refused call, it is an
+#     unspellable one. That is what keeps "no agent ejects a peer" true on a
+#     cross-org broker: the property is structural, not a permission check somebody
+#     can be argued past.
+#   * GONE DARK → self-removal is useless exactly when it is needed, because an outage
+#     IS "cannot call a tool". So somebody else must act, and that somebody is a
+#     HUMAN: :func:`host_remove_party`, reachable from the CLI and the desktop app.
+#     Ejecting a peer is the most abusable capability on a cross-org task, and a human
+#     typing a command cannot be prompt-injected. Same posture as `staging_url`,
+#     `add-seat`, `revoke-agent` and `close`, all host-owned for the same reason.
+#
+# Both write the SAME row (``todo_departures``) through the same core below, so the two
+# can never drift into two behaviours; only who may call them, and the word the log
+# prints, differ.
+def leave_todo(conn, identity: Identity, number: int, reason: str) -> dict:
+    """Take YOURSELF off one todo. The deliverable carries on without you.
+
+    The gap this fills: ``drop_todo`` abandons the whole thing and needs every party to
+    agree, so "we don't need mobile after all" had no move at all — the only options
+    were to abandon work two other people still wanted, or to leave a name on a party
+    list that would block its quorum forever.
+
+    **SELF ONLY, structurally.** There is no ``seat`` parameter here and none on either
+    tool surface, so no argument exists that could name a peer. See the section comment
+    above for why that matters more than a permission check would.
+
+    Refused when you are the last party, when the todo is already verified (the same
+    terminal rule ``drop_todo`` obeys, for the same reason: the rollup counts it as
+    done), and when leaving would take the todo below the number of parties it could
+    have been PROPOSED with — a peer deliverable with one party has nobody to sign
+    against and nobody who may check the work, so it is not a smaller agreement, it is
+    an abandoned one, and abandoning is what ``drop_todo`` is for.
+
+    Everything you already did stays recorded: your acceptance, your signature on a
+    locked contract, your ``fixed``. You are no longer BOUND; you were still there.
+    """
+    _assert_task_usable(conn, identity.task_id)
+    row = get_row(conn, identity.task_id, number)
+    what = noun(conn, identity.task_id)
+    _assert_open(row, "leave")
+    assert_party(row, identity.role, "leave")
+    reason = _clean_departure_reason(reason, "leave_todo needs a reason")
+    _assert_departure_allowed(conn, row, identity.role, what, host=False)
+
+    remaining = _record_departure(
+        conn, identity.task_id, row, identity.role, reason,
+        mode=LEFT, acted_by=identity.role, agent_id=identity.agent_id,
+    )
+    conn.commit()
+    service.post_message(
+        conn, identity, "todo_leave",
+        f"I've LEFT {what} #{row['number']} ({row['title']}): {reason}. It is no longer "
+        f"waiting on me and I am not bound by it — it now binds "
+        f"{', '.join(remaining)}, and its quorum has been recalculated over them. "
+        f"Nothing I already did is erased: my acceptance and any signature of mine stay "
+        f"on the record. If you want me back on it, repropose_todo({row['number']}, "
+        f"parties=[...]) naming me again — I cannot put myself back.",
+        todo_id=row["id"],
+    )
+    settle_after_departure(conn, identity.task_id, row["id"], identity.role)
+    apply_rollup(conn, identity.task_id)
+    conn.commit()
+    return _result(conn, identity.task_id, row["id"])
+
+
+def host_remove_party(conn, task_id: str, number: int, seat: str, reason: str,
+                      by: str = HOST) -> dict:
+    """The HOST removes ONE unresponsive party. NOT an agent tool, deliberately.
+
+    The case ``leave_todo`` cannot cover: an outage means the agent cannot call
+    anything, so the one call that would fix it is the one call that is unavailable.
+    Before this, absence had exactly one answer — ``host_drop_todo``, which throws away
+    a deliverable the remaining parties were still working on and still wanted.
+
+    It is the smaller of the two host hatches, and the log says which was used. Same
+    rules as :func:`leave_todo` otherwise, because they are the same act: verified is
+    terminal, the last party may not go, and the remaining list must still be a list a
+    todo could have been proposed with.
+
+    ``seat`` is resolved the way every binding seat reference is (``service.resolve_seat``
+    via :func:`_validate_parties`'s resolver) so the host can type ``@mobile``,
+    ``mobile``, or that person's display name and be corrected rather than guessed at.
+    """
+    from . import seats as _seats
+
+    row = get_row(conn, task_id, number)
+    what = noun(conn, task_id)
+    if row["dropped_at"] is not None:
+        raise ValueError(
+            f"{what} #{row['number']} is already dropped; there is nobody left to remove "
+            f"from it"
+        )
+    handles, seat_roles = _seats.cast_of(conn, task_id)
+    names = _seats.names_of(conn, task_id)
+    # A leading `@` is stripped here and only here. This is a HOST-TYPED surface and the
+    # briefings teach humans to say `@mobile`, so refusing the form we taught them would
+    # be a wall at the one moment they are already dealing with an outage. The resolver
+    # itself stays literal — agent-supplied party lists go through it untouched.
+    seat = service.resolve_seat(
+        str(seat or "").strip().lstrip("@"), handles, seat_roles, names, task_id=task_id,
+        binding="Removing a party removes ONE specific person",
+        hint=" Run `sys-buddy todo list` to see who each todo binds.",
+    )
+    if seat not in parties_of(row):
+        raise ValueError(
+            f"'{seat}' is not a party on {what} #{row['number']} ('{row['title']}') — it "
+            f"binds {', '.join(parties_of(row))}. Nothing to remove."
+        )
+    reason = _clean_departure_reason(
+        reason, "removing a party needs a reason — it is the only thing the agents will see"
+    )
+    _assert_departure_allowed(conn, row, seat, what, host=True)
+
+    remaining = _record_departure(
+        conn, task_id, row, seat, reason, mode=REMOVED, acted_by=by, agent_id=None,
+    )
+    conn.commit()
+
+    # Broker-authored, exactly like a host drop: there is no triggering agent, and
+    # attributing a human's decision to a participant would both misattribute it and
+    # (because `_fetch` excludes your own messages) withhold it from that participant.
+    broker = service.ensure_broker_identity(conn, task_id)
+    service.post_message(
+        conn, broker, "todo_party_removed",
+        f"{seat} was REMOVED from {what} #{row['number']} ({row['title']}) by the host "
+        f"({by}): {reason}. This was a human decision, not a peer's — no agent can remove "
+        f"anyone from a {what}. It now binds {', '.join(remaining)}, and its quorum has "
+        f"been recalculated over them, so anything that was only waiting on {seat} is "
+        f"unblocked. {seat} is still on the TASK and can still read and message; it is "
+        f"this one deliverable it is no longer bound by. Nothing already recorded is "
+        f"erased — {seat}'s acceptance and any signature stay on the record. To bring "
+        f"them back, a remaining party calls repropose_todo({row['number']}, "
+        f"parties=[...]) naming them again.",
+        todo_id=row["id"],
+    )
+    settle_after_departure(conn, task_id, row["id"], by)
+    apply_rollup(conn, task_id)
+    conn.commit()
+    return to_dict(conn, row_by_id(conn, task_id, row["id"]))
+
+
+def _clean_departure_reason(reason: object, blank_message: str) -> str:
+    """A departure ALWAYS carries a reason. It is the only thing the people left behind
+    get, and — for a removal — the only thing the absent party's agent will find when it
+    comes back to a deliverable that no longer names it."""
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError(blank_message)
+    service.assert_content_size(reason, "departure reason")
+    return reason
+
+
+def _assert_departure_allowed(conn, row, seat: str, what: str, *, host: bool) -> None:
+    """The three refusals, identical for a self-leave and a host removal.
+
+    They are identical on purpose: the two differ in WHO may act, never in what the
+    resulting todo is allowed to look like. A rule that a human could bypass would just
+    be a rule that gets bypassed.
+    """
+    # 1. VERIFIED IS TERMINAL — the same rule `drop_todo` obeys. The rollup already
+    #    reports this deliverable as done; rewriting who was bound by finished work
+    #    would make that count, and the signatures under it, retrospectively untrue.
+    if row["state"] == "verified":
+        raise ValueError(
+            f"{what} #{row['number']} is verified — nobody can be removed from it. The "
+            f"task's rollup reports it as done and the record of who delivered it is "
+            f"part of that. Follow-up work is a NEW {what}."
+        )
+    parties = parties_of(row)
+    floor = min_parties(conn, row["task_id"])
+    # 2. THE LAST PARTY MAY NOT GO. A todo bound to nobody is orphaned — no quorum to
+    #    reach, nobody who may act on it, and it still counts toward the task's rollup
+    #    forever. That case already has a name and a tool.
+    if len(parties) <= 1:
+        who = "You are" if not host else f"'{seat}' is"
+        raise ValueError(
+            f"{who} the ONLY party on {what} #{row['number']} ('{row['title']}'), so "
+            f"removing {'you' if not host else 'them'} would leave it bound to nobody — "
+            f"orphaned, unactionable, and still counted by the task. That is not a "
+            f"departure, it is an abandonment, and abandoning has its own move: "
+            + (f"drop_todo({row['number']}, reason)." if not host
+               else f"`sys-buddy todo drop <task> {row['number']} --reason \"...\"`.")
+        )
+    # 3. THE REMAINDER MUST STILL BE A SHAPE THAT COULD HAVE BEEN PROPOSED. A peer
+    #    deliverable with one party is not a smaller agreement; it is a note to self.
+    #    Concretely it DEADLOCKS: the sole party proposes the contract, so it is the
+    #    producer, and `state._report_todo_test` refuses a producer checking its own
+    #    work off a peer task — so the todo can never reach `testing`, and `verified`
+    #    becomes unreachable. On a debug task the equivalent is worse: `fixed #N` over a
+    #    party list of one resolves the issue on its author's word alone. An ENGAGEMENT
+    #    is the documented exception and stays one here, because its outer ring (the
+    #    client's own agent verifies against the deliverable list) supplies the
+    #    counterparty a peer task has to name.
+    if len(parties) - 1 < floor:
+        left = [p for p in parties if p != seat]
+        raise ValueError(
+            f"removing '{seat}' would leave {what} #{row['number']} ('{row['title']}') "
+            f"bound to {', '.join(left)} alone, and a {what} on this task binds at least "
+            f"{floor} seats — the second one is the accountability: it signs the contract "
+            f"against you and it is the only party allowed to check your work. A "
+            f"one-party {what} here cannot reach verified at all, so this would not "
+            f"shrink the deliverable, it would strand it. Either bring in another seat "
+            f"first with repropose_todo({row['number']}, parties=[...]), or abandon it: "
+            + (f"drop_todo({row['number']}, reason)." if not host
+               else f"`sys-buddy todo drop <task> {row['number']} --reason \"...\"`.")
+        )
+
+
+def _record_departure(conn, task_id: str, row, seat: str, reason: str, *,
+                      mode: str, acted_by: str, agent_id: int | None) -> list[str]:
+    """Write the departure and shrink ``parties_json``. Returns the remaining parties.
+
+    ONE core for both callers. The party list is the ONLY thing that changes: decisions,
+    fixes, drop consents and contract signatures are all left exactly as they were,
+    because they are statements somebody actually made and deleting them would rewrite
+    history rather than end an obligation. Every quorum reads the party list live
+    (``status_of``, ``all_fixed``, ``lock_contract``'s ``required``, ``drop_consents``),
+    so a departed party's stale row is simply never counted again — which is what makes
+    "quorum recomputes" a consequence of the shrink instead of a second mechanism that
+    could disagree with it.
+    """
+    remaining = [p for p in parties_of(row) if p != seat]
+    conn.execute(
+        "INSERT INTO todo_departures (todo_id, role, mode, acted_by, agent_id, reason, "
+        "version, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (row["id"], seat, mode, acted_by, agent_id, reason, row["version"], _now()),
+    )
+    conn.execute(
+        "UPDATE todos SET parties_json = ? WHERE id = ?",
+        (json.dumps(remaining), row["id"]),
+    )
+    _event(
+        conn, task_id,
+        "todo_party_left" if mode == LEFT else "todo_party_removed",
+        row["id"],
+        {"title": row["title"], "seat": seat, "by": acted_by, "mode": mode,
+         "reason": reason, "version": row["version"], "parties": remaining,
+         "host": mode == REMOVED},
+    )
+    return remaining
+
+
+def settle_after_departure(conn, task_id: str, todo_id: int, acted_by: str = HOST) -> dict:
+    """Re-run every all-must-agree gate on ONE todo now that its party list is smaller.
+
+    **This is the point of the feature.** Removing a name from ``parties_json`` fixes
+    every DERIVED reading for free — ``status_of`` recomputes, ``awaiting`` recomputes,
+    ``awaiting_fix`` recomputes — but three gates are LATCHED: they fire once, inside the
+    call that completes them, and there is no later call to notice that "everyone" now
+    means fewer people. Left alone, the outage case ends with a todo that is unblocked on
+    paper and still frozen in fact, which is the same as not shipping this at all.
+
+    The three, in the order they can matter:
+
+    * **a mutual drop** whose last outstanding consent was the departing party's. Settled
+      first and returns immediately — there is nothing to settle on an abandoned
+      deliverable;
+    * **a draft contract** every remaining party has already signed. It LOCKS, over the
+      same "all must sign" rule, now over a smaller "all";
+    * **an issue** every remaining party has already reported ``fixed``. It RESOLVES.
+
+    Only ever UNBLOCKS. No gate here can move a todo backwards, refuse anything, or
+    change a shape: a smaller party list can only ever satisfy an all-must-agree test
+    that a larger one did not.
+    """
+    from . import state as _state
+
+    row = row_by_id(conn, task_id, todo_id)
+    if row["dropped_at"] is not None or row["state"] == "verified":
+        return {}
+    out: dict = {}
+    parties = parties_of(row)
+    consented = drop_consents(conn, todo_id)
+    if parties and all(p in consented for p in parties):
+        reason = next((consented[p] for p in parties if consented[p]), "dropped by consent")
+        # `dropped_by` is "who finalised it", and here that is honestly whoever caused the
+        # party list to shrink — the seat that left, or `host` for a removal. Crediting a
+        # remaining party would name somebody who consented days ago and did nothing today.
+        _finalise_drop(conn, task_id, todo_id, acted_by, reason, host=(acted_by == HOST))
+        conn.commit()
+        broker = service.ensure_broker_identity(conn, task_id)
+        service.post_message(
+            conn, broker, "todo_dropped",
+            f"{noun(conn, task_id).title()} #{row['number']} ({row['title']}) is now "
+            f"DROPPED. Every remaining party ({', '.join(parties)}) had already consented; "
+            f"the only outstanding consent belonged to a party that has since left, so the "
+            f"drop completes over the parties who are actually on it: {reason}",
+            todo_id=todo_id,
+        )
+        return {"dropped": True}
+    # The other two live in the state machine, which owns locks, the march and the
+    # messages that go with them — settling them here would be a second implementation
+    # of `lock_contract`'s and `_report_issue_fixed`'s endings.
+    out.update(_state.settle_todo_quorum(conn, task_id, row))
+    return out
 
 
 # --------------------------------------------------------------------------- #
