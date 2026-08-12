@@ -723,6 +723,27 @@ function seatIdentity(seat, withHandle){
   if(withHandle || nameIsShared(row)) label += ' @'+seatAddress(seat);
   return label;
 }
+/* WHO SAID IT — the sender of one message, as a reader needs it.
+   `av()` answers with the ROLE TYPE, which is the right answer for a colour and the
+   wrong one for a byline: on a task whose cast is two backends it prints "backend"
+   over every message in the thread and the reader cannot tell the two people apart.
+   So the NAME leads and the @handle rides along beside it — the same pair the Cast
+   panel shows, read off the same `roster` rows, so the two can never disagree.
+   Falls back to the role-type label with no handle for the broker's own voice and for
+   an older API that sends no roster — i.e. exactly what shipped before. */
+function threadSender(seat){
+  var a=avSeat(seat), row=rosterRow(seat), name=row&&row.name;
+  return {
+    c:a.c,
+    /* Colour still means ROLE — the legend says so and that stays true. The LETTER
+       becomes the person, because between two seats of one role type the letter is
+       otherwise the same glyph repeated down the whole thread. */
+    i:name ? String(name).trim().charAt(0).toUpperCase() : a.i,
+    label:name || a.label,
+    handle:row ? '@'+seatAddress(seat) : '',
+    title:row ? seatIdentity(seat, true) : a.label
+  };
+}
 
 /* ---------- the CAST: seats, role types, and the count chips ----------
    A seat is a PERSON (`@frontend-2`); a role type is a KIND OF WORK (`frontend`), and
@@ -1195,12 +1216,15 @@ function threadItemHTML(it){
   }
   var pass = (m.type==='test_result') ? (m.strike==null) : false;
   var chip=typeChip(m.type,pass);
-  var a=avSeat(m.role);
-  // directed message: a `→ role` chip tinted with the target role's color (broadcast/null = no chip)
+  var a=threadSender(m.role);
+  /* directed message: a `→ who` chip tinted with the target's role colour (broadcast/null
+     = no chip). It names the same thing the byline does — the PERSON when the target is a
+     seat on the roster, the role type when it is a bare type or the roster is missing —
+     because a chip reading `→ backend` on a two-backend task points at both of them. */
   var toChip='';
   if(m.to_role){
-    var ta=av(m.to_role);
-    toChip='<span title="directed to '+esc(ta.label)+'" style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:999px;font-family:'+MONO+';font-size:10px;font-weight:600;color:'+ta.c+';background:transparent;border:1px solid '+ta.c+'">→ '+esc(ta.label)+'</span>';
+    var ta=threadSender(m.to_role);
+    toChip='<span title="directed to '+esc(ta.title)+'" style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:999px;font-family:'+MONO+';font-size:10px;font-weight:600;color:'+ta.c+';background:transparent;border:1px solid '+ta.c+'">→ '+esc(ta.label)+'</span>';
   }
   /* ⟨todo⟩ chip: which deliverable this message belongs to. The API adds `todo` ONLY
      when the message names one, so a pre-todo thread renders with no chip at all. */
@@ -1214,10 +1238,14 @@ function threadItemHTML(it){
   }
   var confetti = (m.type==='verified') ? confettiHTML() : '';
   return '<div style="display:flex;gap:11px;align-items:flex-start">'+
-    '<span style="width:30px;height:30px;border-radius:9px;background:'+a.c+';color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+
+    '<span title="'+esc(a.title)+'" style="width:30px;height:30px;border-radius:9px;background:'+a.c+';color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">'+esc(a.i)+'</span>'+
     '<div style="flex:1;min-width:0">'+
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">'+
-        '<span style="font-size:13px;font-weight:600;color:var(--text)">'+esc(a.label)+'</span>'+
+        '<span title="'+esc(a.title)+'" style="font-size:13px;font-weight:600;color:var(--text)">'+esc(a.label)+'</span>'+
+        /* the @handle sits in the byline, not only in a tooltip: it is the token a human
+           types to address this agent, and on a same-role cast it is the half of the
+           identity that is guaranteed unique. */
+        (a.handle?'<span style="font-family:'+MONO+';font-size:10.5px;color:var(--text-3)">'+esc(a.handle)+'</span>':'')+
         '<span style="background:'+chip.bg+';color:'+chip.fg+';padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:600">'+esc(chip.label)+'</span>'+
         toChip+tdChip+
         '<span style="font-size:11px;color:var(--text-3);font-family:'+MONO+'">'+esc(m.time)+'</span>'+
@@ -1291,8 +1319,8 @@ function threadLegendHTML(){
       '<span style="display:inline-flex;gap:3px;flex:none">'+roleDotsHTML()+'</span>Roles are colour-coded</span>'+
     '<span>Messages broadcast to everyone on the task by default</span>'+
     '<span style="display:inline-flex;align-items:center;gap:6px">'+
-      '<span style="font-family:'+MONO+';font-size:10px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:999px;padding:1px 7px;white-space:nowrap">→ role</span>'+
-      'means it went to that one role only</span>'+
+      '<span style="font-family:'+MONO+';font-size:10px;font-weight:600;color:var(--text);border:1px solid var(--border-strong);border-radius:999px;padding:1px 7px;white-space:nowrap">→ who</span>'+
+      'means it went to that one agent only</span>'+
   '</div>';
 }
 
