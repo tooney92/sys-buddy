@@ -10,6 +10,14 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.9.0](https://github.com/tooney92/sys-buddy/compare/v2.8.0...v2.9.0) (2026-08-12)
+
+
+### Added
+
+* the message thread says WHO is talking, not just what role they play ([16b48c7](https://github.com/tooney92/sys-buddy/commit/16b48c7bde4daeb2a97d49558381813d49568fa2))
+* the message thread says who is talking, not just what role they play ([#84](https://github.com/tooney92/sys-buddy/issues/84)) ([16b48c7](https://github.com/tooney92/sys-buddy/commit/16b48c7bde4daeb2a97d49558381813d49568fa2))
+
 ## [2.8.0](https://github.com/tooney92/sys-buddy/compare/v2.7.1...v2.8.0) (2026-08-08)
 
 
