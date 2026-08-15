@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.11.0](https://github.com/tooney92/sys-buddy/compare/v2.10.0...v2.11.0) (2026-08-15)
+
+
+### Added
+
+* pick "guest" like any role — the guest self-names on the invite page (Concierge in the GUI) ([#90](https://github.com/tooney92/sys-buddy/issues/90)) ([631b6f6](https://github.com/tooney92/sys-buddy/commit/631b6f61411420868eb31d31afec2dc2adbd7485))
+
 ## [2.10.0](https://github.com/tooney92/sys-buddy/compare/v2.9.0...v2.10.0) (2026-08-15)
 
 
