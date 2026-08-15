@@ -207,3 +207,39 @@ def test_route_accepts_the_guest_and_refuses_everyone_else(conn):
     assert "hello team" in bodies
     assert "i should not be able to" not in bodies
     assert "nope" not in bodies
+
+
+# --------------------------------------------------------------------------- #
+# the invite flow — a guest is a role in the cast, self-names on the join page
+# --------------------------------------------------------------------------- #
+def test_redeeming_a_guest_invite_yields_a_view_link_not_an_agent_token(conn):
+    """A guest is picked like any role and gets an ordinary invite. Redeeming it — the
+    guest typing her own name on the join page — produces a viewer LINK, not an agent
+    token, and the seat is a real, writable guest."""
+    from sys_buddy import pairing
+
+    created = admin.create_task(None, title="Ada's site", roles=["backend", "frontend", "guest"])
+    task = created["id"]
+    code, _ = admin.mint_invite(task, "guest")
+
+    res = pairing.redeem_invite(conn, code, "Ada")
+    assert res["guest"] is True
+    assert res["agent_token"] is None          # no AI, no token
+    assert res["role_type"] == seats.GUEST_ROLE
+
+    v = resolve_viewer_token(conn, res["viewer_token"])
+    assert v is not None and v.is_guest is True
+    assert v.task_id == task
+    assert guest._guest_identity(conn, v) is not None   # she can write
+
+
+def test_guest_seat_is_not_a_builder(conn):
+    """`builder_handles` — who must sign a deliverable list — excludes the guest, exactly
+    as it excludes the owner. Otherwise a guest with no AI would block every lock."""
+    created = admin.create_task(
+        None, title="Site", roles=["backend", "frontend", "guest"], mode="engagement",
+    )
+    task = created["id"]
+    builders = seats.builder_handles(conn, task)
+    assert "guest" not in [seats.slug(b) for b in builders]
+    assert set(builders) == {"backend", "frontend"}

@@ -121,6 +121,44 @@ def _redeem(conn, code, agent_name, pubkey, now) -> dict:
     # split, where the two were the same string.
     role = seats.seat_roles_of(conn, task_id).get(handle, handle)
 
+    # A GUEST seat has no AI, so it redeems to a viewer LINK rather than an agent token:
+    # the exact same self-naming invite flow every buddy uses, but the credential handed
+    # back is the dashboard message box, not `/mcp` access. The seat is auto-ready (nothing
+    # about a guest is graded) and tokenless (she never calls a tool). Mirrors
+    # admin.add_guest, reached through the invite so the guest picks her own name here.
+    if seats.slug(role) == seats.GUEST_ROLE:
+        viewer_token = new_viewer_token()
+        cur = conn.execute(
+            "INSERT INTO agents (task_id, name, role, handle, token_hash, created_at, "
+            "ready, readiness_status) SELECT ?,?,?,?,NULL,?,1,'passed' WHERE EXISTS "
+            "(SELECT 1 FROM tasks WHERE id = ? AND closed_at IS NULL)",
+            (task_id, agent_name, seats.GUEST_ROLE, handle, now, task_id),
+        )
+        if cur.rowcount != 1:
+            raise ValueError(f"task '{task_id}' is closed")
+        agent_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO viewers (task_id, label, token_hash, created_at, agent_id) "
+            "VALUES (?,?,?,?,?)",
+            (task_id, agent_name, sha256_hex(viewer_token), now, agent_id),
+        )
+        conn.execute("UPDATE invites SET used_at = ? WHERE id = ?", (now, invite["id"]))
+        conn.execute(
+            "INSERT INTO events (task_id, kind, detail_json, created_at) VALUES (?,?,?,?)",
+            (task_id, "token",
+             json.dumps({"text": f"Guest '{agent_name}' joined as {handle}"}), now),
+        )
+        return {
+            "guest": True,
+            "agent_token": None,      # a guest never gets one — she has no agent
+            "viewer_token": viewer_token,
+            "task_id": task_id,
+            "role": handle,
+            "handle": handle,
+            "role_type": seats.GUEST_ROLE,
+            "expires_at": None,
+        }
+
     agent_token = new_agent_token()
     viewer_token = new_viewer_token()
     ttl = get_config().agent_token_ttl
@@ -369,6 +407,23 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
         finally:
             conn.close()
         audit.event("pair_ok", ip=ip, task=result["task_id"], role=result["role"], name=agent_name)
+
+        # A GUEST joined: hand back only what a non-technical human needs — a link to her
+        # board. No agent token, no briefing, no client wiring, because she runs no agent.
+        if result.get("guest"):
+            viewer_token = result["viewer_token"]
+            return JSONResponse(
+                {
+                    "guest": True,
+                    "task_id": result["task_id"],
+                    "role": result["role"],
+                    "handle": result["handle"],
+                    "role_type": result["role_type"],
+                    "viewer_token": viewer_token,
+                    "dashboard_url": f"{cfg.base_url}/ui?v={viewer_token}",
+                    "expires_at": None,
+                }
+            )
 
         # Lazy import: onboarding imports pairing at module top, so importing it here
         # (inside the handler) avoids a circular import.
