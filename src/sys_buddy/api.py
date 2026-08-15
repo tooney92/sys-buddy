@@ -192,6 +192,10 @@ def viewer_block(viewer: ViewerIdentity) -> dict:
     # this boolean — so a forged `is_guest` in a client buys nothing.
     if viewer.is_guest:
         block["is_guest"] = True
+        # Her seat handle — so the dashboard can tell which party pill / signature is hers
+        # and offer the accept / sign buttons. A reflection of the token, never a control.
+        if viewer.seat:
+            block["seat"] = viewer.seat
     # Channel NAMES, never a credential. Everyone watching the task benefits from
     # knowing whether terminal events actually reach a human — an unarmed channel looks
     # identical to an armed one until a "stuck" ping silently goes nowhere. The webhook
@@ -1718,6 +1722,11 @@ def register_api_routes(mcp, cfg: Config) -> None:
         html = (Path(__file__).parent / "ui.html").read_text(encoding="utf-8")
         resp = HTMLResponse(html)
         resp.headers["Referrer-Policy"] = "no-referrer"
+        # Never cache the page itself. It is package data that changes every release, and a
+        # browser that cached it would keep serving old JS after an upgrade — so a fixed
+        # broker still shows a user the broken page until they hard-reload. The data behind
+        # it is fetched separately from /api/*, so this costs one small HTML round trip.
+        resp.headers["Cache-Control"] = "no-store, must-revalidate"
         return resp
 
     @mcp.custom_route("/join", methods=["GET"])
@@ -1733,4 +1742,5 @@ def register_api_routes(mcp, cfg: Config) -> None:
         html = (Path(__file__).parent / "join.html").read_text(encoding="utf-8")
         resp = HTMLResponse(html)
         resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Cache-Control"] = "no-store, must-revalidate"   # same reason as /ui
         return resp

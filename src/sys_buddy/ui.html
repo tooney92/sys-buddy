@@ -1324,6 +1324,33 @@ function guestComposerHTML(){
         'font-weight:600;font-size:13px;cursor:'+(sending?'default':'pointer')+';opacity:'+(sending?'.6':'1')+'">'+
         (sending?'Sending…':'Send')+'</button></div></div></div>';
 }
+
+/* ---------- the GUEST "Share a file" card (its own card) ----------
+   Its own card, separate from the message box. Pick a file with the browser's native
+   control (which shows the filename itself), then click Share to send it — Share reads the
+   file straight off the input at click time, so it never depends on a change event firing. */
+function guestFileCardHTML(){
+  if(!(state.viewer && state.viewer.is_guest)) return '';
+  var busy=!!state.guestFileSending;
+  var msg=state.guestFileMsg
+    ? '<div style="margin-top:10px;font-size:12px;color:var(--st-verified-fg)">'+esc(state.guestFileMsg)+'</div>' : '';
+  var err=state.guestFileError
+    ? '<div style="margin-top:10px;font-size:12px;color:var(--st-stuck-fg)">'+esc(state.guestFileError)+'</div>' : '';
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px">'+
+    '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">'+
+      '<span style="font-weight:600;font-size:14px;color:var(--text)">Share a file</span>'+
+      '<span style="font-size:11px;font-weight:500;color:var(--text-3)">a design, a screenshot, a PDF</span></div>'+
+    '<div style="padding:16px 18px">'+
+      '<input type="file" data-guest-file '+(busy?'disabled ':'')+
+        'accept="image/png,image/jpeg,application/pdf,application/zip,.png,.jpg,.jpeg,.pdf,.zip" '+
+        'style="font-size:12.5px;color:var(--text-2);max-width:100%">'+
+      msg+err+
+      '<div style="display:flex;justify-content:flex-end;margin-top:12px">'+
+        '<button data-guest-share '+(busy?'disabled ':'')+
+        'style="padding:8px 18px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-weight:600;'+
+        'font-size:13px;cursor:'+(busy?'default':'pointer')+';opacity:'+(busy?'.6':'1')+'">'+
+        (busy?'Sharing…':'Share')+'</button></div></div></div>';
+}
 function guestSend(){
   var box=document.getElementById('guest-box');
   var body=((box&&box.value)||state.guestDraft||'').trim();
@@ -1347,6 +1374,128 @@ function guestSend(){
      state.guestError=(e&&e.message)||'Could not send — please try again.';
      render();
    });
+}
+
+/* ---------- the GUEST "Waiting on you" card ----------
+   A guest is a full PARTY: she accepts the plan (todos) and signs off on how it will be
+   built (contracts), from the board, as her linked seat — no agent. This card surfaces
+   only what is actually awaiting HER decision (her seat is `state.viewer.seat`), so she
+   never hunts through the board for it. Every button posts to `/guest/*`, which stamps the
+   action server-side from her seat — the button is just the request. */
+function gaBtn(kind){
+  if(kind==='ghost') return 'padding:6px 13px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface-2);color:var(--text);font-weight:600;font-size:12.5px;cursor:pointer';
+  if(kind==='primary') return 'padding:6px 14px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-weight:600;font-size:12.5px;cursor:pointer';
+  return 'padding:6px 14px;border:1px solid var(--border-strong);border-radius:8px;background:transparent;color:var(--st-stuck-fg);font-weight:600;font-size:12.5px;cursor:pointer';
+}
+function guestApprovalRow(tag, title, hint, buttons){
+  return '<div style="padding:13px 18px;border-top:1px solid var(--border)">'+
+    '<div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);margin-bottom:3px">'+tag+'</div>'+
+    '<div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px">'+title+'</div>'+
+    '<div style="font-size:12.5px;color:var(--text-2);margin-bottom:10px;line-height:1.5">'+hint+'</div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">'+buttons+'</div></div>';
+}
+function guestApprovalsHTML(d){
+  if(!(state.viewer && state.viewer.is_guest)) return '';
+  var me=state.viewer.seat; if(!me) return '';
+  var out=[];
+  (d.todos||[]).forEach(function(t){
+    if((t.parties||[]).indexOf(me)<0) return;   // not a todo I'm on
+    var yes=(t.accepted_by||[]).indexOf(me)>=0, no=(t.declined_by||[]).indexOf(me)>=0;
+    if(!yes && !no){
+      out.push(guestApprovalRow('The plan', esc(t.title||('todo #'+t.number)),
+        'Do you approve building this?',
+        '<button data-gact="todo-accept" data-gtodo="'+t.number+'" style="'+gaBtn('primary')+'">Accept</button>'+
+        '<button data-gact="todo-decline" data-gtodo="'+t.number+'" style="'+gaBtn('danger')+'">Decline</button>'));
+    }
+    var c=t.contract;
+    if(yes && c && c.exists){
+      // The version awaiting HER signature is the NEWEST one — never c.default, which is
+      // the latest LOCKED version. On a renegotiation (v1 locked, v2 proposed) default
+      // still points at the settled v1, so keying off it would hide the v2 she must sign
+      // and the contract could never re-lock. Only a live `draft` is signable: a `locked`
+      // version is done, and a `declined` one is dead until someone re-proposes.
+      var newest=(c.versions&&c.versions.length)?c.versions[c.versions.length-1]:null;
+      if(newest && newest.status==='draft'){
+        var vid=newest.id, data=(c.data&&c.data[vid])||{};
+        var signed=(data.signed||[]).map(function(s){return s.role;});
+        if(signed.indexOf(me)<0){
+          var num=parseInt(String(vid).replace(/^v/,''),10);
+          out.push(guestApprovalRow('How it will be built · '+esc(vid), esc(t.title||('todo #'+t.number)),
+            'Sign off on the technical plan. Not sure what it means? Ask the team in the thread, or copy it and paste into any AI for a plain-language summary first.',
+            '<button data-gact="ct-sign" data-gtodo="'+t.number+'" data-ver="'+num+'" style="'+gaBtn('primary')+'">Sign</button>'+
+            '<button data-gact="ct-decline" data-gtodo="'+t.number+'" data-ver="'+num+'" style="'+gaBtn('danger')+'">Push back</button>'+
+            '<button data-gact="ct-copy" data-gtodo="'+t.number+'" data-vid="'+esc(vid)+'" style="'+gaBtn('ghost')+'">Copy as text</button>'));
+        }
+      }
+    }
+  });
+  if(!out.length) return '';
+  return '<div style="background:var(--surface);border:1px solid var(--accent);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px">'+
+    '<div style="padding:13px 18px;font-weight:600;font-size:14px;color:var(--text)">Waiting on you <span style="font-size:11px;font-weight:500;color:var(--text-3)">— your approval is needed before the team builds</span></div>'+
+    out.join('')+'</div>';
+}
+/* The whole contract version as plain text — what she copies to feed an AI for a summary
+   before signing. Read from the payload she already holds, minus the broker's bookkeeping. */
+function guestContractText(todoNo, vid){
+  var t=((state.detail&&state.detail.todos)||[]).filter(function(x){return x.number===todoNo;})[0];
+  if(!t||!t.contract||!t.contract.data) return '';
+  // Strip the broker's per-version bookkeeping and keep only the contract UNITS. This list
+  // must mirror the non-unit keys _contract_for puts on data[vid] (api.py): miss one and it
+  // leaks into the text she pastes into an outside AI — staging_url_at_lock did exactly that.
+  var BOOKKEEPING=['locked','signed','superseded','superseded_by','staging_url','staging_url_at_lock'];
+  var data=t.contract.data[vid]||{}, units={};
+  Object.keys(data).forEach(function(k){
+    if(BOOKKEEPING.indexOf(k)<0) units[k]=data[k];
+  });
+  return 'Contract '+vid+' for "'+(t.title||('todo #'+todoNo))+'"\n\n'+JSON.stringify(units,null,2);
+}
+function guestAct(kind, todo, version, decision, needReason){
+  var reason='';
+  if(needReason){
+    reason=(window.prompt(decision==='decline' && kind==='todo'
+      ? 'Why are you declining this plan? (the team will see it)'
+      : 'Why are you pushing back on this contract? (the team will see it)')||'').trim();
+    if(!reason) return;   // cancelled
+  }
+  var url=kind==='todo'?'/guest/todo':'/guest/contract';
+  var payload=kind==='todo'?{number:todo,decision:decision,reason:reason}
+                           :{todo:todo,version:version,decision:decision,reason:reason};
+  fetch(url,{method:'POST',credentials:'same-origin',
+    headers:{'Content-Type':'application/json','Accept':'application/json'},
+    body:JSON.stringify(payload)})
+   .then(function(r){ return r.json().catch(function(){return {};}).then(function(j){
+     if(!r.ok) throw new Error(j.error||'Could not do that — please try again.'); return j; }); })
+   .then(function(){ return fetchDetail(state.taskId); })
+   .catch(function(e){ alert((e&&e.message)||'Could not do that.'); });
+}
+/* Guest file share — the Share button on the standalone "Share a file" card. Raw bytes to
+   /guest/file, filename in the query, type in the header (same shape the endpoint reads).
+   It is DATA on the file path. */
+function guestShareFile(){
+  if(state.guestFileSending) return;
+  // Read the file STRAIGHT off the native input at click time — no staging, no reliance on a
+  // change event having fired. The input's own display already shows the picked filename, so
+  // "select then Share" works even if the browser never handed us a change event.
+  var inp=document.querySelector('[data-guest-file]');
+  var file=inp && inp.files && inp.files[0];
+  if(!file){
+    state.guestFileError='Pick a file first (the “Choose File” button), then Share.';
+    state.guestFileMsg=null; render(); return;
+  }
+  var name=file.name;
+  state.guestFileSending=true; state.guestFileError=null; state.guestFileMsg=null; render();
+  fetch('/guest/file?name='+encodeURIComponent(name),{method:'POST',credentials:'same-origin',
+    headers:{'Content-Type':file.type||'application/octet-stream'}, body:file})
+   .then(function(r){ return r.json().catch(function(){return {};}).then(function(j){
+     if(!r.ok) throw new Error(j.error||'Could not share that file.'); return j; }); })
+   .then(function(){
+     state.guestFileSending=false;
+     state.guestFileMsg='✓ Shared “'+name+'” with the team';
+     return fetchDetail(state.taskId).then(function(){
+       setTimeout(function(){ state.guestFileMsg=null; render(); }, 4000);   // clear the note
+     });
+   })
+   .catch(function(e){ state.guestFileSending=false; state.guestFileError=(e&&e.message)||'Could not share that file.'; render(); });
 }
 
 /* ---------- thread legend (the old "Tips" items, rehomed) ----------
@@ -3468,7 +3617,7 @@ function taskHTML(){
        for the person paying, the scope agreement and his own deliverables ARE the
        headline screen. '' on a contract/debug task (the API omits the keys), so those
        tasks render exactly the page they always did. */
-    stepper+engagementHTML(d)+rosterPanel(d)+activityStripHTML(d)+readinessFailPanel(d)+mobileTabs+
+    stepper+engagementHTML(d)+rosterPanel(d)+activityStripHTML(d)+readinessFailPanel(d)+guestApprovalsHTML(d)+mobileTabs+
     '<div style="'+rowStyle+'">'+
       '<div style="display:'+threadDisp+'">'+threadHTML(d)+'</div>'+
       /* the right column becomes the TODO LIST when the task has todos, and STAYS the
@@ -3476,7 +3625,7 @@ function taskHTML(){
          so you never lose the board to read one row. The shared screenshots + files sit
          under it (so on mobile they live inside the existing Contract/Todos tab — no
          new tab). attachmentsHTML('') when the task has no files, so this is unchanged. */
-      '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+guestComposerHTML()+(todos?todoPanelHTML(d):contractHTML(d))+attachmentsHTML(d)+'</div>'+
+      '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+guestComposerHTML()+guestFileCardHTML()+(todos?todoPanelHTML(d):contractHTML(d))+attachmentsHTML(d)+'</div>'+
     '</div>'+
     '<div style="display:'+logDisp+'">'+eventLogHTML(d)+'</div>'+
     readinessPreviewHTML(d)+
@@ -3607,6 +3756,27 @@ function bind(){
      not see them. The draft is kept in state so a background re-render never eats it. */
   var gbx=app.querySelector('[data-guest-box]'); if(gbx) gbx.oninput=function(){ state.guestDraft=gbx.value; };
   var gsend=app.querySelector('[data-guest-send]'); if(gsend) gsend.onclick=guestSend;
+  // File card: pick a file with the native control (it shows the filename itself), then click
+  // Share — which reads the file straight off the input, so it never depends on a change event.
+  var gshare=app.querySelector('[data-guest-share]'); if(gshare) gshare.onclick=guestShareFile;
+  /* Guest approval actions (accept/decline a todo, sign/push-back a contract, copy it). */
+  app.querySelectorAll('[data-gact]').forEach(function(el){
+    el.onclick=function(){
+      var act=el.getAttribute('data-gact');
+      var todo=parseInt(el.getAttribute('data-gtodo'),10);
+      var ver=el.getAttribute('data-ver')?parseInt(el.getAttribute('data-ver'),10):null;
+      if(act==='todo-accept') guestAct('todo',todo,null,'accept',false);
+      else if(act==='todo-decline') guestAct('todo',todo,null,'decline',true);
+      else if(act==='ct-sign') guestAct('contract',todo,ver,'sign',false);
+      else if(act==='ct-decline') guestAct('contract',todo,ver,'decline',true);
+      else if(act==='ct-copy'){
+        var txt=guestContractText(todo, el.getAttribute('data-vid'));
+        var done=function(){ el.textContent='Copied ✓'; setTimeout(function(){ el.textContent='Copy as text'; },1500); };
+        if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(done,function(){ window.prompt('Copy the contract text:', txt); }); }
+        else { window.prompt('Copy the contract text:', txt); }
+      }
+    };
+  });
   /* data-vkey names the contract chain (task id, or '<task>#<todo>'); absent = the task's */
   app.querySelectorAll('[data-version]').forEach(function(el){ el.onclick=function(){ state.version[el.getAttribute('data-vkey')||state.taskId]=el.getAttribute('data-version'); render(); }; });
   /* open a todo in the modal — from a panel row OR from a ⟨todo⟩ chip in the thread.
