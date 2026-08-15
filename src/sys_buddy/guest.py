@@ -1,40 +1,45 @@
-"""The guest write surface — the ONE narrow exception to the read-only dashboard.
+"""The guest surface — the deliberately narrow set of writes the read-only dashboard
+grants to ONE seat: a guest (concierge mode).
 
-A GUEST (concierge mode) is a non-technical human with no AI of their own: she joins
-through a browser message box, not an agent on ``/mcp``. Everyone else who holds a
-viewer token is strictly read-only (D11) — so a guest needs a way to WRITE that does
-not open that door for the rest.
+A GUEST is a non-technical human with no AI of their own. She holds no agent token and
+never calls ``/mcp``; her whole credential is a VIEWER token that is LINKED to her seat
+(``viewers.agent_id``, set when she redeems her invite). Every route here authenticates
+that link and then acts as her seat — the broker builds her ``Identity`` from the linked
+``agents`` row server-side, so she is a first-class signatory (a real ``agent_id``) who
+simply proves herself by a different door than an agent does.
 
-The seam: a guest's viewer token is LINKED to her seat (``viewers.agent_id``, set only
-by :func:`admin.add_guest`). This route authenticates that viewer token exactly as the
-dashboard does — the ``sb_view`` cookie — and then refuses any viewer whose linked
-``agent_id`` is NULL, i.e. every host and buddy. So the read-only posture holds for
-everyone but the guest, and this stays a separate ``/guest`` surface rather than a write
-route under ``/api/*`` (which is GET-only by D11).
+What she may do, and nothing more:
 
-Two things make the write safe: the message identity is stamped SERVER-SIDE from the
-linked seat (never from the request), and the type is hard-coded to ``note`` — a guest
-types words, she does not choose a type, and she must not be able to forge a lifecycle
-event like ``verified`` from her browser.
+    POST /guest/message   send a note into the thread
+    POST /guest/file      share a file (design, screenshot, PDF, zip) — DATA, per Rule 4
+    POST /guest/todo      accept / decline a todo she is a party to
+    POST /guest/contract  sign / push back a contract she is a party to
+
+Every action is stamped SERVER-SIDE from her seat (never from the request), and each
+domain call re-checks that she is actually a party (``assert_party``) — so a guest who is
+not on a todo gets the same refusal any non-party would. This is a separate ``/guest``
+surface, never a write route under ``/api/*`` (GET-only, D11); a viewer with no linked
+seat — every host and buddy — is refused here, which is what keeps the dashboard
+read-only for everyone but the guest.
 """
 
 from __future__ import annotations
 
 import sqlite3
 
+from . import files, service, state, todos
 from . import identity as _identity
-from . import service
 from .api import _request_token
 from .identity import Identity
 
 
 def _guest_identity(conn: sqlite3.Connection, viewer) -> Identity | None:
-    """The live seat a guest viewer may write as, or ``None``.
+    """The live seat a guest viewer may act as, or ``None``.
 
-    Re-checked at USE time (as :func:`files._live_agent` re-checks a signed URL): a
-    viewer token outlives the call that minted it, and a seat revoked in between must
-    not still be able to write. A viewer with no linked seat (every host/buddy) returns
-    ``None`` here — which is what keeps the dashboard read-only for everyone but a guest.
+    Re-checked at USE time (as :func:`files._live_agent` re-checks a signed URL): a viewer
+    token outlives the call that minted it, and a seat revoked in between must not still be
+    able to act. A viewer with no linked seat (every host/buddy) returns ``None`` — which is
+    what keeps the dashboard read-only for everyone but a guest.
     """
     if viewer is None or viewer.agent_id is None:
         return None
@@ -59,42 +64,153 @@ def _guest_identity(conn: sqlite3.Connection, viewer) -> Identity | None:
     )
 
 
-def register_guest_routes(mcp, cfg) -> None:
-    """Mount ``POST /guest/message`` — the guest's message box.
+def _authed_guest(conn: sqlite3.Connection, request) -> Identity | None:
+    """Resolve the guest identity behind this request's viewer token, or ``None``."""
+    viewer = _identity.resolve_viewer_token(conn, _request_token(request))
+    return _guest_identity(conn, viewer)
 
-    Deliberately NOT under ``/api/*`` (GET-only, D11) and NOT on ``/mcp`` (agent tokens
-    only). Its own surface, authenticated by a guest-linked VIEWER token, so the one
-    write the dashboard grants reaches nothing else.
-    """
+
+def _as_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def register_guest_routes(mcp, cfg) -> None:
+    """Mount the ``/guest/*`` write surface — authenticated by a guest-linked VIEWER token,
+    so the writes the dashboard grants reach nothing else."""
     from starlette.responses import JSONResponse
 
     from .db import connect
+
+    async def _json(request) -> dict:
+        try:
+            return await request.json() or {}
+        except Exception:
+            return {}
+
+    def _forbidden():
+        # One opaque answer whether the token is unknown, read-only, or revoked: a viewer
+        # with no linked guest seat learns only that it cannot act here.
+        return JSONResponse({"error": "forbidden"}, status_code=403)
 
     @mcp.custom_route("/guest/message", methods=["POST"])
     async def guest_message(request):
         conn = connect()
         try:
-            viewer = _identity.resolve_viewer_token(conn, _request_token(request))
-            ident = _guest_identity(conn, viewer)
+            ident = _authed_guest(conn, request)
             if ident is None:
-                # One opaque answer whether the token is unknown, read-only, or revoked:
-                # a viewer with no linked guest seat learns only that it cannot write.
-                return JSONResponse({"error": "forbidden"}, status_code=403)
-            try:
-                payload = await request.json()
-            except Exception:
-                payload = {}
-            body = str((payload or {}).get("body", "") or "").strip()
+                return _forbidden()
+            body = str((await _json(request)).get("body", "") or "").strip()
             if not body:
                 return JSONResponse({"error": "empty message"}, status_code=400)
-            # Type is hard-coded, never taken from the request: `assert_sendable` is
-            # belt-and-braces on that constant, and the guarantee is that a guest browser
-            # can only ever author a conversational `note`, never a lifecycle event.
+            # Type is hard-coded, never taken from the request: a guest can only ever author
+            # a conversational `note`, never a lifecycle event like `verified`.
             service.assert_sendable("note")
             try:
                 receipt = service.post_message(conn, ident, "note", body)
             except ValueError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
             return JSONResponse({"ok": True, "id": receipt["id"]}, status_code=201)
+        finally:
+            conn.close()
+
+    @mcp.custom_route("/guest/file", methods=["POST"])
+    async def guest_file(request):
+        """Share a file as the guest. Raw bytes in the body (same shape as the agent
+        ``/files`` route, minus multipart), ``?name=`` for the filename, Content-Type for
+        the kind. It is DATA on the shared-file path — a peer's agent inspects it, never
+        runs it (Rule 4) — with the same type/size validation everyone else gets."""
+        conn = connect()
+        try:
+            ident = _authed_guest(conn, request)
+            if ident is None:
+                return _forbidden()
+            data = await request.body()
+            if not data:
+                return JSONResponse({"error": "empty file"}, status_code=400)
+            name = request.query_params.get("name") or "upload"
+            content_type = (request.headers.get("content-type", "") or "").split(";")[0].strip()
+            try:
+                rec = files.upload_file(conn, ident, name, data, content_type)
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            return JSONResponse(
+                {"ok": True, "id": rec.get("id") if isinstance(rec, dict) else None},
+                status_code=201,
+            )
+        finally:
+            conn.close()
+
+    @mcp.custom_route("/guest/todo", methods=["POST"])
+    async def guest_todo(request):
+        """Accept or decline a todo the guest is a party to. `assert_party` inside the
+        domain call is what refuses a guest who is not on this todo."""
+        conn = connect()
+        try:
+            ident = _authed_guest(conn, request)
+            if ident is None:
+                return _forbidden()
+            payload = await _json(request)
+            number = _as_int(payload.get("number"))
+            decision = str(payload.get("decision", "")).strip().lower()
+            if number is None:
+                return JSONResponse({"error": "a todo number is required"}, status_code=400)
+            try:
+                if decision == "accept":
+                    todos.accept_todo(conn, ident, number)
+                elif decision == "decline":
+                    reason = str(payload.get("reason", "") or "").strip()
+                    if not reason:
+                        return JSONResponse(
+                            {"error": "a reason is required to decline"}, status_code=400
+                        )
+                    todos.decline_todo(conn, ident, number, reason)
+                else:
+                    return JSONResponse(
+                        {"error": "decision must be 'accept' or 'decline'"}, status_code=400
+                    )
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            return JSONResponse({"ok": True}, status_code=200)
+        finally:
+            conn.close()
+
+    @mcp.custom_route("/guest/contract", methods=["POST"])
+    async def guest_contract(request):
+        """Sign (lock) or push back (decline) a contract the guest is a party to. Signing
+        records her signature; the broker locks only when every party has signed — the
+        guest counts in that quorum exactly like a builder."""
+        conn = connect()
+        try:
+            ident = _authed_guest(conn, request)
+            if ident is None:
+                return _forbidden()
+            payload = await _json(request)
+            todo_no = _as_int(payload.get("todo"))
+            decision = str(payload.get("decision", "")).strip().lower()
+            try:
+                if decision == "sign":
+                    version = _as_int(payload.get("version"))
+                    if version is None:
+                        return JSONResponse(
+                            {"error": "a contract version is required"}, status_code=400
+                        )
+                    state.lock_contract(conn, ident, version, todo_no)
+                elif decision == "decline":
+                    reason = str(payload.get("reason", "") or "").strip()
+                    if not reason:
+                        return JSONResponse(
+                            {"error": "a reason is required to push back"}, status_code=400
+                        )
+                    state.decline_contract(conn, ident, reason, todo_no)
+                else:
+                    return JSONResponse(
+                        {"error": "decision must be 'sign' or 'decline'"}, status_code=400
+                    )
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            return JSONResponse({"ok": True}, status_code=200)
         finally:
             conn.close()

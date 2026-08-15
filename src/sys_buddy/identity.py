@@ -85,6 +85,9 @@ class ViewerIdentity:
     # write routes check: a viewer with no linked agent is refused, so every host/buddy
     # viewer stays read-only and D11 holds for everyone but the guest.
     agent_id: int | None = None
+    # The linked seat's HANDLE (only for a guest). The dashboard needs it to tell which
+    # party pill / signature is HERS, so it can show her the accept / sign buttons.
+    seat: str | None = None
 
     @property
     def is_host(self) -> bool:
@@ -174,8 +177,9 @@ def resolve_viewer_token(conn: sqlite3.Connection, token: str) -> ViewerIdentity
     if not token:
         return None
     row = conn.execute(
-        "SELECT id, label, task_id, agent_id FROM viewers "
-        "WHERE token_hash = ? AND revoked_at IS NULL",
+        "SELECT v.id, v.label, v.task_id, v.agent_id, a.handle AS seat "
+        "FROM viewers v LEFT JOIN agents a ON a.id = v.agent_id "
+        "WHERE v.token_hash = ? AND v.revoked_at IS NULL",
         (sha256_hex(token),),
     ).fetchone()
     if row is None:
@@ -185,4 +189,5 @@ def resolve_viewer_token(conn: sqlite3.Connection, token: str) -> ViewerIdentity
         label=row["label"],
         task_id=row["task_id"],
         agent_id=row["agent_id"],
+        seat=row["seat"],
     )

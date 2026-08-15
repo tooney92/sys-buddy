@@ -16,11 +16,11 @@ import asyncio
 
 import pytest
 
-from sys_buddy import admin, guest, seats, service
+from sys_buddy import admin, guest, seats, service, state, todos
 from sys_buddy.config import Config, get_config
-from sys_buddy.identity import resolve_viewer_token, sha256_hex
+from sys_buddy.identity import Identity, resolve_viewer_token, sha256_hex
 from sys_buddy.server import build_server
-from tests.conftest import seed_task, seed_viewer
+from tests.conftest import seed_agent, seed_task, seed_viewer
 
 
 def _task(conn, task_id="acme-site"):
@@ -151,31 +151,40 @@ def test_guest_message_is_stamped_from_the_guest_seat(conn):
 # the HTTP route — POST /guest/message
 # --------------------------------------------------------------------------- #
 class _Req:
-    """The slice of a Starlette request the guest handler reads."""
+    """The slice of a Starlette request the guest handlers read."""
 
-    def __init__(self, token=None, body=None):
-        self.query_params = {"v": token} if token else {}
-        self.headers = {}
+    def __init__(self, token=None, body=None, raw=None, query=None, headers=None):
+        self.query_params = dict(query or {})
+        if token:
+            self.query_params["v"] = token
+        self.headers = dict(headers or {})
         self.cookies = {}
-        self._body = body
+        self._body = body   # for .json()
+        self._raw = raw     # for .body()
 
     async def json(self):
         if self._body is None:
             raise ValueError("no body")
         return self._body
 
+    async def body(self):
+        return self._raw or b""
 
-def _guest_endpoint(dbfile):
+
+def _endpoint(dbfile, path="/guest/message"):
     mcp = build_server(Config(mode="local", db_path=dbfile))
     routes = [
         r for r in getattr(mcp, "_additional_http_routes", [])
-        if str(getattr(r, "path", "")) == "/guest/message"
+        if str(getattr(r, "path", "")) == path
     ]
-    assert routes, "expected POST /guest/message to be registered"
+    assert routes, f"expected POST {path} to be registered"
     for r in routes:
-        # A guest WRITES here and does nothing else — no read verb, no other method.
         assert set(r.methods) <= {"POST"}, f"{r.path} accepts {r.methods}"
     return routes[0].endpoint
+
+
+def _guest_endpoint(dbfile):
+    return _endpoint(dbfile, "/guest/message")
 
 
 def test_route_accepts_the_guest_and_refuses_everyone_else(conn):
@@ -243,3 +252,132 @@ def test_guest_seat_is_not_a_builder(conn):
     builders = seats.builder_handles(conn, task)
     assert "guest" not in [seats.slug(b) for b in builders]
     assert set(builders) == {"backend", "frontend"}
+
+
+# --------------------------------------------------------------------------- #
+# the guest as a PARTY — accepts todos, signs contracts, uploads files, all via
+# the dashboard (a viewer token linked to her seat), no agent token anywhere
+# --------------------------------------------------------------------------- #
+def _spec():
+    """A minimal valid http contract spec (mirrors tests/test_state._valid_spec)."""
+    return {"version": 1, "endpoints": [{"method": "POST", "path": "/api/contact"}]}
+
+
+def _task_guest_party(conn):
+    """Two builders + a guest, all three bound to todo #1 (the guest still pending).
+
+    The builders are seeded agents; the guest joins as a real seat with a linked viewer.
+    Local mode, so the readiness gate on binding is skipped (see _assert_parties_ready).
+    """
+    created = admin.create_task(None, title="Ada site", roles=["backend", "frontend"])
+    task = created["id"]
+    be = Identity(agent_id=seed_agent(conn, task, "backend", "Bee", "sbk_be"),
+                  task_id=task, name="Bee", role="backend")
+    fe = Identity(agent_id=seed_agent(conn, task, "frontend", "Eff", "sbk_fe"),
+                  task_id=task, name="Eff", role="frontend")
+    g = admin.add_guest(task, "Ada")
+    todos.propose_todo(conn, be, "Landing page", "hero + 3 sections",
+                       ["backend", "frontend", g["seat"]])
+    todos.accept_todo(conn, fe, 1)   # backend auto-accepted; guest still pending
+    return task, g, be, fe
+
+
+def test_guest_accepts_a_todo_via_the_dashboard(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    row = todos.get_row(conn, task, 1)
+
+    # before: she is a party who has NOT accepted; the builders have
+    before = todos.decisions(conn, row["id"], row["version"])
+    assert before.get(g["seat"], {}).get("decision") != todos.ACCEPT
+
+    r = asyncio.run(_endpoint(dbfile, "/guest/todo")(
+        _Req(token=g["viewer_token"], body={"number": 1, "decision": "accept"})))
+    assert r.status_code == 200
+
+    # after: her acceptance is recorded against her seat, and every party now agrees
+    after = todos.decisions(conn, row["id"], row["version"])
+    assert after.get(g["seat"], {}).get("decision") == todos.ACCEPT
+    assert all(after.get(p, {}).get("decision") == todos.ACCEPT for p in todos.parties_of(row))
+
+
+def test_guest_signs_a_contract_via_the_dashboard(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    # the guest accepts the todo first (WHAT), so a contract (HOW) can be proposed
+    asyncio.run(_endpoint(dbfile, "/guest/todo")(
+        _Req(token=g["viewer_token"], body={"number": 1, "decision": "accept"})))
+
+    state.propose_contract(conn, be, _spec(), 1)
+    state.lock_contract(conn, be, 1, 1)   # backend signs
+    state.lock_contract(conn, fe, 1, 1)   # frontend signs — still open, guest hasn't
+
+    row = conn.execute("SELECT status FROM contracts WHERE task_id=? AND version=1", (task,)).fetchone()
+    assert row["status"] != "locked"      # her signature is genuinely required
+
+    r = asyncio.run(_endpoint(dbfile, "/guest/contract")(
+        _Req(token=g["viewer_token"], body={"todo": 1, "version": 1, "decision": "sign"})))
+    assert r.status_code == 200
+
+    row = conn.execute("SELECT status FROM contracts WHERE task_id=? AND version=1", (task,)).fetchone()
+    assert row["status"] == "locked"      # the guest's sign completed the quorum
+
+
+def test_guest_signs_a_reproposed_contract_version(conn):
+    # Renegotiation: v1 locks, someone reopens and proposes v2, and every party must sign
+    # v2 again — the guest included. The dashboard used to key the "sign" button off
+    # contract.default (the latest LOCKED version, still v1), so it hid v2 and the guest
+    # could never re-lock. This pins the endpoint half: she CAN sign the newer version.
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    asyncio.run(_endpoint(dbfile, "/guest/todo")(
+        _Req(token=g["viewer_token"], body={"number": 1, "decision": "accept"})))
+
+    # v1: proposed and locked by all three (guest signs via her endpoint)
+    state.propose_contract(conn, be, _spec(), 1)
+    state.lock_contract(conn, be, 1, 1)
+    state.lock_contract(conn, fe, 1, 1)
+    asyncio.run(_endpoint(dbfile, "/guest/contract")(
+        _Req(token=g["viewer_token"], body={"todo": 1, "version": 1, "decision": "sign"})))
+    assert conn.execute("SELECT status FROM contracts WHERE task_id=? AND version=1",
+                        (task,)).fetchone()["status"] == "locked"
+
+    # reopen → propose v2 → builders re-sign; still open until the guest signs v2
+    state.reopen_negotiations(conn, be, "the scope grew", 1)
+    state.propose_contract(conn, be, _spec(), 1)
+    state.lock_contract(conn, be, 2, 1)
+    state.lock_contract(conn, fe, 2, 1)
+    assert conn.execute("SELECT status FROM contracts WHERE task_id=? AND version=2",
+                        (task,)).fetchone()["status"] != "locked"
+
+    # the guest signs the RE-PROPOSED v2 through the same endpoint — and it locks
+    r = asyncio.run(_endpoint(dbfile, "/guest/contract")(
+        _Req(token=g["viewer_token"], body={"todo": 1, "version": 2, "decision": "sign"})))
+    assert r.status_code == 200
+    assert conn.execute("SELECT status FROM contracts WHERE task_id=? AND version=2",
+                        (task,)).fetchone()["status"] == "locked"
+
+
+def test_guest_uploads_a_file_via_the_dashboard(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    ep = _endpoint(dbfile, "/guest/file")
+    png = b"\x89PNG\r\n\x1a\n" + b"fake-logo-bytes"
+
+    r = asyncio.run(ep(_Req(token=g["viewer_token"], raw=png,
+                            query={"name": "logo.png"}, headers={"content-type": "image/png"})))
+    assert r.status_code == 201
+    row = conn.execute("SELECT name, from_agent_id FROM files WHERE task_id=?", (task,)).fetchone()
+    assert row["name"] == "logo.png"      # stored, stamped from the guest's seat
+
+
+def test_guest_party_actions_are_forbidden_for_a_non_guest(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    seed_viewer(conn, "host", "sbv_hosttok", task_id=None)
+    for path, body in (
+        ("/guest/todo", {"number": 1, "decision": "accept"}),
+        ("/guest/contract", {"todo": 1, "version": 1, "decision": "sign"}),
+    ):
+        r = asyncio.run(_endpoint(dbfile, path)(_Req(token="sbv_hosttok", body=body)))
+        assert r.status_code == 403
