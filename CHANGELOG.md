@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.10.0](https://github.com/tooney92/sys-buddy/compare/v2.9.0...v2.10.0) (2026-08-15)
+
+
+### Added
+
+* a non-technical guest can join with a message box, no AI of their own (Concierge mode) ([#87](https://github.com/tooney92/sys-buddy/issues/87)) ([a4ac676](https://github.com/tooney92/sys-buddy/commit/a4ac676d6dea55eade1689fa896d256ff15e2a4b))
+
 ## [2.9.0](https://github.com/tooney92/sys-buddy/compare/v2.8.0...v2.9.0) (2026-08-12)
 
 
