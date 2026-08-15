@@ -365,8 +365,17 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   <section class="result" id="view-result" aria-live="polite">
     <p class="paired" id="paired-line"></p>
 
+    <!-- Guest intro — shown INSTEAD of the agent-setup steps for a guest seat. A guest
+         has no agent to connect or brief; she just opens her board and types. -->
+    <div class="blk" id="join-guest-intro" hidden>
+      <p style="font-size:.98rem;line-height:1.6;color:var(--text-2);margin:0">
+        You’re joining as a <strong>guest</strong> — nothing to install, no agent to set up.
+        Open your board below: you can follow the task and send messages the team’s agents read.
+      </p>
+    </div>
+
     <!-- Step 1 — connect Claude to sys-buddy -->
-    <div class="blk">
+    <div class="blk" id="join-step-connect">
       <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">1</span>Connect your agent to sys-buddy</span>
 
       <!-- Ask which AGENT, not which mechanism. "Do you use a CLI?" asks the buddy to
@@ -626,7 +635,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     </div>
 
     <!-- Step 2 — brief the agent -->
-    <div class="blk">
+    <div class="blk" id="join-step-brief">
       <span class="lbl step-lbl"><span class="step-n" aria-hidden="true">2</span>Brief your agent — paste this into your agent's chat</span>
 
       <!-- "What we're asking" — ABOVE the prompt, not beside it. Beside puts the
@@ -772,6 +781,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var ctxCastRow = document.getElementById('ctx-cast-row');
   var nameState = document.getElementById('name-state');
   var preview = null;
+  // Set from the invite's role type (via /pair/preview): a guest joins with no agent, so
+  // the button and the result page speak "join & open your board", not "pair & get setup".
+  var isGuestInvite = false;
 
   function postPreview(body){
     return fetch('/pair/preview', {
@@ -786,6 +798,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
   function renderPreview(p){
     preview = p;
+    isGuestInvite = String(p.role_type || '').toLowerCase() === 'guest';
+    // Preview runs on load, never mid-pair, so setting the resting label here is safe.
+    pairBtnLabel.textContent = isGuestInvite ? 'Join & open my board' : 'Pair & get setup';
     ctxTitle.textContent = p.title || p.task_id || '';
     ctxSeat.textContent  = '@' + (p.seat || '');
     ctxRole.textContent  = p.role_type || '';
@@ -854,7 +869,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     // as "we changed our mind about that name".
     pairBtn.disabled = on || nameState.classList.contains('bad');
     pairSpinner.hidden = !on;
-    pairBtnLabel.textContent = on ? 'Pairing…' : 'Pair & get setup';
+    pairBtnLabel.textContent = on
+      ? (isGuestInvite ? 'Joining…' : 'Pairing…')
+      : (isGuestInvite ? 'Join & open my board' : 'Pair & get setup');
   }
   function showError(msg){
     pairErr.textContent = msg;
@@ -908,7 +925,38 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
      Note: the connect command AND the dashboard link are both rebuilt from
      location.origin (the real public origin this page was served from) — NOT from
      any server-echoed URL, since the broker may stamp a loopback origin. */
+  // A GUEST joined: no agent to connect or brief, so skip straight to "open your board".
+  // The whole agent-setup render below is bypassed — a guest has no token, prompt or
+  // client config to show.
+  function renderGuestResult(res){
+    document.getElementById('join-step-connect').hidden = true;
+    document.getElementById('join-step-brief').hidden = true;
+    var intro = document.getElementById('join-guest-intro');
+    if (intro) intro.hidden = false;
+
+    var name = (nameEl.value || '').trim();
+    pairedLine.innerHTML =
+      '<span class="check" aria-hidden="true">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>' +
+      '</span>' +
+      'You’re in' + (name ? ', <span class="role">' + esc(name) + '</span>' : '') +
+      ' — task “<span class="tid">' + esc(res.task_id) + '</span>”';
+
+    // Rebuilt from the BROWSER origin, not the server-echoed dashboard_url (the broker may
+    // stamp a loopback origin behind a tunnel).
+    dashLink.href = location.origin + '/ui?v=' + encodeURIComponent(res.viewer_token || '');
+    dashLink.textContent = 'Open your board ↗';
+    var step3 = dashLink.closest('.blk');
+    var lbl = step3 && step3.querySelector('.step-lbl');
+    if (lbl) lbl.innerHTML = '<span class="step-n" aria-hidden="true">1</span>Open your board';
+
+    viewIntro.hidden = true;
+    viewResult.classList.add('show');
+    try { pairedLine.setAttribute('tabindex', '-1'); pairedLine.focus(); } catch(e){}
+  }
+
   function renderResult(res){
+    if (res.guest){ renderGuestResult(res); return; }
     var role  = res.role || '';
     var col   = roleColor(role);
 

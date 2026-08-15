@@ -34,6 +34,10 @@ html,body{margin:0;padding:0}
      on an engagement that seat is the client, and it should not read as one more dev. */
   --role-designer:#8B5CF6;
   --role-owner:#E0693F;
+  /* `guest` (concierge mode) — a non-technical person with no AI, present via a message
+     box. A calm green so it does not read as one more dev seat, and is distinct from
+     owner's warm accent. */
+  --role-guest:#3F9E6A;
   --ok:#33A852;
   --err:#DE5B4A;
   --amber:#E0A83F;
@@ -1198,7 +1202,8 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     frontend: 'var(--role-frontend)',
     mobile:   'var(--role-mobile)',
     designer: 'var(--role-designer)',
-    owner:    'var(--role-owner)'
+    owner:    'var(--role-owner)',
+    guest:    'var(--role-guest)'
   };
 
   function roleColor(role){
@@ -1531,7 +1536,15 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   // when that mode is picked — on a contract or debug task it would be a seat with no
   // meaning, and `guidelines` explicitly refuses to let anyone set standards for it.
   var OWNER_ROLE = 'owner';
-  function allRoles(){ return isEngagement() ? BUILD_ROLES.concat([OWNER_ROLE]) : BUILD_ROLES; }
+  // `guest` (concierge mode): a non-technical person with no AI, present via a message box.
+  // Offered on EVERY mode (unlike owner) — you can want a client watching a plain contract
+  // task, not only an engagement. It is never "you" (the host is a dev) and never counts
+  // toward the contract's builder minimum (a guest cannot hold a contract). It redeems to a
+  // dashboard LINK, not an agent — see pairing._redeem.
+  var GUEST_ROLE = 'guest';
+  function allRoles(){
+    return BUILD_ROLES.concat([GUEST_ROLE]).concat(isEngagement() ? [OWNER_ROLE] : []);
+  }
 
   /* `cast` is a COUNT per role type, not a boolean. It used to be `{backend:true}`, which
      meant this screen could express "there is a frontend" and never "there are two" — so a
@@ -1573,14 +1586,18 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       combo.innerHTML =
         '<button type="button" class="role-main"><span class="role-pip"></span>' + label + '</button>' +
         (on && canAdd ? '<button type="button" class="role-more" aria-label="Add another ' + role + '" title="Add another ' + role + '">+</button>' : '') +
-        '<button type="button" class="role-you" aria-label="I am the ' + role + '">' + (isYou ? '✓ you' : 'you') + '</button>';
+        // A guest is never "you" — the host is a dev, a guest has no agent — so it gets no
+        // "you" toggle at all, rather than one that would just be refused.
+        (role === GUEST_ROLE ? '' :
+          '<button type="button" class="role-you" aria-label="I am the ' + role + '">' + (isYou ? '✓ you' : 'you') + '</button>');
       /* The main chip still TOGGLES — click to add the role, click again to clear it
          entirely. `+` is the only way to reach two, so a one-seat cast cannot be arrived at
          by accident and the old muscle memory keeps working. */
       combo.querySelector('.role-main').addEventListener('click', function(){ toggleRole(role); });
       var more = combo.querySelector('.role-more');
       if (more) more.addEventListener('click', function(e){ e.stopPropagation(); addSeat(role); });
-      combo.querySelector('.role-you').addEventListener('click', function(){ if (countOf(role)) setYou(role); });
+      var youBtn = combo.querySelector('.role-you');
+      if (youBtn) youBtn.addEventListener('click', function(){ if (countOf(role)) setYou(role); });
       rolesRow.appendChild(combo);
     });
     refreshGate();
@@ -1591,7 +1608,8 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       if (youRole === role) youRole = castTypes()[0] || null;   // hand the seat to another role
     } else {
       cast[role] = 1;
-      if (!youRole) youRole = role;
+      // A guest is never the host's own seat, so adding one first must not make it "you".
+      if (!youRole && role !== GUEST_ROLE) youRole = role;
     }
     renderRoles();
   }
@@ -1623,6 +1641,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   function refreshGate(){
     var title = (titleEl.value || '').trim();
     var roles = castRoles();
+    // A guest is not a builder — it cannot produce or sign a contract — so it never counts
+    // toward the minimum. `backend + guest` is one builder, which is not yet a contract.
+    var builders = roles.filter(function(r){ return r !== GUEST_ROLE; });
     // An engagement runs the contract flow, so it shares the two-agent minimum.
     var contract = !modeDebug.checked;
     /* Counts SEATS, not role types — and that is the point of this change. Two frontends
@@ -1639,9 +1660,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     // Taking that seat yourself would make you the party you are supposed to be reporting
     // to, which is the one arrangement engagement mode exists to prevent.
     var youAreOwner = isEngagement() && youRole === OWNER_ROLE;
-    if (roles.length < minRoles) {
+    if (builders.length < minRoles) {
       rolesNote.textContent = contract
-        ? 'Add one more agent — a contract needs two. Two of the same role is fine: use “+”.'
+        ? 'Add one more agent — a contract needs two. Two of the same role is fine: use “+”. (A guest doesn’t count — they have no agent.)'
         : 'Add at least one agent.';
     } else if (needsOwner) {
       rolesNote.textContent = 'Add the owner seat — that is your client, and only they can list what was commissioned.';
@@ -1654,7 +1675,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     }
     var msg = '';
     if (!title) msg = 'Add a title to continue.';
-    else if (roles.length < minRoles) msg = 'Add ' + (roles.length ? 'another' : 'an') + ' agent to continue.';
+    else if (builders.length < minRoles) msg = 'Add ' + (builders.length ? 'another' : 'an') + ' agent to continue.';
     else if (needsOwner) msg = 'An engagement needs an owner seat — that is the client.';
     else if (!youRole) msg = 'Mark which role is you.';
     else if (youAreOwner) msg = 'Mark “you” on a role you build in, not the owner.';

@@ -673,9 +673,16 @@ def builder_handles(conn: sqlite3.Connection, task_id: str) -> list[str]:
 
     On a non-engagement task there is no owner seat, so this is simply the whole cast —
     which is why callers can use it without first asking what mode they are in.
+
+    A **guest** seat is excluded for the same reason as the owner, and it matters more: a
+    guest has no AI and cannot sign anything, so counting it here would make a deliverable
+    list wait forever on a signature that can never come. (GUEST_ROLE is defined below;
+    this resolves it at call time.)
     """
     handles, seat_roles = cast_of(conn, task_id)
-    return [h for h in handles if slug(seat_roles.get(h, h)) != OWNER_ROLE]
+    return [
+        h for h in handles if slug(seat_roles.get(h, h)) not in (OWNER_ROLE, GUEST_ROLE)
+    ]
 
 
 # --- the guest seat (concierge mode) ----------------------------------------
