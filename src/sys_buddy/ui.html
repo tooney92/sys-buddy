@@ -1290,6 +1290,65 @@ function threadHTML(d){
     '<div id="'+THREAD_ID+'" style="padding:20px 18px;display:flex;flex-direction:column;gap:17px;max-height:640px;overflow-y:auto">'+inner+'</div></div>';
 }
 
+/* ---------- the GUEST message box (concierge mode) ----------
+   Its OWN card, sitting ABOVE the contract in the side column — the message THREAD is for
+   reading what was said; this is the one place to write. The card is shown ONLY to a guest:
+   a non-technical human with no AI of their own. `state.viewer.is_guest` is a reflection of
+   the token (api.viewer_block); it only decides whether to SHOW the card — the write is
+   authorised server-side at POST /guest/message, so a client that forged the flag would
+   draw a card whose Send button 403s. Every other viewer (host, buddy) never sees it and
+   the page stays read-only for them (D11).
+
+   The draft lives in `state.guestDraft` so a background SSE/poll re-render (which replaces
+   the DOM wholesale) does not eat what she is typing. */
+function guestComposerHTML(){
+  if(!(state.viewer && state.viewer.is_guest)) return '';
+  var draft=state.guestDraft||'', sending=!!state.guestSending;
+  var err=state.guestError
+    ? '<div style="margin-top:8px;font-size:12px;color:var(--st-stuck-fg)">'+esc(state.guestError)+'</div>'
+    : '';
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px">'+
+    '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">'+
+      '<span style="font-weight:600;font-size:14px;color:var(--text)">Send a message</span>'+
+      '<span style="font-size:11px;font-weight:500;color:var(--text-3)">to the team</span></div>'+
+    '<div style="padding:16px 18px">'+
+      '<textarea id="guest-box" data-guest-box '+(sending?'disabled ':'')+
+        'placeholder="Type a message — a question, some feedback, anything…" '+
+        'style="width:100%;box-sizing:border-box;min-height:88px;resize:vertical;padding:10px 12px;'+
+        'border:1px solid var(--border-strong);border-radius:10px;background:var(--surface-2);'+
+        'color:var(--text);font-family:inherit;font-size:13.5px;line-height:1.5">'+esc(draft)+'</textarea>'+
+      err+
+      '<div style="display:flex;justify-content:flex-end;margin-top:10px">'+
+        '<button data-guest-send '+(sending?'disabled ':'')+
+        'style="padding:8px 18px;border:none;border-radius:8px;background:var(--accent);color:#fff;'+
+        'font-weight:600;font-size:13px;cursor:'+(sending?'default':'pointer')+';opacity:'+(sending?'.6':'1')+'">'+
+        (sending?'Sending…':'Send')+'</button></div></div></div>';
+}
+function guestSend(){
+  var box=document.getElementById('guest-box');
+  var body=((box&&box.value)||state.guestDraft||'').trim();
+  if(!body||state.guestSending) return;
+  state.guestSending=true; state.guestError=null; render();
+  fetch('/guest/message',{method:'POST',credentials:'same-origin',
+    headers:{'Content-Type':'application/json','Accept':'application/json'},
+    body:JSON.stringify({body:body})})
+   .then(function(r){
+     if(!r.ok){ throw new Error(r.status===403
+       ? 'This link can’t send messages — ask your host for a fresh one.'
+       : 'Could not send — please try again.'); }
+     return r.json();
+   })
+   .then(function(){
+     state.guestDraft=''; state.guestSending=false; state.guestError=null;
+     return fetchDetail(state.taskId);   // pull the thread back with her message in it
+   })
+   .catch(function(e){
+     state.guestSending=false;
+     state.guestError=(e&&e.message)||'Could not send — please try again.';
+     render();
+   });
+}
+
 /* ---------- thread legend (the old "Tips" items, rehomed) ----------
    These three lines used to sit in a collapsed "Tips" card at the very bottom of the page,
    which is nowhere near the thing they explain. They are LEGEND, not workflow, so they did
@@ -3417,7 +3476,7 @@ function taskHTML(){
          so you never lose the board to read one row. The shared screenshots + files sit
          under it (so on mobile they live inside the existing Contract/Todos tab — no
          new tab). attachmentsHTML('') when the task has no files, so this is unchanged. */
-      '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+(todos?todoPanelHTML(d):contractHTML(d))+attachmentsHTML(d)+'</div>'+
+      '<div style="display:'+contractDisp+(m?'':';position:sticky;top:72px')+'">'+guestComposerHTML()+(todos?todoPanelHTML(d):contractHTML(d))+attachmentsHTML(d)+'</div>'+
     '</div>'+
     '<div style="display:'+logDisp+'">'+eventLogHTML(d)+'</div>'+
     readinessPreviewHTML(d)+
@@ -3543,6 +3602,11 @@ function bind(){
   var sw=app.querySelector('[data-switcher]'); if(sw) sw.onclick=function(e){ e.stopPropagation(); state.switcherOpen=!state.switcherOpen; render(); };
   var tt=app.querySelector('[data-theme-toggle]'); if(tt) tt.onclick=toggleTheme;
   var nt=app.querySelector('[data-newtask]'); if(nt) nt.onclick=function(){ try{ window.pywebview.api.new_task(); }catch(e){} };
+  /* The GUEST message box (concierge mode). Wired here like everything else — the script
+     is an IIFE, so `state`/`guestSend` are closures, not globals, and an inline on* would
+     not see them. The draft is kept in state so a background re-render never eats it. */
+  var gbx=app.querySelector('[data-guest-box]'); if(gbx) gbx.oninput=function(){ state.guestDraft=gbx.value; };
+  var gsend=app.querySelector('[data-guest-send]'); if(gsend) gsend.onclick=guestSend;
   /* data-vkey names the contract chain (task id, or '<task>#<todo>'); absent = the task's */
   app.querySelectorAll('[data-version]').forEach(function(el){ el.onclick=function(){ state.version[el.getAttribute('data-vkey')||state.taskId]=el.getAttribute('data-version'); render(); }; });
   /* open a todo in the modal — from a panel row OR from a ⟨todo⟩ chip in the thread.

@@ -185,6 +185,13 @@ def viewer_block(viewer: ViewerIdentity) -> dict:
     block: dict = {"mode": "host" if viewer.is_host else "buddy", "label": viewer.label}
     if not viewer.is_host:
         block["task_id"] = viewer.task_id
+    # A GUEST is a task-scoped viewer LINKED to a seat (viewers.agent_id) — a
+    # non-technical human with no AI, present through a message box. This flag is what
+    # the dashboard keys the box on; it is a reflection of the token, never a control.
+    # The write itself is authorised server-side at POST /guest/message, not by trusting
+    # this boolean — so a forged `is_guest` in a client buys nothing.
+    if viewer.is_guest:
+        block["is_guest"] = True
     # Channel NAMES, never a credential. Everyone watching the task benefits from
     # knowing whether terminal events actually reach a human — an unarmed channel looks
     # identical to an armed one until a "stuck" ping silently goes nowhere. The webhook

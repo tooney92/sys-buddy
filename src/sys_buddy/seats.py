@@ -676,3 +676,13 @@ def builder_handles(conn: sqlite3.Connection, task_id: str) -> list[str]:
     """
     handles, seat_roles = cast_of(conn, task_id)
     return [h for h in handles if slug(seat_roles.get(h, h)) != OWNER_ROLE]
+
+
+# --- the guest seat (concierge mode) ----------------------------------------
+# A second special role type: a NON-TECHNICAL human who joins with no AI agent of
+# their own — just a browser message box (the concierge experience). Like the owner
+# it does no gradeable work, so it is exempt from guidelines and auto-ready. Unlike
+# every other seat it is not paired by redeeming an invite (there is no AI to redeem
+# one); it is provisioned directly by the host via `admin.add_guest`, which links a
+# viewer token to the seat so the read-only dashboard can grant it one narrow write.
+GUEST_ROLE = "guest"

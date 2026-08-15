@@ -150,6 +150,23 @@ def cmd_task_add_seat(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_task_add_guest(args: argparse.Namespace) -> int:
+    from . import admin
+    from .config import get_config
+
+    _cfg_from_args(args)
+    guest = admin.add_guest(args.task, args.name, args.seat)
+    origin = get_config().base_url
+    print(f"Added guest '{guest['name']}' as seat '{guest['seat']}' on task '{guest['task']}'")
+    print("\nSend them this link — they open it in a browser and just type. No install, no terminal:")
+    print(f"  {origin}/ui?v={guest['viewer_token']}")
+    print(
+        "\nThat link is a WRITE credential for this one guest seat (the only write the "
+        "dashboard grants) — share it like a password, and revoke it with `revoke-viewer`."
+    )
+    return 0
+
+
 def cmd_task_roster(args: argparse.Namespace) -> int:
     """The cast, from the SAME source the dashboard panel and the agents' `roster` tool
     read. Unjoined seats are listed: that is the state that silently stalls a task."""
@@ -662,6 +679,25 @@ def build_parser() -> argparse.ArgumentParser:
     ts.add_argument("--role", required=True, help="Role type, e.g. qa")
     ts.add_argument("--seat", help="Seat handle (default: derived, e.g. frontend-2)")
     ts.set_defaults(func=cmd_task_add_seat)
+
+    tg = tsub.add_parser(
+        "add-guest",
+        help="Add a non-technical GUEST (browser message box, no AI) and print their link",
+    )
+    tg.add_argument("task")
+    tg.add_argument("--name", required=True, help="Display name shown in the thread, e.g. Ada")
+    tg.add_argument("--seat", help="Seat handle (default: derived, e.g. guest or guest-2)")
+    tg.add_argument(
+        "--public-url",
+        help="Tunnel origin for the guest's link (e.g. https://abc123.ngrok.app). "
+        "Defaults to $SYS_BUDDY_PUBLIC_URL, else loopback.",
+    )
+    tg.add_argument(
+        "--port", type=int, default=DEFAULT_PORT,
+        help=f"Port your broker is on, for the loopback link (default: {DEFAULT_PORT}). "
+             "Ignored when --public-url is set.",
+    )
+    tg.set_defaults(func=cmd_task_add_guest)
 
     te = tsub.add_parser(
         "extend-tokens",

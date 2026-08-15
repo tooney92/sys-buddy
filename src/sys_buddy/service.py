@@ -38,6 +38,7 @@ ROLE_TAGS = {
     "fe": "frontend",
     "mb": "mobile",
     "de": "designer",
+    "gu": "guest",
 }
 
 
@@ -404,7 +405,13 @@ RESERVED_TYPES = frozenset({"deploy_confirmed", "test_result", "verified", "stuc
 # The conversational types an agent may send via send_message. A positive
 # allow-list (not just blocking RESERVED_TYPES) also stops an agent forging
 # broker-authoritative chips like 'contract_lock' in the human dashboard thread.
-ALLOWED_SEND_TYPES = frozenset({"question", "answer", "status_update", "contract_proposal"})
+#
+# `note` is the plain human message — what a GUEST types into the dashboard message
+# box (concierge mode). It carries no lifecycle meaning; it renders as the neutral
+# "message" chip in the thread. On the allow-list so the guest write path can send it
+# through the same `assert_sendable` gate as everything else, which is exactly what
+# stops a guest forging a `verified`/`stuck` from her browser.
+ALLOWED_SEND_TYPES = frozenset({"question", "answer", "status_update", "contract_proposal", "note"})
 
 # Types the BROKER itself authors — not peer content at all. They are pushed onto the
 # message queue (the only channel a parked wait_for_message reads) so an agent is woken

@@ -321,7 +321,15 @@ CREATE TABLE IF NOT EXISTS viewers (
     label       TEXT NOT NULL,
     token_hash  TEXT NOT NULL,
     created_at  REAL NOT NULL,
-    revoked_at  REAL
+    revoked_at  REAL,
+    -- The seat this viewer is allowed to WRITE as, or NULL for a read-only viewer.
+    -- NULL on every host/buddy viewer — the dashboard stays read-only (D11) for them.
+    -- Set ONLY for a `guest` seat (a non-technical human with no AI of their own): the
+    -- guest's browser message box authenticates with this viewer token and the linked
+    -- agent is who its messages are stamped from. This is the one, deliberately narrow,
+    -- write credential the read-only dashboard grants — and it reaches only the
+    -- `/guest/*` surface, never `/api/*`.
+    agent_id    INTEGER REFERENCES agents(id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -1542,6 +1550,13 @@ def init_db(db_path: Path | str | None = None) -> Path:
         # still renders on them; new rows carry the id directly.
         if "todo_id" not in msg_cols:
             conn.execute("ALTER TABLE messages ADD COLUMN todo_id INTEGER REFERENCES todos(id)")
+        # Migration: link a viewer to the seat it may WRITE as. NULL on every existing
+        # viewer — a plain nullable ALTER — which keeps all of them read-only (D11). Only
+        # a `guest` seat's viewer gets a non-NULL value, and that is the sole write
+        # credential the dashboard hands out (see the schema comment on viewers.agent_id).
+        viewer_cols = {r["name"] for r in conn.execute("PRAGMA table_info(viewers)").fetchall()}
+        if "agent_id" not in viewer_cols:
+            conn.execute("ALTER TABLE viewers ADD COLUMN agent_id INTEGER REFERENCES agents(id)")
         # Index contracts.todo_id only now that the column is guaranteed to exist —
         # whether it came from the fresh CREATE TABLE or the ALTER above. Kept out of
         # SCHEMA on purpose (see the note there).

@@ -290,6 +290,68 @@ def add_seat(task: str, role_type: str, handle: str | None = None) -> dict:
     return {"task": task, "seat": seat, "role": role_type, "code": code, "expires": expires}
 
 
+def add_guest(task: str, name: str, handle: str | None = None) -> dict:
+    """Provision a GUEST seat — a non-technical human with no AI of their own.
+
+    Every other seat is paired by an AI redeeming an invite; a guest has no AI to
+    redeem one, so this creates her seat and her ``agents`` row directly, mints ONE
+    credential — a viewer token *linked* to that seat via ``viewers.agent_id`` — and
+    hands it back. The host shares ``/ui?v=<token>``; she opens it in a browser, the
+    read-only dashboard grows a message box for her, and the linked seat is who her
+    messages are stamped from. She installs nothing and never touches a terminal.
+
+    The guest's ``agents`` row carries NO agent token (``token_hash`` NULL — she never
+    calls ``/mcp``) and is ``ready = 1``: pre-flight grades the work an AI does for a
+    role, and a guest does none. The narrow ``/guest/*`` routes are her only write
+    surface, and the viewer link is the only thing that reaches them.
+
+    Returns ``{task, seat, name, viewer_token}``; the caller builds the link.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("a guest needs a display name (what to call her in the thread)")
+    conn = connect()
+    try:
+        row = conn.execute("SELECT closed_at FROM tasks WHERE id = ?", (task,)).fetchone()
+        if row is None:
+            raise ValueError(f"unknown task '{task}'")
+        if row["closed_at"] is not None:
+            raise ValueError(f"task '{task}' is closed")
+        # One display name per task (same rule as pairing): @ada must be unambiguous.
+        name = seats.assert_name_free(conn, task, name)
+        seat = seats.append_seat(conn, task, seats.GUEST_ROLE, handle)
+        now = time.time()
+        # role holds the role TYPE ("guest"); handle holds the seat. token_hash NULL —
+        # she has no agent token. ready=1 — nothing about a guest is graded.
+        #
+        # The closed_at read above is a fast-path message; make the INSERT itself
+        # conditional on the task still being open, exactly as pairing._redeem does. A
+        # concurrent close_task either commits first (0 rows here → we abort) or commits
+        # after (its sweep then revokes this row) — no live guest survives on a closed task.
+        cur = conn.execute(
+            "INSERT INTO agents (task_id, name, role, handle, token_hash, created_at, "
+            "ready, readiness_status) "
+            "SELECT ?,?,?,?,NULL,?,1,'passed' WHERE EXISTS "
+            "(SELECT 1 FROM tasks WHERE id = ? AND closed_at IS NULL)",
+            (task, name, seats.GUEST_ROLE, seat, now, task),
+        )
+        if cur.rowcount != 1:
+            raise ValueError(f"task '{task}' is closed")
+        agent_id = cur.lastrowid
+        viewer_token = new_viewer_token()
+        conn.execute(
+            "INSERT INTO viewers (task_id, label, token_hash, created_at, agent_id) "
+            "VALUES (?,?,?,?,?)",
+            (task, name, sha256_hex(viewer_token), now, agent_id),
+        )
+        _write_event(conn, task, "token", {"text": f"Guest '{name}' added as {seat}"})
+        conn.commit()
+    finally:
+        conn.close()
+    audit.event("guest_added", task=task, role=seat)
+    return {"task": task, "seat": seat, "name": name, "viewer_token": viewer_token}
+
+
 def set_staging_url(
     task: str, url: str | None, todo: int | None = None
 ) -> dict:
