@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.12.0](https://github.com/tooney92/sys-buddy/compare/v2.11.0...v2.12.0) (2026-08-15)
+
+
+### Added
+
+* the guest is a full party — accepts todos, signs contracts, shares files from the board ([#93](https://github.com/tooney92/sys-buddy/issues/93)) ([f631c57](https://github.com/tooney92/sys-buddy/commit/f631c574b51f1d4bba14dd4b0790d22c1c828277))
+
 ## [2.11.0](https://github.com/tooney92/sys-buddy/compare/v2.10.0...v2.11.0) (2026-08-15)
 
 
