@@ -73,11 +73,18 @@ def test_oversized_contract_spec_rejected(conn):
 
 # --- send_message type allow-list -------------------------------------------
 @pytest.mark.parametrize(
-    "mtype", ["contract_lock", "contract_locked", "note", "system", "deploy_confirmed"]
+    "mtype", ["contract_lock", "contract_locked", "system", "deploy_confirmed"]
 )
 def test_send_rejects_non_conversational_types(mtype):
     with pytest.raises(ValueError):
         service.assert_sendable(mtype)
+
+
+def test_note_is_a_sendable_conversational_type():
+    """`note` is the plain human/guest message — a conversational type on the allow-list,
+    so the guest write path can send it through the same `assert_sendable` gate that
+    stops a guest forging a lifecycle event."""
+    service.assert_sendable("note")  # does not raise
 
 
 def test_send_cannot_forge_a_broker_lock_notification():

@@ -5,6 +5,7 @@ Everything the three surfaces need is wired here and nowhere else:
     /mcp        MCP tools           (register_tools + AuthMiddleware)
     /pair       pairing REST        (register_pairing_routes)
     /files      raw-bytes upload    (register_upload_route)
+    /guest      guest message box   (register_guest_routes)
     /ui + /api  dashboard + JSON    (register_api_routes)
 
 ``build_server`` is kept separate from ``run_server`` so tests can construct the
@@ -18,7 +19,7 @@ from __future__ import annotations
 
 from fastmcp import FastMCP
 
-from . import api, files, pairing
+from . import api, files, guest, pairing
 from .config import Config, set_config
 from .db import init_db
 from .middleware import AuthMiddleware
@@ -34,6 +35,7 @@ def build_server(cfg: Config) -> FastMCP:
     register_tools(mcp, cfg)              # /mcp — messaging + contract/status tools
     pairing.register_pairing_routes(mcp, cfg)  # /pair — invite redemption
     files.register_upload_route(mcp, cfg)      # /files/{task} — bytes IN, agent-token auth
+    guest.register_guest_routes(mcp, cfg)      # /guest/message — guest box, viewer-linked write
     api.register_api_routes(mcp, cfg)          # /ui + /api/* — dashboard (read-only)
     return mcp
 

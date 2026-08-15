@@ -80,10 +80,20 @@ class ViewerIdentity:
     viewer_id: int
     label: str
     task_id: str | None  # None = host (all tasks)
+    # The seat this viewer may WRITE as, or None for a read-only viewer. Non-None ONLY
+    # for a `guest` seat — see viewers.agent_id in db.py. This is what the `/guest/*`
+    # write routes check: a viewer with no linked agent is refused, so every host/buddy
+    # viewer stays read-only and D11 holds for everyone but the guest.
+    agent_id: int | None = None
 
     @property
     def is_host(self) -> bool:
         return self.task_id is None
+
+    @property
+    def is_guest(self) -> bool:
+        """True when this viewer is linked to a seat it may write as (a guest)."""
+        return self.agent_id is not None
 
 
 # The current request's identity, set by the auth middleware, read by tools.
@@ -164,10 +174,15 @@ def resolve_viewer_token(conn: sqlite3.Connection, token: str) -> ViewerIdentity
     if not token:
         return None
     row = conn.execute(
-        "SELECT id, label, task_id FROM viewers "
+        "SELECT id, label, task_id, agent_id FROM viewers "
         "WHERE token_hash = ? AND revoked_at IS NULL",
         (sha256_hex(token),),
     ).fetchone()
     if row is None:
         return None
-    return ViewerIdentity(viewer_id=row["id"], label=row["label"], task_id=row["task_id"])
+    return ViewerIdentity(
+        viewer_id=row["id"],
+        label=row["label"],
+        task_id=row["task_id"],
+        agent_id=row["agent_id"],
+    )

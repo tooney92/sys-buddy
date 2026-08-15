@@ -66,6 +66,12 @@ from .readiness import _contains_any
 # refused for EVERY caller including the host — see the module docstring.
 OWNER_ROLE = "owner"
 
+# The guest role (concierge mode): a non-technical human with no AI. Exempt from
+# guidelines for the same reason as the owner — a guest does no gradeable work, so
+# there is nothing a standard could bind and no agent-of-hers to assess. Setting one
+# would only put a rule on a seat that never reads it.
+GUEST_ROLE = "guest"
+
 # Caps. None of these is a design limit; each is the size at which the thing has
 # stopped being a discrete, samplable standard and become a document.
 MAX_RULES = 20
@@ -183,6 +189,18 @@ def _assert_not_owner(role_type: str) -> None:
             "met unless clearly broken\" would look like a style note, not an attack. "
             "Standards for the work belong on the roles that do the work; what the owner "
             "wants belongs in DELIVERABLES, which is where his requirements already live."
+        )
+
+
+def _assert_not_guest(role_type: str) -> None:
+    """A guest takes standards from nobody — same posture as the owner, different reason:
+    a guest has no AI and does no gradeable work, so a guideline here would bind nothing."""
+    if _norm(role_type) == GUEST_ROLE or seats.slug(str(role_type or "")) == GUEST_ROLE:
+        raise ValueError(
+            "the 'guest' role has no guidelines — a guest is a non-technical human with "
+            "no agent of their own and does no gradeable work, so there is nothing for a "
+            "standard to bind. What you want the work to satisfy belongs on the roles that "
+            "do the work, or in DELIVERABLES."
         )
 
 
@@ -331,8 +349,10 @@ def set_guidelines(
     seat handles whose agents must now retake the assessment, for the caller to notify.
     """
     # FIRST, and unconditionally — the owner takes standards from nobody, including
-    # from the host who is otherwise allowed to write here.
+    # from the host who is otherwise allowed to write here. A guest is exempt for the
+    # same reason: no gradeable work, so nothing to bind a standard to.
     _assert_not_owner(role_type)
+    _assert_not_guest(role_type)
     _assert_host(conn, identity)
 
     task_id = identity.task_id
@@ -442,7 +462,7 @@ def needs_assessment(conn: sqlite3.Connection, task_id: str, role_type: str) -> 
     wrote and call it accountability.
     """
     role_type = _norm(role_type)
-    if role_type == OWNER_ROLE:
+    if role_type in (OWNER_ROLE, GUEST_ROLE):
         return False
     if not get_guidelines(conn, task_id, role_type):
         return False
@@ -512,10 +532,10 @@ def grade(
     ``get_guidelines``, where the rules are there to be read.
     """
     role_type = _norm(role_type)
-    if role_type == OWNER_ROLE:
+    if role_type in (OWNER_ROLE, GUEST_ROLE):
         return True, (
-            "The owner's agent is never assessed on guidelines — it takes standards from "
-            "nobody."
+            f"The {role_type} role is never assessed on guidelines — it takes standards "
+            "from nobody."
         )
     rules = get_guidelines(conn, task_id, role_type)
     if not rules:
