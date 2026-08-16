@@ -357,6 +357,18 @@ CREATE TABLE IF NOT EXISTS deliveries (
     UNIQUE(message_id, agent_id)
 );
 
+-- SEVERAL directed recipients for ONE message — "send this to Tony AND James, no one else".
+-- `messages.to_role` holds 0-or-1 addressee (NULL = broadcast, a string = one seat or one
+-- role-type fan-out); this table holds the 2+ case, one row per canonical addressee (a seat
+-- handle or a role type, exactly the form `to_role` stores). A message is broadcast only when
+-- it has NEITHER a `to_role` NOR any row here, so delivery reads a reader against BOTH. Purely
+-- additive: every message written before this feature has no rows here and behaves unchanged.
+CREATE TABLE IF NOT EXISTS message_recipients (
+    message_id INTEGER NOT NULL REFERENCES messages(id),
+    addressee  TEXT NOT NULL,
+    UNIQUE(message_id, addressee)
+);
+
 CREATE TABLE IF NOT EXISTS invites (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id     TEXT NOT NULL REFERENCES tasks(id),

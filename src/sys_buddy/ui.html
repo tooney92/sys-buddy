@@ -297,6 +297,8 @@ var IC={
   doc:'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>',
   sun:svg(16,'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>'),
   moon:svg(16,'<path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>'),
+  bell:svg(16,'<path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/>'),
+  bellOff:svg(16,'<path d="M8.7 3.5A6 6 0 0118 8c0 4 1 6 2 7M6 8c0 7-3 9-3 9h13"/><path d="M13.7 21a2 2 0 01-3.4 0"/><path d="M2 2l20 20"/>'),
   link:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7l1.5-1.5"/></svg>',
   next:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg>',
   check:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6L9 17l-5-5"/></svg>',
@@ -424,11 +426,73 @@ function fetchDetail(id){
     if(state.view==='task' && state.taskId===id){
       state.detail=d; state.loadingDetail=false;
       if(state.error==='forbidden'||state.error==='not-found'||state.error==='network') state.error=null;
+      notifScan(d);   // alert on anything new since we last looked (see the NOTIF block below)
     }
     state.lastRefresh=Date.now();
   }).catch(function(e){
     if(state.error==null) state.error='network';
   }).then(function(){ render(); });
+}
+
+/* ---------- browser notifications (opt-in, entirely in-page) ----------
+   Every dashboard viewer can switch these on with the bell in the header. It rides the SAME
+   live refresh the thread already uses — the SSE `task` event calls fetchDetail, so `notifScan`
+   is one choke point — and diffs message ids against the highest we have shown. Anything new the
+   viewer did not write bumps a tab-title badge; if their tab is in the BACKGROUND and they opted
+   in, it also pops a desktop notification and a soft chime. Nothing is stored on the broker and
+   no endpoint is added: it is pure client, so it can never leak who is watching a task. */
+var NOTIF={ on:(localStorage.getItem('sb-notify')==='1'), seenMax:null, unread:0,
+            base:(document.title||'sys-buddy'), ctx:null };
+function notifSupported(){ return typeof window!=='undefined' && 'Notification' in window; }
+function notifPrimeAudio(){   // must run inside a user gesture (the bell click) or it stays muted
+  try{ var AC=window.AudioContext||window.webkitAudioContext;
+    if(AC && !NOTIF.ctx) NOTIF.ctx=new AC();
+    if(NOTIF.ctx && NOTIF.ctx.state==='suspended') NOTIF.ctx.resume(); }catch(e){}
+}
+function notifToggle(){
+  if(NOTIF.on){ NOTIF.on=false; localStorage.setItem('sb-notify','0'); render(); return; }
+  if(!notifSupported()){ alert('This browser can’t show notifications.'); return; }
+  notifPrimeAudio();   // this click is the gesture the chime AND the permission prompt both need
+  if(Notification.permission==='granted'){ NOTIF.on=true; localStorage.setItem('sb-notify','1'); render(); return; }
+  Notification.requestPermission().then(function(p){
+    NOTIF.on=(p==='granted'); localStorage.setItem('sb-notify', NOTIF.on?'1':'0'); render();
+  });
+}
+function notifChime(){   // a soft two-note ping, synthesised so the page ships no audio asset
+  if(!NOTIF.ctx) return;
+  try{ var t=NOTIF.ctx.currentTime; [880,1245].forEach(function(f,i){
+    var o=NOTIF.ctx.createOscillator(), g=NOTIF.ctx.createGain(); o.type='sine'; o.frequency.value=f;
+    var s=t+i*0.13; g.gain.setValueAtTime(0.0001,s);
+    g.gain.exponentialRampToValueAtTime(0.13,s+0.02); g.gain.exponentialRampToValueAtTime(0.0001,s+0.25);
+    o.connect(g); g.connect(NOTIF.ctx.destination); o.start(s); o.stop(s+0.26); }); }catch(e){}
+}
+function notifBadge(){ document.title=(NOTIF.unread>0?'('+NOTIF.unread+') ':'')+NOTIF.base; }
+function notifClear(){ if(NOTIF.unread){ NOTIF.unread=0; notifBadge(); } }
+function notifReset(){ NOTIF.seenMax=null; notifClear(); }   // called when the open task changes
+function notifMine(m){ return !!(state.viewer && state.viewer.seat && m.role===state.viewer.seat); }
+function notifScan(d){
+  var msgs=(d && d.messages) || [];
+  var maxId=msgs.reduce(function(a,m){ return (typeof m.id==='number' && m.id>a)?m.id:a; }, 0);
+  if(NOTIF.seenMax===null){ NOTIF.seenMax=maxId; return; }   // first sight of this task — prime, don't fire
+  if(maxId<=NOTIF.seenMax) return;
+  var fresh=msgs.filter(function(m){ return typeof m.id==='number' && m.id>NOTIF.seenMax && !notifMine(m); });
+  NOTIF.seenMax=maxId;
+  // If they are actually looking at this tab, the thread already updated in front of them.
+  if(!fresh.length || !document.hidden) return;
+  NOTIF.unread+=fresh.length; notifBadge();
+  if(NOTIF.on && notifSupported() && Notification.permission==='granted'){
+    var last=fresh[fresh.length-1], who=(threadSender(last.role)||{}).label||'someone';
+    var text=(typeof last.body==='string' && last.body) ? last.body : (last.type||'update');
+    var title=(state.detail && state.detail.title) || 'sys-buddy';
+    try{ var n=new Notification(title, {body:who+': '+text.slice(0,140), tag:'sb-'+state.taskId, renotify:true});
+      n.onclick=function(){ window.focus(); n.close(); }; }catch(e){}
+    notifChime();
+  }
+}
+if(typeof document!=='undefined'){
+  // Coming back to the tab means they have seen it — drop the badge.
+  document.addEventListener('visibilitychange', function(){ if(!document.hidden) notifClear(); });
+  window.addEventListener('focus', notifClear);
 }
 
 /* The HOST CLI list, fetched once and kept. GENERATED by the broker from cli.py's own
@@ -456,6 +520,7 @@ function openTask(id){
   state.view='task'; state.taskId=id; state.detail=null; state.loadingDetail=true;
   state.switcherOpen=false; state.mobileTab='thread'; state.lightbox=null; state.todoModal=null;
   if(state.error==='not-found'||state.error==='forbidden') state.error=null;
+  notifReset();   // a different task → re-prime the "seen" baseline, clear the badge
   render(); fetchDetail(id);
 }
 function goHome(){ state.view='list'; state.switcherOpen=false; state.detail=null; state.taskId=null; state.lightbox=null; state.todoModal=null; render(); }
@@ -980,6 +1045,7 @@ function headerHTML(){
       ((m||state.narrow)?'':'<span id="sb-refresh-text" style="font-size:12px;color:var(--text-2);white-space:nowrap">'+refreshText()+'</span>')+
     '</div>'+
     refGroup+
+    '<button data-notif-toggle="1" title="'+(NOTIF.on?'Notifications on — click to mute':'Notify me of new activity')+'" style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid '+(NOTIF.on?'var(--accent)':'var(--border)')+';border-radius:9px;cursor:pointer;color:'+(NOTIF.on?'var(--accent)':'var(--text-2)')+';flex:none">'+(NOTIF.on?IC.bell:IC.bellOff)+'</button>'+
     '<button data-theme-toggle="1" title="Toggle theme" style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;color:var(--text-2);flex:none">'+(dark?IC.sun:IC.moon)+'</button>'+
   '</div>';
 }
@@ -1221,11 +1287,13 @@ function threadItemHTML(it){
      = no chip). It names the same thing the byline does — the PERSON when the target is a
      seat on the roster, the role type when it is a bare type or the roster is missing —
      because a chip reading `→ backend` on a two-backend task points at both of them. */
+  var _dchip=function(tr){ var ta=threadSender(tr);
+    return '<span title="directed to '+esc(ta.title)+'" style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:999px;font-family:'+MONO+';font-size:10px;font-weight:600;color:'+ta.c+';background:transparent;border:1px solid '+ta.c+'">→ '+esc(ta.label)+'</span>'; };
   var toChip='';
-  if(m.to_role){
-    var ta=threadSender(m.to_role);
-    toChip='<span title="directed to '+esc(ta.title)+'" style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:999px;font-family:'+MONO+';font-size:10px;font-weight:600;color:'+ta.c+';background:transparent;border:1px solid '+ta.c+'">→ '+esc(ta.label)+'</span>';
-  }
+  // Several directed recipients (guest "to Tony AND James") arrive as `to_roles`; a single
+  // one still comes as `to_role`. Either way, one chip per target, each in that role's colour.
+  if(m.to_roles && m.to_roles.length) toChip=m.to_roles.map(_dchip).join(' ');
+  else if(m.to_role) toChip=_dchip(m.to_role);
   /* ⟨todo⟩ chip: which deliverable this message belongs to. The API adds `todo` ONLY
      when the message names one, so a pre-todo thread renders with no chip at all. */
   var tdChip = (m.todo!=null) ? todoChipHTML(m.todo) : '';
@@ -1307,11 +1375,34 @@ function guestComposerHTML(){
   var err=state.guestError
     ? '<div style="margin-top:8px;font-size:12px;color:var(--st-stuck-fg)">'+esc(state.guestError)+'</div>'
     : '';
+  // A "To" row of the OTHER people on the task, as tick-boxes. Tick nobody → everyone (the
+  // default); tick one or several → only them. Boxes are PEOPLE (a seat handle), not roles,
+  // so ticking "Tony" reaches frontend-1 and not the other frontend. The checked set lives in
+  // state (like the draft), so a background refresh never loses her picks mid-compose.
+  var rows=(state.detail && state.detail.roster && state.detail.roster.rows) || [];
+  var mine=state.viewer.seat, picks=state.guestTo||{};
+  var people=rows.filter(function(r){ return r.joined && r.seat!==mine; });
+  var toRow='';
+  if(people.length){
+    toRow='<div style="margin-bottom:11px">'+
+      '<div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:7px">To <span style="font-weight:500">— tick nobody to reach everyone</span></div>'+
+      '<div style="display:flex;flex-wrap:wrap;gap:8px">'+
+      people.map(function(r){
+        var addr=r.address||r.seat, on=!!picks[addr];
+        return '<label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text-2);'+
+          'border:1px solid '+(on?'var(--accent)':'var(--border-strong)')+';border-radius:999px;padding:4px 11px;cursor:pointer;'+
+          'background:'+(on?'var(--surface-3)':'transparent')+'">'+
+          '<input type="checkbox" data-guest-to="'+esc(addr)+'" '+(on?'checked ':'')+(sending?'disabled ':'')+'style="margin:0">'+
+          esc(r.name||addr)+'<span style="color:var(--text-3);font-size:11px">'+esc(r.role)+'</span></label>';
+      }).join('')+
+      '</div></div>';
+  }
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px">'+
     '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">'+
       '<span style="font-weight:600;font-size:14px;color:var(--text)">Send a message</span>'+
       '<span style="font-size:11px;font-weight:500;color:var(--text-3)">to the team</span></div>'+
     '<div style="padding:16px 18px">'+
+      toRow+
       '<textarea id="guest-box" data-guest-box '+(sending?'disabled ':'')+
         'placeholder="Type a message — a question, some feedback, anything…" '+
         'style="width:100%;box-sizing:border-box;min-height:88px;resize:vertical;padding:10px 12px;'+
@@ -1355,10 +1446,14 @@ function guestSend(){
   var box=document.getElementById('guest-box');
   var body=((box&&box.value)||state.guestDraft||'').trim();
   if(!body||state.guestSending) return;
+  // The ticked recipients, if any. None → omit `to` entirely → broadcast to everyone.
+  var picks=state.guestTo||{};
+  var to=Object.keys(picks).filter(function(k){ return picks[k]; });
+  var payload=to.length?{body:body,to:to}:{body:body};
   state.guestSending=true; state.guestError=null; render();
   fetch('/guest/message',{method:'POST',credentials:'same-origin',
     headers:{'Content-Type':'application/json','Accept':'application/json'},
-    body:JSON.stringify({body:body})})
+    body:JSON.stringify(payload)})
    .then(function(r){
      if(!r.ok){ throw new Error(r.status===403
        ? 'This link can’t send messages — ask your host for a fresh one.'
@@ -1366,7 +1461,7 @@ function guestSend(){
      return r.json();
    })
    .then(function(){
-     state.guestDraft=''; state.guestSending=false; state.guestError=null;
+     state.guestDraft=''; state.guestTo={}; state.guestSending=false; state.guestError=null;
      return fetchDetail(state.taskId);   // pull the thread back with her message in it
    })
    .catch(function(e){
@@ -3750,12 +3845,23 @@ function bind(){
   app.querySelectorAll('[data-reload]').forEach(function(el){ el.onclick=function(){ location.reload(); }; });
   var sw=app.querySelector('[data-switcher]'); if(sw) sw.onclick=function(e){ e.stopPropagation(); state.switcherOpen=!state.switcherOpen; render(); };
   var tt=app.querySelector('[data-theme-toggle]'); if(tt) tt.onclick=toggleTheme;
+  var nbt=app.querySelector('[data-notif-toggle]'); if(nbt) nbt.onclick=notifToggle;
   var nt=app.querySelector('[data-newtask]'); if(nt) nt.onclick=function(){ try{ window.pywebview.api.new_task(); }catch(e){} };
   /* The GUEST message box (concierge mode). Wired here like everything else — the script
      is an IIFE, so `state`/`guestSend` are closures, not globals, and an inline on* would
      not see them. The draft is kept in state so a background re-render never eats it. */
   var gbx=app.querySelector('[data-guest-box]'); if(gbx) gbx.oninput=function(){ state.guestDraft=gbx.value; };
   var gsend=app.querySelector('[data-guest-send]'); if(gsend) gsend.onclick=guestSend;
+  // "To" tick-boxes: keep the checked set in state (so a refresh never loses it) and re-render
+  // so the pill fills in. Ticking a person directs the message; ticking nobody = everyone.
+  app.querySelectorAll('[data-guest-to]').forEach(function(el){
+    el.onchange=function(){
+      state.guestTo=state.guestTo||{};
+      var k=el.getAttribute('data-guest-to');
+      if(el.checked) state.guestTo[k]=true; else delete state.guestTo[k];
+      render();
+    };
+  });
   // File card: pick a file with the native control (it shows the filename itself), then click
   // Share — which reads the file straight off the input, so it never depends on a change event.
   var gshare=app.querySelector('[data-guest-share]'); if(gshare) gshare.onclick=guestShareFile;

@@ -381,3 +381,53 @@ def test_guest_party_actions_are_forbidden_for_a_non_guest(conn):
     ):
         r = asyncio.run(_endpoint(dbfile, path)(_Req(token="sbv_hosttok", body=body)))
         assert r.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# directing a guest message at specific people (the composer's "To" tick-boxes)
+# --------------------------------------------------------------------------- #
+def _got(msgs, text):
+    """Did this note (by its unique body text) reach this reader? The party setup already
+    generates baseline traffic, so we check for OUR note rather than an exact inbox count."""
+    return any(text in (m.get("content") or "") for m in msgs)
+
+
+def test_guest_directs_a_message_to_one_person(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    r = asyncio.run(_endpoint(dbfile, "/guest/message")(
+        _Req(token=g["viewer_token"],
+             body={"body": "logo the right one?", "to": ["backend"]})))
+    assert r.status_code == 201
+    assert _got(service.fetch_unacked(conn, be), "logo the right one")       # reaches backend
+    assert not _got(service.fetch_unacked(conn, fe), "logo the right one")   # and NOT frontend
+
+
+def test_guest_directs_a_message_to_several_people(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    r = asyncio.run(_endpoint(dbfile, "/guest/message")(
+        _Req(token=g["viewer_token"],
+             body={"body": "both of you please review", "to": ["backend", "frontend"]})))
+    assert r.status_code == 201
+    assert _got(service.fetch_unacked(conn, be), "both of you please review")
+    assert _got(service.fetch_unacked(conn, fe), "both of you please review")
+
+
+def test_guest_message_without_to_still_broadcasts(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    r = asyncio.run(_endpoint(dbfile, "/guest/message")(
+        _Req(token=g["viewer_token"], body={"body": "hello everyone here"})))
+    assert r.status_code == 201
+    assert _got(service.fetch_unacked(conn, be), "hello everyone here")
+    assert _got(service.fetch_unacked(conn, fe), "hello everyone here")
+
+
+def test_guest_message_to_someone_off_the_task_is_rejected(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    r = asyncio.run(_endpoint(dbfile, "/guest/message")(
+        _Req(token=g["viewer_token"],
+             body={"body": "hi", "to": ["backend", "nobody-here"]})))
+    assert r.status_code == 400   # resolve_addressee refuses an addressee not on the cast

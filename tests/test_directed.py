@@ -127,3 +127,62 @@ def test_designer_tag_resolves_when_declared(conn):
 
     assert receipt["to_role"] == "designer"
     assert len(service.fetch_unacked(conn, ag["designer"])) == 1
+
+
+# --------------------------------------------------------------------------- #
+# several directed recipients on ONE message (to_roles) — "Tony AND James"
+# --------------------------------------------------------------------------- #
+def test_multi_directed_reaches_each_listed_and_no_one_else(conn):
+    ag = _mk(conn, roles=("backend", "frontend", "mobile", "designer"))
+    service.post_message(
+        conn, ag["backend"], "question", "you two", to_roles=["frontend", "mobile"]
+    )
+    assert len(service.fetch_unacked(conn, ag["frontend"])) == 1
+    assert len(service.fetch_unacked(conn, ag["mobile"])) == 1
+    assert service.fetch_unacked(conn, ag["designer"]) == []   # not listed → does not see it
+    assert service.fetch_unacked(conn, ag["backend"]) == []    # the sender never gets their own
+
+
+def test_multi_directed_envelope_lists_all_targets(conn):
+    ag = _mk(conn, roles=("backend", "frontend", "mobile"))
+    service.post_message(
+        conn, ag["backend"], "question", "you two", to_roles=["frontend", "mobile"]
+    )
+    body = service.fetch_unacked(conn, ag["mobile"])[0]["content"]
+    assert 'to="frontend mobile"' in body   # a recipient sees it was directed at a specific few
+
+
+def test_single_element_to_roles_is_a_plain_directed(conn):
+    ag = _mk(conn)
+    receipt = service.post_message(
+        conn, ag["backend"], "question", "just you", to_roles=["mobile"]
+    )
+    # Collapses onto the ordinary single-recipient path — no message_recipients rows needed.
+    assert receipt["to_role"] == "mobile"
+    assert len(service.fetch_unacked(conn, ag["mobile"])) == 1
+    assert service.fetch_unacked(conn, ag["frontend"]) == []
+
+
+def test_multi_directed_dedupes_a_tag_and_its_role(conn):
+    ag = _mk(conn)
+    # "MB" and "mobile" are the same seat — dedupe to one, so it is a single directed message.
+    receipt = service.post_message(
+        conn, ag["backend"], "question", "hi", to_roles=["mobile", "MB"]
+    )
+    assert receipt["to_role"] == "mobile"
+    assert len(service.fetch_unacked(conn, ag["mobile"])) == 1
+
+
+def test_empty_to_roles_broadcasts(conn):
+    ag = _mk(conn)
+    service.post_message(conn, ag["backend"], "question", "hi all", to_roles=[])
+    assert len(service.fetch_unacked(conn, ag["frontend"])) == 1
+    assert len(service.fetch_unacked(conn, ag["mobile"])) == 1
+
+
+def test_multi_directed_rejects_an_unknown_addressee(conn):
+    ag = _mk(conn)
+    with pytest.raises(ValueError):
+        service.post_message(
+            conn, ag["backend"], "question", "x", to_roles=["frontend", "designer"]
+        )
