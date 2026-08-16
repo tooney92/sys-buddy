@@ -10,6 +10,14 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.13.0](https://github.com/tooney92/sys-buddy/compare/v2.12.0...v2.13.0) (2026-08-16)
+
+
+### Added
+
+* guests can message specific people, browser notifications, and backend+guest tasks ([7402457](https://github.com/tooney92/sys-buddy/commit/7402457c6e7e2769236b10cf353ad23b8e540ddb))
+* targeted guest messages, browser notifications, and backend+guest tasks ([#96](https://github.com/tooney92/sys-buddy/issues/96)) ([7402457](https://github.com/tooney92/sys-buddy/commit/7402457c6e7e2769236b10cf353ad23b8e540ddb))
+
 ## [2.12.0](https://github.com/tooney92/sys-buddy/compare/v2.11.0...v2.12.0) (2026-08-15)
 
 
