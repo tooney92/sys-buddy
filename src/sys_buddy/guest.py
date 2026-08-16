@@ -102,14 +102,24 @@ def register_guest_routes(mcp, cfg) -> None:
             ident = _authed_guest(conn, request)
             if ident is None:
                 return _forbidden()
-            body = str((await _json(request)).get("body", "") or "").strip()
+            payload = await _json(request)
+            body = str(payload.get("body", "") or "").strip()
             if not body:
                 return JSONResponse({"error": "empty message"}, status_code=400)
+            # Optional directed recipients — the seats she ticked in the composer. Absent or
+            # empty means broadcast to everyone (the unchanged default). Each is validated
+            # against the task's cast inside `post_message` (resolve_addressee), so a name
+            # that is not on this task comes back a 400 rather than reaching anyone.
+            raw_to = payload.get("to")
+            to_roles = (
+                [str(x) for x in raw_to if str(x).strip()]
+                if isinstance(raw_to, list) else None
+            )
             # Type is hard-coded, never taken from the request: a guest can only ever author
             # a conversational `note`, never a lifecycle event like `verified`.
             service.assert_sendable("note")
             try:
-                receipt = service.post_message(conn, ident, "note", body)
+                receipt = service.post_message(conn, ident, "note", body, to_roles=to_roles)
             except ValueError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
             return JSONResponse({"ok": True, "id": receipt["id"]}, status_code=201)

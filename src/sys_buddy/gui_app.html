@@ -684,7 +684,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
       <div class="field">
         <span class="label-txt" id="roles-label">Roles</span>
-        <p class="hint" id="roles-help" style="margin:0">Pick who’s on this task — a contract needs at least two agents. Tap <strong>“+”</strong> for a second of the same role (two frontends get <code>@frontend-1</code> and <code>@frontend-2</code>, one invite each), and <strong>“you”</strong> on the role you’ll drive.</p>
+        <p class="hint" id="roles-help" style="margin:0">Pick who’s on this task — a contract needs at least two people, one of whom builds (a guest signs but doesn’t build, so <code>backend + guest</code> works). Tap <strong>“+”</strong> for a second of the same role (two frontends get <code>@frontend-1</code> and <code>@frontend-2</code>, one invite each), and <strong>“you”</strong> on the role you’ll drive.</p>
         <!-- compound role chips are rendered by JS into here -->
         <div class="roles" id="roles-row" role="group" aria-labelledby="roles-label"></div>
         <p class="hint" id="roles-note"></p>
@@ -1641,15 +1641,17 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   function refreshGate(){
     var title = (titleEl.value || '').trim();
     var roles = castRoles();
-    // A guest is not a builder — it cannot produce or sign a contract — so it never counts
-    // toward the minimum. `backend + guest` is one builder, which is not yet a contract.
+    // A guest cannot BUILD, but she is now a real signing party — so a contract needs at
+    // least one BUILDER (someone who produces the work) and at least two PARTIES total
+    // (someone to agree WITH). `backend + guest` clears both: James builds, she signs off.
+    // `backend` alone or `guest` alone does not. Counts SEATS, not role types, so two
+    // frontends (`@frontend-1` + `@frontend-2`) are two builders and a legitimate cast.
     var builders = roles.filter(function(r){ return r !== GUEST_ROLE; });
-    // An engagement runs the contract flow, so it shares the two-agent minimum.
+    // An engagement runs the contract flow, so it shares this minimum.
     var contract = !modeDebug.checked;
-    /* Counts SEATS, not role types — and that is the point of this change. Two frontends
-       are two agents who can hold a contract with each other (`@frontend-1` signing with
-       `@frontend-2`), so "just FEs" is a legitimate cast and must satisfy the minimum. */
-    var minRoles = contract ? 2 : 1;
+    var enoughCast = contract
+      ? (roles.length >= 2 && builders.length >= 1)   // ≥2 parties, ≥1 builder
+      : (builders.length >= 1);                        // a debug task just needs one agent
     // An engagement with no owner seat can be created, but nothing can then be built on
     // it: only the owner may write the deliverable list, and the list must be accepted
     // before any todo or contract exists (`deliverables._assert_owner`). The broker
@@ -1660,10 +1662,12 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     // Taking that seat yourself would make you the party you are supposed to be reporting
     // to, which is the one arrangement engagement mode exists to prevent.
     var youAreOwner = isEngagement() && youRole === OWNER_ROLE;
-    if (builders.length < minRoles) {
-      rolesNote.textContent = contract
-        ? 'Add one more agent — a contract needs two. Two of the same role is fine: use “+”. (A guest doesn’t count — they have no agent.)'
-        : 'Add at least one agent.';
+    if (!enoughCast) {
+      rolesNote.textContent = !contract
+        ? 'Add at least one agent.'
+        : (builders.length < 1
+            ? 'Add an agent — a guest can’t build. A contract needs a builder to make the work.'
+            : 'Add one more — a contract needs two parties. Another agent (use “+” for two of a role), or a guest to sign off.');
     } else if (needsOwner) {
       rolesNote.textContent = 'Add the owner seat — that is your client, and only they can list what was commissioned.';
     } else if (!youRole) {
@@ -1675,7 +1679,9 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     }
     var msg = '';
     if (!title) msg = 'Add a title to continue.';
-    else if (builders.length < minRoles) msg = 'Add ' + (builders.length ? 'another' : 'an') + ' agent to continue.';
+    else if (!enoughCast) msg = (builders.length < 1)
+      ? 'Add an agent to continue.'
+      : 'Add one more party to continue.';
     else if (needsOwner) msg = 'An engagement needs an owner seat — that is the client.';
     else if (!youRole) msg = 'Mark which role is you.';
     else if (youAreOwner) msg = 'Mark “you” on a role you build in, not the owner.';

@@ -484,6 +484,7 @@ def post_message(
     body: str,
     to_role: str | None = None,
     todo_id: int | None = None,
+    to_roles: list[str] | None = None,
 ) -> dict:
     """Store a message from ``identity`` on its task. Returns a small receipt.
 
@@ -516,10 +517,34 @@ def post_message(
         raise ValueError(f"unknown task '{identity.task_id}'")
     if task["closed_at"] is not None:
         raise ValueError(f"task '{identity.task_id}' is closed")
+    # A single message may be directed at SEVERAL specific seats — "Tony AND James, nobody
+    # else". `to_roles` carries that list; it resolves and de-duplicates here, then collapses
+    # onto the existing paths: 0 addressees → broadcast, exactly 1 → an ordinary directed
+    # `to_role`, 2+ → `to_role` stays NULL and each canonical addressee is written to
+    # `message_recipients` once the row exists. Canonicalising here (never at read time) keeps
+    # every downstream match a plain string compare, exactly as it is for single `to_role`.
+    multi: list[str] = []
+    canonical_to_role = False
+    if to_roles:
+        cast, seat_roles = _seats.cast_of(conn, identity.task_id)
+        names = _seats.names_of(conn, identity.task_id)
+        seen: set[str] = set()
+        for one in to_roles:
+            if not one:
+                continue
+            c = resolve_addressee(one, cast, seat_roles, names, task_id=identity.task_id)
+            if c not in seen:
+                seen.add(c)
+                multi.append(c)
+        if len(multi) == 1:
+            to_role, multi = multi[0], []   # a single pick is just a directed message
+            canonical_to_role = True         # already resolved above — do not resolve twice
+        elif len(multi) >= 2:
+            to_role = None                   # broadcast-shaped row; recipient rows narrow it
     # Empty string means broadcast, same as None.
     if not to_role:
         to_role = None
-    else:
+    elif not canonical_to_role:
         # Resolve tags/casing/names to the canonical string BEFORE storing, so
         # `to_role` on the message row is always a real seat or role type — the
         # dashboard and the delivery fan-out match on it exactly and must never see "BE".
@@ -536,9 +561,37 @@ def post_message(
         "VALUES (?,?,?,?,?,?,?,?)",
         (identity.task_id, identity.agent_id, mtype, json.dumps(body), to_role, todo_id, state_at_send, now),
     )
+    if multi:
+        conn.executemany(
+            "INSERT OR IGNORE INTO message_recipients (message_id, addressee) VALUES (?, ?)",
+            [(cur.lastrowid, a) for a in multi],
+        )
     conn.commit()
     recipients = _count_other_agents(conn, identity.task_id, identity.agent_id)
-    return {"id": cur.lastrowid, "recipients": recipients, "type": mtype, "to_role": to_role}
+    return {
+        "id": cur.lastrowid, "recipients": recipients, "type": mtype,
+        "to_role": to_role, "to_roles": multi or ([to_role] if to_role else []),
+    }
+
+
+def _recipients_for(conn, message_ids) -> dict[int, list[str]]:
+    """``{message_id: [addressee, …]}`` for the multi-recipient messages among ``message_ids``.
+
+    One query for the whole batch, so rendering a thread never turns into a per-message
+    lookup. Messages with a single/NULL ``to_role`` simply do not appear here.
+    """
+    ids = list(message_ids)
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    out: dict[int, list[str]] = {}
+    for row in conn.execute(
+        f"SELECT message_id, addressee FROM message_recipients "
+        f"WHERE message_id IN ({placeholders}) ORDER BY rowid",
+        ids,
+    ).fetchall():
+        out.setdefault(row["message_id"], []).append(row["addressee"])
+    return out
 
 
 def _wrap(from_name: str, role: str, task_id: str, body: str, to_role: str | None = None) -> str:
@@ -606,6 +659,12 @@ def _fetch(conn, identity: Identity, only_new: bool, mark_delivered: bool = True
     # (`@frontend-2` → exactly one) or its role type (`@FE` → every frontend seat).
     # That single OR is the whole of the fan-out — `to_role` stays a plain string
     # filtered at read time, so nothing about the storage changed.
+    #
+    # A message with SEVERAL directed recipients carries them in `message_recipients` and a
+    # NULL `to_role`. So a true broadcast is `to_role IS NULL` AND no recipient rows, and the
+    # reader also matches when one of those rows names her seat or role type. The EXISTS only
+    # ever fires for the handful of multi-recipient messages — every older message has no rows
+    # there, so its `NOT EXISTS` is trivially true and its delivery is byte-for-byte unchanged.
     rows = conn.execute(
         f"""
         SELECT m.id, m.from_agent_id, m.type, m.body_json, m.created_at, m.to_role,
@@ -615,15 +674,26 @@ def _fetch(conn, identity: Identity, only_new: bool, mark_delivered: bool = True
         LEFT JOIN deliveries d ON d.message_id = m.id AND d.agent_id = ?
         WHERE m.task_id = ?
           AND m.from_agent_id != ?
-          AND (m.to_role IS NULL OR m.to_role = ? OR m.to_role = ?)
+          AND (
+                (m.to_role IS NULL AND NOT EXISTS (
+                    SELECT 1 FROM message_recipients mr WHERE mr.message_id = m.id))
+             OR m.to_role = ? OR m.to_role = ?
+             OR EXISTS (
+                    SELECT 1 FROM message_recipients mr
+                    WHERE mr.message_id = m.id AND (mr.addressee = ? OR mr.addressee = ?))
+          )
           AND ({unseen})
         ORDER BY m.id
         """,
         (identity.agent_id, identity.task_id, identity.agent_id,
-         identity.role, identity.kind),
+         identity.role, identity.kind, identity.role, identity.kind),
     ).fetchall()
 
     now = time.time()
+    # For the few multi-recipient messages in this batch, the addressees so the envelope can
+    # show a receiving agent it was directed at a specific few (not broadcast). One query, not
+    # one per message; empty for the common single/broadcast case.
+    recipients_by_msg = _recipients_for(conn, [r["id"] for r in rows])
     out = []
     for r in rows:
         if mark_delivered:
@@ -645,7 +715,9 @@ def _fetch(conn, identity: Identity, only_new: bool, mark_delivered: bool = True
             content = _wrap_broker(identity.task_id, body)
         else:
             from_name, from_role = r["from_name"], r["from_role"]
-            content = _wrap(from_name, from_role, identity.task_id, body, r["to_role"])
+            # A single `to_role`, or the several addressees joined, or None for a broadcast.
+            to_disp = r["to_role"] or (" ".join(recipients_by_msg.get(r["id"], [])) or None)
+            content = _wrap(from_name, from_role, identity.task_id, body, to_disp)
         out.append(
             {
                 "id": r["id"],

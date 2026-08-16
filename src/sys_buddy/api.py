@@ -776,6 +776,10 @@ def _messages_for(conn, task_id: str) -> list[dict]:
         (task_id,),
     ).fetchall()
 
+    # A message directed at SEVERAL seats keeps them in message_recipients (its to_role is
+    # NULL); one batched lookup so the thread can render "→ Tony, James" without a per-row query.
+    recipients_by_msg = service._recipients_for(conn, [r["id"] for r in rows])
+
     out = []
     test_idx = 0
     # (id → number, number → id), loaded lazily: a pre-todo task never queries it.
@@ -783,7 +787,9 @@ def _messages_for(conn, task_id: str) -> list[dict]:
     for r in rows:
         body = json.loads(r["body_json"])
         role = service.BROKER_ROLE if r["type"] in service.BROKER_TYPES else r["role"]
-        msg: dict = {"id": r["id"], "role": role, "type": r["type"], "to_role": r["to_role"], "time": _hhmm(r["created_at"]), "ts": r["created_at"]}
+        msg: dict = {"id": r["id"], "role": role, "type": r["type"], "to_role": r["to_role"],
+                     "to_roles": recipients_by_msg.get(r["id"], []),
+                     "time": _hhmm(r["created_at"]), "ts": r["created_at"]}
         if isinstance(body, dict):
             msg["body"] = body.get("text") or body.get("body") or ""
             if "code" in body:
