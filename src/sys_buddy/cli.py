@@ -82,7 +82,10 @@ def cmd_task_create(args: argparse.Namespace) -> int:
     if not roles:
         print("error: --roles must list at least one role", file=sys.stderr)
         return 2
-    task = admin.create_task(args.id, title=args.title or args.id, roles=roles, mode=args.mode)
+    task = admin.create_task(
+        args.id, title=args.title or args.id, roles=roles, mode=args.mode,
+        dev_url=getattr(args, "dev_url", None),
+    )
     # Print the SEATS, not the input: repeating a role type is how you say "two frontend
     # developers", and the host has to see what they were named — a repeated type numbers
     # every one of its seats (`frontend-1`, `frontend-2`), so neither is spelled like the
@@ -91,6 +94,23 @@ def cmd_task_create(args: argparse.Namespace) -> int:
         f"Created task '{task['id']}'  ·  seats: {', '.join(task['roles'])}  ·  "
         f"state: {task['state']}"
     )
+    return 0
+
+
+def cmd_task_dev_url(args: argparse.Namespace) -> int:
+    """Show or set the LOCAL dev URL (localhost/http fine). Task-level, host-owned.
+
+    A read with no `url` and no `--clear`, a write otherwise. Deliberately lenient — it
+    names where the app runs during development, not the SSRF-checked deployment target.
+    """
+    from . import admin
+
+    _cfg_from_args(args)
+    if not args.url and not args.clear:
+        print(f"Local dev URL for {args.task}: {admin.get_dev_url(args.task) or '— (none set)'}")
+        return 0
+    res = admin.set_dev_url(args.task, None if args.clear else args.url)
+    print(f"Local dev URL for '{args.task}': {res['dev_url'] or 'cleared'}")
     return 0
 
 
@@ -669,6 +689,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="'contract' (full workflow), 'debug' (collaborate then mark resolved), or "
              "'engagement' (contract flow plus a client — needs an 'owner' seat in the cast)",
     )
+    tc.add_argument(
+        "--dev-url",
+        help="Local dev URL where the app runs, e.g. http://localhost:3000. Unlike the "
+             "staging target this is lenient — localhost/http/a bare host are all fine.",
+    )
     tc.set_defaults(func=cmd_task_create)
 
     ts = tsub.add_parser(
@@ -747,6 +772,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Unset it. On a todo that means 'inherit the task's again'.",
     )
     tu.set_defaults(func=cmd_task_staging_url)
+
+    tdv = tsub.add_parser(
+        "dev-url",
+        help="Show or set the LOCAL dev URL (localhost/http ok) — where the app runs in dev",
+        description=(
+            "The local dev URL is host-owned configuration, like the staging target, but "
+            "deliberately lenient: localhost, http and bare hosts are all fine, because it "
+            "names where the app runs while you build rather than a fetchable deployment "
+            "target. No agent tool can set it."
+        ),
+    )
+    tdv.add_argument("task")
+    tdv.add_argument(
+        "url", nargs="?",
+        help="The dev URL, e.g. http://localhost:3000. Omit to SHOW; --clear to unset.",
+    )
+    tdv.add_argument("--clear", action="store_true", help="Unset it.")
+    tdv.set_defaults(func=cmd_task_dev_url)
 
     sp = sub.add_parser("tasks", help="List tasks")
     sp.set_defaults(func=cmd_tasks)

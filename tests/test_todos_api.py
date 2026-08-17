@@ -64,11 +64,11 @@ def test_task_with_no_todos_serialises_exactly_as_before(conn):
     be able to tell "this task has no todos" from "this broker predates todos" — it
     can't, and doesn't need to: both mean "render today's seven-node stepper".
 
-    ``seat_roles``, ``roster`` and ``staging_url`` are the keys that are NOT
+    ``seat_roles``, ``roster``, ``staging_url`` and ``dev_url`` are the keys that are NOT
     conditional. They are unconditional on purpose: the cast is a property of every
     task, an unjoined seat has to be visible on a task with no todos at all (that is
-    precisely the task that never got started), and the deployment target is host
-    CONFIGURATION on the task rather than something a contract carries. An older page
+    precisely the task that never got started), and the deployment / local dev targets are
+    host CONFIGURATION on the task rather than something a contract carries. An older page
     simply ignores keys it does not read, which is the same tolerance the todo keys
     already rely on in the other direction.
     """
@@ -77,7 +77,7 @@ def test_task_with_no_todos_serialises_exactly_as_before(conn):
     assert set(detail) == {
         "id", "title", "state", "mode", "roles", "seat_roles", "strikes", "times",
         "contract", "messages", "events", "agents", "roster", "readiness_preview",
-        "staging_url",
+        "staging_url", "dev_url",
     }
     assert "todos" not in detail
     assert "todo_rollup" not in detail

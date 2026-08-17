@@ -148,7 +148,7 @@ def test_non_engagement_task_serialises_exactly_as_before(conn):
     assert set(detail) == {
         "id", "title", "state", "mode", "roles", "seat_roles", "strikes", "times",
         "contract", "messages", "events", "agents", "roster", "readiness_preview",
-        "staging_url",
+        "staging_url", "dev_url",
     }
     for key in ("engagement", "deliverables", "guidelines", "verification"):
         assert key not in detail
