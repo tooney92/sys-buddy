@@ -724,6 +724,17 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
           <p class="hint" id="staging-hint"></p>
         </div>
 
+        <!-- The LOCAL dev URL. Unlike the staging target it is ALWAYS lenient — localhost,
+             http, a bare host — because it names where the app runs while you build, not a
+             fetchable/signed target. Handed to agents through get_contract so nobody invents
+             one. -->
+        <div class="field" id="dev-url-wrap">
+          <label for="in-dev-url">Local dev URL <span class="hint" style="display:inline">optional</span></label>
+          <input class="input" type="text" id="in-dev-url" autocomplete="off" spellcheck="false"
+                 placeholder="http://localhost:3000">
+          <p class="hint">Where the app runs on your machine while building — <code>localhost</code> / <code>http</code> are fine here. Your agents read it from the contract, so they never guess a local URL.</p>
+        </div>
+
         <!-- Slack. Session-scoped ON PURPOSE: every credential in the db is a sha256
              hash, and a webhook has to be replayed verbatim to work, so persisting it
              would put the first plaintext secret at rest. It lives on the process config
@@ -870,6 +881,10 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
       <span class="pip" aria-hidden="true"></span>
       <span id="check-text">Bridge not checked.</span>
     </span>
+    <!-- Which sys-buddy this app is. Filled from the version check (installed version) that
+         already runs on launch, so it needs no extra call; blank until that answers, and
+         stays blank in a plain browser with no bridge. -->
+    <span id="app-version" style="margin-left:auto;font-size:.78rem;color:var(--text-3);letter-spacing:.02em;font-variant-numeric:tabular-nums" aria-live="polite"></span>
     <!-- The "Check GitHub for updates" checkbox lived here and is gone. It defaulted to
          off, so the update banner was unreachable unless somebody found a checkbox in the
          footer — which is why four releases went by unnoticed. A control that has to be
@@ -1468,6 +1483,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var connUrlWrap  = document.getElementById('conn-url-wrap');
   var publicUrlEl  = document.getElementById('in-public-url');
   var stagingUrlEl = document.getElementById('in-staging-url');
+  var devUrlEl = document.getElementById('in-dev-url');
   var slackEl = document.getElementById('in-slack');
   var slackTestBtn = document.getElementById('btn-slack-test');
   var slackStatusEl = document.getElementById('slack-status');
@@ -1749,6 +1765,8 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     var publicUrl = connMode === 'local' ? '' : (publicUrlEl && publicUrlEl.value || '').trim();
     // the human-owned deployment target (optional — the agents can still agree one)
     var stagingUrl = (stagingUrlEl && stagingUrlEl.value || '').trim();
+    // the local dev URL (optional; localhost/http fine — never validated as a fetch target)
+    var devUrl = (devUrlEl && devUrlEl.value || '').trim();
     // Slack is armed BEFORE the task exists, so the very first terminal event on it
     // already reaches the channel. set_slack_webhook mutates the process config and is
     // safe to call whether or not the broker is up yet.
@@ -1760,7 +1778,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     hostBtn.disabled = true;
     var loader = startLoader();
 
-    Promise.resolve(api.start_host(title, roles, hostRole, publicUrl, mode, stagingUrl)).then(function(res){
+    Promise.resolve(api.start_host(title, roles, hostRole, publicUrl, mode, stagingUrl, devUrl)).then(function(res){
       // Keep the loader visible for a minimum beat so it never flickers on a fast
       // start, then reveal the running page (or drop back to the form on error).
       loader.finish(function(){
@@ -1948,6 +1966,10 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   var vbCmd = document.getElementById('vb-cmd');
 
   function renderVersion(s){
+    // Stamp the footer with the version we're on FIRST — it is a local fact that survives a
+    // failed update-check, so it must not sit behind the `s.error` return below.
+    var av = document.getElementById('app-version');
+    if (av && s && s.installed) av.textContent = 'sys-buddy v' + s.installed;
     if (!s || s.error) { vb.hidden = true; return; }   // never nag on failure
     vbNotes.hidden = true; vbNotes.textContent = '';
     vbMeta.textContent = '';

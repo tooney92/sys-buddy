@@ -1135,6 +1135,9 @@ def _task_detail(conn, task_id: str, *, is_host: bool = True) -> dict | None:
         # before any signature, which is what the per-contract withholding exists to
         # prevent. The host is exempt because the host CHOSE the value.
         "staging_url": state._task_staging_url(conn, task_id) if is_host else None,
+        # The local dev URL is localhost, not the SSRF-sensitive signed target, and there is
+        # no incentive to withhold it — so every viewer on the task sees it, host or not.
+        "dev_url": state._task_dev_url(conn, task_id),
         "times": _times_for(conn, task_id, t["created_at"]),
         "contract": _contract_for(conn, task_id, is_host=is_host),
         "messages": _messages_for(conn, task_id),

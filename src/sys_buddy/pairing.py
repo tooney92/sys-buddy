@@ -36,7 +36,7 @@ from . import audit, seats
 from .config import Config, get_config
 from .db import connect
 from .identity import new_agent_token, new_viewer_token, sha256_hex
-from .rules import RULES_OF_ENGAGEMENT
+from .rules import rules_text
 
 
 def redeem_invite(
@@ -427,7 +427,17 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
 
         # Lazy import: onboarding imports pairing at module top, so importing it here
         # (inside the handler) avoids a circular import.
+        from . import state
         from .onboarding import asking_summary, connect_clients, role_prompt
+
+        # A same-machine task gets the scoped rule-6 carve-out in its charter (seed/test
+        # creds may be shared in-thread). Read once, robustly (the flag AND unreachable-at-a-
+        # public-origin), so the charter an agent is handed matches what the tools enforce.
+        _conn = connect()
+        try:
+            _same_machine = state._task_is_same_machine(_conn, result["task_id"])
+        finally:
+            _conn.close()
 
         viewer_token = result["viewer_token"]
         mcp_url = f"{cfg.base_url}/mcp"
@@ -446,8 +456,9 @@ def register_pairing_routes(mcp: FastMCP, cfg: Config) -> None:
                 "prompt": role_prompt(
                     result["role_type"], result["task_id"], mode, handle=result["handle"]
                 ),
-                # The broker's non-negotiable charter, handed to the agent at setup.
-                "rules": RULES_OF_ENGAGEMENT,
+                # The broker's non-negotiable charter, handed to the agent at setup —
+                # with the local-mode credential carve-out iff this is a same-machine task.
+                "rules": rules_text(same_machine=_same_machine, is_remote=cfg.is_remote),
                 # Plain-language "what we're asking", for the panel above the prompt.
                 # Its `never` list is PARSED from the charter above rather than written
                 # twice — a summary that drifts from the rules it summarises is a false

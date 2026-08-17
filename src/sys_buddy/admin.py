@@ -76,6 +76,7 @@ def create_task(
     mode: str = "contract",
     same_machine: bool = False,
     staging_url: str | None = None,
+    dev_url: str | None = None,
 ) -> dict:
     """Create a task in the ``open`` state with the given cast.
 
@@ -150,12 +151,13 @@ def create_task(
             raise ValueError(f"task '{id}' already exists")
         now = time.time()
         staging_url = (staging_url or "").strip() or None
+        dev_url = (dev_url or "").strip() or None
         conn.execute(
             "INSERT INTO tasks (id, title, state, mode, roles_json, seat_roles_json, "
-            "same_machine, staging_url, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            "same_machine, staging_url, dev_url, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 id, title, "open", mode, json.dumps(handles), json.dumps(seat_roles),
-                1 if same_machine else 0, staging_url, now,
+                1 if same_machine else 0, staging_url, dev_url, now,
             ),
         )
         _write_event(conn, id, "task", {"text": f"Task created: {id}"})
@@ -172,6 +174,7 @@ def create_task(
             "mode": mode,
             "same_machine": bool(same_machine),
             "staging_url": staging_url,
+            "dev_url": dev_url,
         }
     finally:
         conn.close()
@@ -443,6 +446,51 @@ def set_staging_url(
         "staging_url": url,
         "effective": effective,
     }
+
+
+def set_dev_url(task: str, url: str | None) -> dict:
+    """Point a task at its LOCAL dev target — where the app runs during development
+    (``http://localhost:3000``, a bare host, anything). HOST ONLY, task-level.
+
+    Deliberately lenient, and that is the whole point: unlike :func:`set_staging_url` this
+    is NOT the fetchable, SSRF-checked deployment target, so localhost and http are exactly
+    what it exists for. It is CONFIGURATION, never an agreement, and no agent tool writes it
+    — the same host-owned posture as staging_url. Passing empty/None clears it.
+
+    Returns ``{task, previous, dev_url}``.
+    """
+    url = (url or "").strip() or None
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        previous = conn.execute(
+            "SELECT dev_url FROM tasks WHERE id = ?", (task,)
+        ).fetchone()["dev_url"]
+        conn.execute("UPDATE tasks SET dev_url = ? WHERE id = ?", (url, task))
+        _write_event(
+            conn, task, "task",
+            {
+                "text": f"Local dev URL for the task: {url or 'cleared'}"
+                + (f" (was {previous})" if previous else ""),
+                "dev_url": url,
+                "previous": previous,
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    audit.event("dev_url_set", task=task)
+    return {"task": task, "previous": previous, "dev_url": url}
+
+
+def get_dev_url(task: str) -> str | None:
+    """Read-only: the task's local dev URL, or None."""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT dev_url FROM tasks WHERE id = ?", (task,)).fetchone()
+        return (row["dev_url"] or None) if row is not None else None
+    finally:
+        conn.close()
 
 
 def get_staging_url(task: str, todo: int | None = None) -> dict:

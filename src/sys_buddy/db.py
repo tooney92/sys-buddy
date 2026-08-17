@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- restarting an ngrok tunnel re-points every contract on the task and re-negotiates
     -- none of them. See state.resolve_staging_url.
     staging_url TEXT,
+    -- The LOCAL dev target — where the app runs during development, e.g.
+    -- `http://localhost:3000`. Unlike `staging_url` it is NOT the fetchable, SSRF-checked
+    -- deployment target and is never locked into a contract; it is a convenience the host
+    -- sets so agents know where the local build lives. Deliberately lenient: localhost,
+    -- http, a bare host are all fine (that is the entire point). HOST-OWNED like staging_url
+    -- — no agent tool writes it. NULL when the host never set one.
+    dev_url TEXT,
     created_at  REAL NOT NULL,
     closed_at   REAL
 );
@@ -1494,6 +1501,10 @@ def init_db(db_path: Path | str | None = None) -> Path:
             conn.execute("ALTER TABLE tasks ADD COLUMN same_machine INTEGER NOT NULL DEFAULT 0")
         if "staging_url" not in task_cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN staging_url TEXT")
+        # Migration: the local dev target (localhost/http ok). Nullable, no constraint,
+        # NULL for every task created before it existed — nothing to backfill.
+        if "dev_url" not in task_cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN dev_url TEXT")
         # Migration: the seat → role-type map. The plain ALTER is safe here (nullable,
         # no constraint); the BACKFILL needs JSON, so it lives in `_migrate_seat_roles`.
         if "seat_roles_json" not in task_cols:

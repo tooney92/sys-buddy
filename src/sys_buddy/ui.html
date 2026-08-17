@@ -1857,10 +1857,16 @@ function contractHTML(d){
        gets a line, a target that is present gets a line, and the one that actually blocks
        the work got silence. */
     : (!dead && data.locked ? noTargetHTML(d) : '');
+  // The task's LOCAL dev URL (localhost/http) — task-level, always shown when the host set
+  // one, on a dashed chip so it never reads as the signed/fetchable "Connect to" target.
+  var devUrl = d && d.dev_url;
+  var devBlock = devUrl
+    ? '<div style="margin-top:8px;padding:7px 11px;background:var(--surface-2);border:1px dashed var(--border);border-radius:10px;min-width:0"><div style="display:flex;align-items:center;gap:9px;min-width:0"><span style="display:flex;color:var(--text-3);flex:none">'+IC.link+'</span><span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);flex:none">Local dev</span><span style="font-family:'+MONO+';font-size:12px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(devUrl)+'">'+esc(devUrl)+'</span></div></div>'
+    : '';
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">'+
     '<div style="padding:14px 16px;border-bottom:1px solid var(--border)">'+
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span style="font-weight:600;font-size:14px;color:var(--text)">'+esc(kindView.title)+'</span>'+
-      '<div style="display:flex;gap:3px;background:var(--surface-2);padding:3px;border-radius:9px">'+vbtns+'</div></div>'+statusBlock+stagingBlock+'</div>'+
+      '<div style="display:flex;gap:3px;background:var(--surface-2);padding:3px;border-radius:9px">'+vbtns+'</div></div>'+statusBlock+stagingBlock+devBlock+'</div>'+
     '<div style="padding:6px">'+eps+'</div></div>';
 }
 
@@ -2503,7 +2509,9 @@ function todoModalHTML(d){
   var right = debug ? '' : '<div style="min-width:0">'+
       /* `task`/`todoNo` ride along for noTargetHTML: the fix it prints is a CLI line, and
          a CLI line needs the task id and the per-task `#N` the host actually types. */
-      contractHTML({id:d.id+'#'+t.id, contract:t.contract, task:d.id, todoNo:todoNo(t)})+
+      /* dev_url is TASK-level, so pass it through to the per-todo contract card too, else
+         the "Local dev" chip only appears on no-todo tasks. */
+      contractHTML({id:d.id+'#'+t.id, contract:t.contract, task:d.id, todoNo:todoNo(t), dev_url:d.dev_url})+
       reviewAsideHTML(d,t)+
     '</div>';
 

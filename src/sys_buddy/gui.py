@@ -202,7 +202,7 @@ class GuiApi:
             return {"error": str(exc)}
 
     def start_host(self, title: str, roles: list, host_role: str = "", public_url: str = "",
-                   mode: str = "contract", staging_url: str = "") -> dict:
+                   mode: str = "contract", staging_url: str = "", dev_url: str = "") -> dict:
         """Host flow: start the in-process broker (once), create the task (id derived
         from ``title``), mint invite links for the buddy role(s), and — when
         ``host_role`` is given — seat the host's OWN agent on that role and auto-wire
@@ -244,6 +244,7 @@ class GuiApi:
                 None, list(roles), base or BASE_URL, title=title, mode=mode,
                 host_role=host_role, public_url=base or None,
                 staging_url=(staging_url or "").strip() or None,
+                dev_url=(dev_url or "").strip() or None,
             )
             # The host is on the same box as the broker, so try to auto-register their
             # own seat's MCP (same as the buddy flow). The command is shown regardless,

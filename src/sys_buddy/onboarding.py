@@ -1561,6 +1561,7 @@ def host_create_task(
     mode: str = "contract",
     same_machine: bool = False,
     staging_url: str | None = None,
+    dev_url: str | None = None,
 ) -> dict:
     """Host-side: create a task. Thin over ``admin.create_task``.
 
@@ -1568,11 +1569,11 @@ def host_create_task(
     the ``title`` (so a human only types a Title). When an explicit id IS given, the
     title still defaults to it, preserving the old behaviour. ``same_machine`` and
     ``staging_url`` carry the host screen's connectivity choice and deployment target
-    onto the task row.
+    onto the task row; ``dev_url`` carries the local dev target (localhost/http ok).
     """
     return admin.create_task(
         task_id, title=title or task_id, roles=roles, mode=mode,
-        same_machine=same_machine, staging_url=staging_url,
+        same_machine=same_machine, staging_url=staging_url, dev_url=dev_url,
     )
 
 
@@ -1672,6 +1673,7 @@ def host_setup(
     host_role: str | None = None,
     public_url: str | None = None,
     staging_url: str | None = None,
+    dev_url: str | None = None,
 ) -> dict:
     """Host-side setup in one call: create the task, mint invite LINKS for the buddy
     role(s), issue an all-tasks host viewer token, and — when ``host_role`` is given —
@@ -1707,6 +1709,7 @@ def host_setup(
         created = host_create_task(
             task_id, roles, title, mode=mode,
             same_machine=same_machine, staging_url=staging_url,
+            dev_url=(dev_url or "").strip() or None,
         )
         task_id = created["id"]  # may have been derived from the title
         # The declared CAST, as seats — not the caller's role-type list, which may name

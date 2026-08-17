@@ -165,6 +165,19 @@ def _task_staging_url(conn, task_id: str) -> str | None:
     return str(row["staging_url"]).strip() or None
 
 
+def _task_dev_url(conn, task_id: str) -> str | None:
+    """The host-set LOCAL dev target for this task (localhost/http ok), if any. Task-level
+    only — no per-deliverable override, because it names where the app runs, not what was
+    agreed. Tolerates a db that predates the column (older broker on a newer file)."""
+    try:
+        row = conn.execute("SELECT dev_url FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None or not row["dev_url"]:
+        return None
+    return str(row["dev_url"]).strip() or None
+
+
 def _todo_staging_url(conn, todo_id: int | None) -> str | None:
     """The HOST's per-deliverable override, if they set one on this todo."""
     if todo_id is None:
@@ -1882,6 +1895,9 @@ def get_contract(conn, task_id: str, number: int | None = None) -> dict:
             # ("where do I point tests now?" / "what did we agree to?") stay separate
             # answers instead of one string doing both jobs badly.
             "staging_url_at_lock": newest["staging_url_at_lock"],
+            # The LOCAL dev URL (localhost/http) — where the app runs while building. Not a
+            # fetchable/signed target, so it is never withheld, and it rides on every reply.
+            "dev_url": _task_dev_url(conn, task_id),
             "spec": spec,
             "signatures": signed,
             "locked_at": newest["locked_at"],
@@ -1900,6 +1916,8 @@ def get_contract(conn, task_id: str, number: int | None = None) -> dict:
         "status": "proposed",
         "locked": False,
         "staging_url": None,
+        # dev_url is the local run target, not the signed one — safe to show pre-lock.
+        "dev_url": _task_dev_url(conn, task_id),
         "spec": shape,
         "signatures": signed,
         "awaiting": awaiting,
