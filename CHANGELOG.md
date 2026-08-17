@@ -10,6 +10,14 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.15.0](https://github.com/tooney92/sys-buddy/compare/v2.14.0...v2.15.0) (2026-08-17)
+
+
+### Added
+
+* a green check on a verified todo, so "which are done" is answerable at a glance ([dd68723](https://github.com/tooney92/sys-buddy/commit/dd68723a8729b19c11d7b578ec6d1099f6c10607))
+* green check on a verified todo in the panel ([#102](https://github.com/tooney92/sys-buddy/issues/102)) ([dd68723](https://github.com/tooney92/sys-buddy/commit/dd68723a8729b19c11d7b578ec6d1099f6c10607))
+
 ## [2.14.0](https://github.com/tooney92/sys-buddy/compare/v2.13.0...v2.14.0) (2026-08-17)
 
 
