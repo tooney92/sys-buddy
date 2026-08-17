@@ -2129,8 +2129,14 @@ function todoListHTML(d){
              : pending ? ('awaiting '+(awaitingLabel||'acceptance'))
              : (fixNote || t.summary || t.scope);
     var warn = pending ? '<span title="awaiting acceptance — this one is asking you for something" style="color:var(--st-testing-fg);font-size:13px;line-height:1;flex:none;padding-top:2px">⚠</span>' : '';
+    /* A verified (or owner-confirmed) todo gets a green check on the leading edge, so "which
+       ones are done" is answerable at a glance instead of only from the "N/M verified" tally.
+       Mutually exclusive with the pending ⚠ — a todo is never both awaiting and done. */
+    var done = debug ? (t.status==='resolved') : (t.state==='verified' || t.state==='confirmed');
+    var doneWord = debug ? 'resolved' : (t.state==='confirmed' ? 'confirmed' : 'verified');
+    var tick = done ? '<span title="'+doneWord+'" style="width:16px;height:16px;border-radius:50%;background:var(--st-verified-dot);color:#fff;font-size:10px;font-weight:800;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex:none;margin-top:1px">✓</span>' : '';
     return '<button data-todo="'+t.id+'" style="width:100%;display:flex;align-items:flex-start;gap:9px;padding:10px 13px;background:transparent;border:none;border-top:1px solid var(--border);cursor:pointer;text-align:left;font-family:inherit;opacity:'+(dropped?'.55':'1')+'">'+
-      warn+
+      warn+tick+
       '<span style="flex:1;min-width:0">'+
         '<span style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">'+
           '<span style="font-size:12.5px;font-weight:600;color:var(--text)'+(dropped?';text-decoration:line-through':'')+'">'+esc(t.title)+'</span>'+
