@@ -10,6 +10,14 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.14.0](https://github.com/tooney92/sys-buddy/compare/v2.13.0...v2.14.0) (2026-08-17)
+
+
+### Added
+
+* a lenient dev_url for local testing, and a same-machine credential carve-out ([48adef4](https://github.com/tooney92/sys-buddy/commit/48adef47f192cd42913a2938be17865f7b5c7d44))
+* lenient dev_url for local testing, and a same-machine credential carve-out ([#99](https://github.com/tooney92/sys-buddy/issues/99)) ([48adef4](https://github.com/tooney92/sys-buddy/commit/48adef47f192cd42913a2938be17865f7b5c7d44))
+
 ## [2.13.0](https://github.com/tooney92/sys-buddy/compare/v2.12.0...v2.13.0) (2026-08-16)
 
 
