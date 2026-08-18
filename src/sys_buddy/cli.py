@@ -187,6 +187,23 @@ def cmd_task_add_guest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_task_guest_link(args: argparse.Namespace) -> int:
+    """Reissue a guest's dashboard link — same seat, a fresh token. For when a guest lost
+    their link (the raw token is stored only hashed, so it cannot be read back)."""
+    from . import admin
+    from .config import get_config
+
+    _cfg_from_args(args)
+    res = admin.reissue_guest_link(args.task, args.who)
+    origin = get_config().base_url
+    print(
+        f"Reissued a link for guest '{res['name']}' (seat '{res['seat']}') on '{res['task']}'"
+    )
+    print("\nSend them this fresh link — it works alongside any they still had:")
+    print(f"  {origin}/ui?v={res['viewer_token']}")
+    return 0
+
+
 def cmd_task_roster(args: argparse.Namespace) -> int:
     """The cast, from the SAME source the dashboard panel and the agents' `roster` tool
     read. Unjoined seats are listed: that is the state that silently stalls a task."""
@@ -723,6 +740,24 @@ def build_parser() -> argparse.ArgumentParser:
              "Ignored when --public-url is set.",
     )
     tg.set_defaults(func=cmd_task_add_guest)
+
+    tgl = tsub.add_parser(
+        "guest-link",
+        help="Reissue a guest's dashboard link (same seat, fresh token) if they lost theirs",
+    )
+    tgl.add_argument("task")
+    tgl.add_argument("who", help="The guest's display name or seat handle, e.g. Ada or guest")
+    tgl.add_argument(
+        "--public-url",
+        help="Tunnel origin for the link (e.g. https://abc123.ngrok.app). "
+        "Defaults to $SYS_BUDDY_PUBLIC_URL, else loopback.",
+    )
+    tgl.add_argument(
+        "--port", type=int, default=DEFAULT_PORT,
+        help=f"Port your broker is on, for the loopback link (default: {DEFAULT_PORT}). "
+             "Ignored when --public-url is set.",
+    )
+    tgl.set_defaults(func=cmd_task_guest_link)
 
     te = tsub.add_parser(
         "extend-tokens",

@@ -17,6 +17,8 @@ import time
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
 
 from . import audit
 from .config import get_config
@@ -27,6 +29,18 @@ from .identity import (
     resolve_agent_token,
     set_current,
 )
+
+# JSON-RPC "server error" range (-32000..-32099). Auth failures are raised as McpError,
+# NOT ToolError: a ToolError raised in `on_request` during the `initialize` handshake is
+# flattened by the transport to a bare "-32602 Invalid request parameters", so the agent
+# that reconnected on an expired token saw a cryptic code and none of the sentence telling
+# it what happened or who fixes it. McpError carries `message` through to the client on
+# EVERY request type — handshake included — so the reason and the remedy actually arrive.
+_UNAUTHORIZED = -32001
+
+
+def _auth_error(message: str) -> McpError:
+    return McpError(ErrorData(code=_UNAUTHORIZED, message=message, data=None))
 
 # The action tools that change collaboration state. They stay LOCKED until the agent
 # passes the pre-flight readiness check (agents.ready = 1) — read-only tools (rules,
@@ -181,7 +195,7 @@ class AuthMiddleware(Middleware):
             ip = request.client.host if request.client else "?"
             if _auth_failure_limited(ip, time.time()):
                 audit.event("auth_ratelimit", ip=ip)
-                raise ToolError("too many failed auth attempts; slow down and retry shortly")
+                raise _auth_error("too many failed auth attempts; slow down and retry shortly")
             audit.event("auth_fail", ip=ip, reason=reason)
             # SAY WHICH. One sentence covered all three cases before, and for the commonest
             # one it was wrong in a costly way: a tunnelled broker expires agent tokens after
@@ -190,7 +204,7 @@ class AuthMiddleware(Middleware):
             # on its own — `rotate_token` authenticates with the token it would replace — so
             # the message has to name the person who can fix it and what they run.
             if reason == "expired":
-                raise ToolError(
+                raise _auth_error(
                     "unauthorized: your agent token has EXPIRED (it was valid; it timed "
                     "out). You cannot fix this yourself — rotate_token needs a working "
                     "token, so it will fail the same way. Ask your host to run "
@@ -200,12 +214,12 @@ class AuthMiddleware(Middleware):
                     "no session restart, and you keep your context."
                 )
             if reason == "revoked":
-                raise ToolError(
+                raise _auth_error(
                     "unauthorized: your agent token was REVOKED by the host. This is "
                     "deliberate, not a fault — ask them why, and for a fresh invite if you "
                     "should still be on this task."
                 )
-            raise ToolError(
+            raise _auth_error(
                 "unauthorized: this agent token is not recognised by this broker. Check "
                 "you are pointed at the right broker URL, and that the token was not "
                 "truncated when it was copied."

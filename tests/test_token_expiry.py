@@ -133,3 +133,60 @@ def test_the_expired_message_names_the_fix_and_who_runs_it():
     assert "no re-pair" in expired            # says what is NOT needed
     # And the old one-size-fits-all sentence must be gone.
     assert "invalid or revoked agent token" not in src
+
+
+# --------------------------------------------------------------------------- #
+# DELIVERY: the failure must reach the agent, not just the broker log
+# --------------------------------------------------------------------------- #
+def test_auth_failure_raises_mcperror_that_carries_the_message(conn, monkeypatch):
+    """A ToolError raised in `on_request` during the `initialize` handshake is flattened by
+    the transport to a bare '-32602 Invalid request parameters' — so an agent reconnecting
+    on an expired token saw a cryptic code and none of the sentence naming the fix. The
+    failure is raised as an McpError instead, whose `message` reaches the client on every
+    request type, handshake included."""
+    import asyncio
+
+    from mcp.shared.exceptions import McpError
+
+    from sys_buddy import middleware
+    from sys_buddy.config import Config, get_config, set_config
+
+    seed_task(conn, "signin", roles=("backend",))
+    seed_agent(conn, "signin", "backend", "al", "sbk_al")
+    conn.execute("UPDATE agents SET expires_at = ? WHERE task_id='signin'", (time.time() - 3600,))
+    conn.commit()
+
+    old = get_config()
+    set_config(Config(mode="remote", db_path=old.db_path))
+    try:
+        class _Req:
+            headers = {"authorization": "Bearer sbk_al"}
+
+            class client:
+                host = "9.9.9.9"
+
+        monkeypatch.setattr(middleware, "get_http_request", lambda: _Req())
+
+        async def _next(ctx):
+            return "should-not-reach"
+
+        with pytest.raises(McpError) as ei:
+            asyncio.run(middleware.AuthMiddleware().on_request(object(), _next))
+        msg = ei.value.error.message
+        assert "EXPIRED" in msg           # WHY it failed
+        assert "extend-tokens" in msg     # HOW to renew, and who runs it
+    finally:
+        set_config(old)
+
+
+def test_auth_uses_mcperror_not_toolerror(conn):
+    """Regression guard: the auth branch must NOT go back to ToolError, whose message the
+    handshake drops. Every raise on the auth-failure path is `_auth_error` (an McpError)."""
+    from pathlib import Path
+
+    from sys_buddy import middleware
+
+    src = Path(middleware.__file__).read_text(encoding="utf-8")
+    on_request = src.split("async def on_request")[1]
+    assert "raise ToolError" not in on_request   # the readiness gate keeps ToolError; auth does not
+    assert "_auth_error(" in on_request
