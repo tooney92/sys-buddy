@@ -10,6 +10,14 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.16.0](https://github.com/tooney92/sys-buddy/compare/v2.15.0...v2.16.0) (2026-08-18)
+
+
+### Added
+
+* host can reissue a guest's dashboard link, and expired-token errors reach the agent ([a8f0362](https://github.com/tooney92/sys-buddy/commit/a8f036258c2ddf78ff6bccf257bd111ec814416c))
+* host reissues guest links, and expired-token errors reach the agent ([#105](https://github.com/tooney92/sys-buddy/issues/105)) ([a8f0362](https://github.com/tooney92/sys-buddy/commit/a8f036258c2ddf78ff6bccf257bd111ec814416c))
+
 ## [2.15.0](https://github.com/tooney92/sys-buddy/compare/v2.14.0...v2.15.0) (2026-08-17)
 
 
