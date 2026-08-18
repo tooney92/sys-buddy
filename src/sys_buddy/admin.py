@@ -483,6 +483,68 @@ def set_dev_url(task: str, url: str | None) -> dict:
     return {"task": task, "previous": previous, "dev_url": url}
 
 
+def list_guests(task: str) -> list[dict]:
+    """The live guest seats on a task — ``[{seat, name}]`` — for a host picking one to
+    reissue a link for. Empty when the task has no guests."""
+    conn = connect()
+    try:
+        return [
+            {"seat": r["handle"], "name": r["name"]}
+            for r in conn.execute(
+                "SELECT handle, name FROM agents WHERE task_id=? AND role=? "
+                "AND revoked_at IS NULL ORDER BY id",
+                (task, seats.GUEST_ROLE),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def reissue_guest_link(task: str, who: str) -> dict:
+    """Mint a FRESH viewer link for an existing guest seat — same seat, a new token.
+
+    The raw token is stored only HASHED, so a lost guest link cannot be recovered; this
+    RE-ISSUES one instead. Crucially it reuses her existing seat (``viewers.agent_id`` →
+    the same ``agents`` row), so her acceptances, signatures and message history stay hers
+    — only the credential is new. ``who`` matches the guest by seat HANDLE or display NAME.
+
+    HOST action — the ``/host/*`` surface and the CLI reach it; no agent tool does. Returns
+    ``{task, seat, name, viewer_token}``; the caller builds the ``/ui?v=`` link, because only
+    the caller knows the public origin (the tunnel) the guest must reach.
+    """
+    who = (who or "").strip()
+    if not who:
+        raise ValueError("name the guest to reissue for (seat handle or display name)")
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        row = conn.execute(
+            "SELECT id, name, handle FROM agents WHERE task_id=? AND role=? "
+            "AND revoked_at IS NULL AND (handle=? OR name=?)",
+            (task, seats.GUEST_ROLE, who, who),
+        ).fetchone()
+        if row is None:
+            have = ", ".join(
+                f"{g['name']} (@{g['seat']})" for g in list_guests(task)
+            ) or "none"
+            raise ValueError(f"no live guest '{who}' on task '{task}'. Guests: {have}")
+        token = new_viewer_token()
+        conn.execute(
+            "INSERT INTO viewers (task_id, label, token_hash, created_at, agent_id) "
+            "VALUES (?,?,?,?,?)",
+            (task, row["name"], sha256_hex(token), time.time(), row["id"]),
+        )
+        _write_event(
+            conn, task, "token",
+            {"text": f"Reissued a dashboard link for guest {row['name']} (@{row['handle']})"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    audit.event("guest_link_reissued", task=task, role=row["handle"])
+    return {"task": task, "seat": row["handle"], "name": row["name"], "viewer_token": token}
+
+
 def get_dev_url(task: str) -> str | None:
     """Read-only: the task's local dev URL, or None."""
     conn = connect()

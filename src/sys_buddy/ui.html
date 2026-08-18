@@ -1045,6 +1045,11 @@ function headerHTML(){
       ((m||state.narrow)?'':'<span id="sb-refresh-text" style="font-size:12px;color:var(--text-2);white-space:nowrap">'+refreshText()+'</span>')+
     '</div>'+
     refGroup+
+    /* Host-only, and only on a task: reissue a guest's dashboard link when they lost theirs.
+       A guest/buddy viewer never sees it, and the endpoint refuses them anyway. */
+    ((state.viewer && state.viewer.mode==='host' && state.view==='task')
+      ? '<button data-guest-links="1" title="Guest links — reissue a guest’s dashboard link" style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;color:var(--text-2);flex:none">'+IC.link+'</button>'
+      : '')+
     '<button data-notif-toggle="1" title="'+(NOTIF.on?'Notifications on — click to mute':'Notify me of new activity')+'" style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid '+(NOTIF.on?'var(--accent)':'var(--border)')+';border-radius:9px;cursor:pointer;color:'+(NOTIF.on?'var(--accent)':'var(--text-2)')+';flex:none">'+(NOTIF.on?IC.bell:IC.bellOff)+'</button>'+
     '<button data-theme-toggle="1" title="Toggle theme" style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;cursor:pointer;color:var(--text-2);flex:none">'+(dark?IC.sun:IC.moon)+'</button>'+
   '</div>';
@@ -1591,6 +1596,63 @@ function guestShareFile(){
      });
    })
    .catch(function(e){ state.guestFileSending=false; state.guestFileError=(e&&e.message)||'Could not share that file.'; render(); });
+}
+
+/* ---------- HOST: reissue a guest's dashboard link ----------
+   The raw viewer token is stored only hashed, so a lost guest link cannot be read back — the
+   host regenerates one on demand instead (same seat, new token). Host-only: the button shows
+   only for a host viewer, and POST /host/guest-link 403s anyone else regardless. */
+function openGuestLinks(){ state.guestLinksOpen=true; render(); }
+function closeGuestLinks(){ state.guestLinksOpen=false; state.guestLinkErr=null; render(); }
+function reissueGuestLink(seat){
+  if(state.guestLinkBusy) return;
+  state.guestLinkBusy=seat; state.guestLinkErr=null; render();
+  fetch('/host/guest-link',{method:'POST',credentials:'same-origin',
+    headers:{'Content-Type':'application/json','Accept':'application/json'},
+    body:JSON.stringify({task:state.taskId, who:seat})})
+   .then(function(r){ return r.json().catch(function(){return {};}).then(function(j){
+     if(!r.ok) throw new Error(j.error||'Could not reissue that link.'); return j; }); })
+   .then(function(j){
+     state.guestLinkBusy=null;
+     state.guestLinkResult=state.guestLinkResult||{}; state.guestLinkResult[seat]=j.link;
+     // Copy straight to the clipboard so the host can paste it to the guest immediately.
+     if(navigator.clipboard && navigator.clipboard.writeText){
+       navigator.clipboard.writeText(j.link).then(function(){
+         state.guestLinkCopied=seat; render();
+         setTimeout(function(){ if(state.guestLinkCopied===seat){ state.guestLinkCopied=null; render(); } },2200);
+       }, function(){ render(); });
+     } else render();
+   })
+   .catch(function(e){ state.guestLinkBusy=null; state.guestLinkErr=(e&&e.message)||'Could not reissue that link.'; render(); });
+}
+function guestLinksModalHTML(){
+  if(!state.guestLinksOpen) return '';
+  if(!(state.viewer && state.viewer.mode==='host')) return '';
+  var rows=((state.detail && state.detail.roster && state.detail.roster.rows)||[]).filter(function(r){ return r.role==='guest'; });
+  var body;
+  if(!rows.length){
+    body='<div style="padding:18px;font-size:13px;color:var(--text-2)">No guests on this task yet. Add one in setup, then reissue links for them here.</div>';
+  } else {
+    body=rows.map(function(r){
+      var link=(state.guestLinkResult||{})[r.seat], busy=state.guestLinkBusy===r.seat, copied=state.guestLinkCopied===r.seat;
+      var linkRow = link ? '<div style="margin-top:9px;font-family:'+MONO+';font-size:11px;color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;word-break:break-all">'+esc(link)+'</div>' : '';
+      var label = busy ? 'Reissuing…' : (copied ? 'Copied ✓' : (link ? 'Copy again' : 'Copy link'));
+      return '<div style="padding:14px 18px;border-top:1px solid var(--border)">'+
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px">'+
+          '<div style="min-width:0"><div style="font-size:14px;font-weight:600;color:var(--text)">'+esc(r.name||r.seat)+'</div>'+
+          '<div style="font-size:11px;color:var(--text-3);font-family:'+MONO+'">@'+esc(r.seat)+'</div></div>'+
+          '<button data-hlink="'+esc(r.seat)+'" '+(busy?'disabled ':'')+'style="flex:none;padding:7px 14px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-weight:600;font-size:12.5px;cursor:'+(busy?'default':'pointer')+';opacity:'+(busy?'.6':'1')+'">'+label+'</button>'+
+        '</div>'+linkRow+'</div>';
+    }).join('');
+  }
+  var err = state.guestLinkErr ? '<div style="padding:10px 18px;font-size:12px;color:var(--st-stuck-fg)">'+esc(state.guestLinkErr)+'</div>' : '';
+  return '<div data-hclose-bg style="position:fixed;inset:0;background:rgba(0,0,0,.42);z-index:60;display:flex;align-items:flex-start;justify-content:center;padding:8vh 16px">'+
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);max-width:520px;width:100%;overflow:hidden">'+
+      '<div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;justify-content:space-between;gap:12px">'+
+        '<div><div style="font-weight:600;font-size:15px;color:var(--text)">Guest links</div>'+
+        '<div style="font-size:11.5px;color:var(--text-3);margin-top:2px;line-height:1.45">Reissue a fresh link for a guest — same seat, new token. It’s built for the address you’re on now, and copies to your clipboard.</div></div>'+
+        '<button data-hclose style="flex:none;width:28px;height:28px;border:none;background:var(--surface-2);border-radius:8px;cursor:pointer;color:var(--text-2);font-size:14px">✕</button>'+
+      '</div>'+err+body+'</div></div>';
 }
 
 /* ---------- thread legend (the old "Tips" items, rehomed) ----------
@@ -3046,7 +3108,7 @@ function debugTaskHTML(d){
      does — its ISSUES open in it (with no contract column; see `todoModalHTML`) — and it
      needed it even before issues existed, because the thread can carry a ⟨#N⟩ chip and a
      chip that opens nothing is worse than no chip. Both render '' when closed. */
-  '</div>'+todoModalHTML(d)+lightboxHTML();
+  '</div>'+todoModalHTML(d)+lightboxHTML()+guestLinksModalHTML();
 }
 
 /* ---------- shorthand cheatsheet ---------- */
@@ -3741,7 +3803,7 @@ function taskHTML(){
   /* the overlays go LAST, outside the page container — the right column is
      position:sticky, and a modal nested inside a sticky, transformed ancestor is no
      longer positioned against the viewport. Both render '' when closed. */
-  '</div>'+todoModalHTML(d)+lightboxHTML();
+  '</div>'+todoModalHTML(d)+lightboxHTML()+guestLinksModalHTML();
 }
 
 /* ---------- render ---------- */
@@ -3753,6 +3815,11 @@ function sig(){
     viewer:state.viewer, tasks:tasksLite, detail:state.detail,
     expanded:state.expanded, version:state.version, todoModal:state.todoModal,
     lightbox:state.lightbox, panel:state.panel, narrow:state.narrow, wf:state.wf,
+    /* the host guest-links modal is an overlay like todoModal/lightbox — without its state
+       here, opening it (or a reissue landing) changes nothing sig() sees and never repaints. */
+    guestLinksOpen:state.guestLinksOpen, guestLinkBusy:state.guestLinkBusy,
+    guestLinkResult:state.guestLinkResult, guestLinkCopied:state.guestLinkCopied,
+    guestLinkErr:state.guestLinkErr,
     /* only whether it has ARRIVED — the list itself is static for the life of the
        process, so hashing it every render would be pure work for a constant. */
     cli:state.cli?1:0,
@@ -3860,6 +3927,12 @@ function bind(){
   var sw=app.querySelector('[data-switcher]'); if(sw) sw.onclick=function(e){ e.stopPropagation(); state.switcherOpen=!state.switcherOpen; render(); };
   var tt=app.querySelector('[data-theme-toggle]'); if(tt) tt.onclick=toggleTheme;
   var nbt=app.querySelector('[data-notif-toggle]'); if(nbt) nbt.onclick=notifToggle;
+  /* Host guest-links: the navbar opener, the modal's close (button + backdrop), and each
+     guest's reissue button. Host-only UI; the endpoint is the real gate. */
+  var glo=app.querySelector('[data-guest-links]'); if(glo) glo.onclick=openGuestLinks;
+  var hcl=app.querySelector('[data-hclose]'); if(hcl) hcl.onclick=closeGuestLinks;
+  var hbg=app.querySelector('[data-hclose-bg]'); if(hbg) hbg.onclick=function(e){ if(e.target===hbg) closeGuestLinks(); };
+  app.querySelectorAll('[data-hlink]').forEach(function(el){ el.onclick=function(){ reissueGuestLink(el.getAttribute('data-hlink')); }; });
   var nt=app.querySelector('[data-newtask]'); if(nt) nt.onclick=function(){ try{ window.pywebview.api.new_task(); }catch(e){} };
   /* The GUEST message box (concierge mode). Wired here like everything else — the script
      is an IIFE, so `state`/`guestSend` are closures, not globals, and an inline on* would

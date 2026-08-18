@@ -13,6 +13,7 @@ browser message box, not an agent on ``/mcp``. Two properties carry this file:
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -431,3 +432,62 @@ def test_guest_message_to_someone_off_the_task_is_rejected(conn):
         _Req(token=g["viewer_token"],
              body={"body": "hi", "to": ["backend", "nobody-here"]})))
     assert r.status_code == 400   # resolve_addressee refuses an addressee not on the cast
+
+
+# --------------------------------------------------------------------------- #
+# HOST reissues a guest's dashboard link (/host/guest-link)
+# --------------------------------------------------------------------------- #
+def test_host_reissues_a_guest_link_same_seat(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    seed_viewer(conn, "host", "sbv_hosttok", task_id=None)   # the all-tasks HOST token
+    r = asyncio.run(_endpoint(dbfile, "/host/guest-link")(
+        _Req(token="sbv_hosttok", body={"task": task, "who": g["seat"]},
+             headers={"host": "abc.ngrok-free.dev", "x-forwarded-proto": "https"})))
+    assert r.status_code == 201
+    body = json.loads(r.body)
+    assert body["ok"] is True and body["seat"] == g["seat"]
+    # Link built for the origin the host is on, carrying a fresh viewer token.
+    assert body["link"].startswith("https://abc.ngrok-free.dev/ui?v=sbv_")
+    # The fresh token resolves as the SAME guest seat — her identity is preserved.
+    tok = body["link"].split("v=", 1)[1]
+    ident = guest._guest_identity(conn, resolve_viewer_token(conn, tok))
+    assert ident is not None and ident.role == g["seat"]
+
+
+def test_host_guest_link_accepts_display_name(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    seed_viewer(conn, "host", "sbv_hosttok", task_id=None)
+    r = asyncio.run(_endpoint(dbfile, "/host/guest-link")(
+        _Req(token="sbv_hosttok", body={"task": task, "who": "Ada"},
+             headers={"host": "abc.ngrok-free.dev"})))     # no x-forwarded-proto → https assumed
+    assert r.status_code == 201
+    assert json.loads(r.body)["link"].startswith("https://abc.ngrok-free.dev/ui?v=")
+
+
+def test_host_guest_link_forbidden_for_a_guest_viewer(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    # A guest's OWN (task-scoped) token is NOT the host token — it must be refused here.
+    r = asyncio.run(_endpoint(dbfile, "/host/guest-link")(
+        _Req(token=g["viewer_token"], body={"task": task, "who": g["seat"]})))
+    assert r.status_code == 403
+
+
+def test_host_guest_link_unknown_guest_is_400(conn):
+    dbfile = get_config().db_path
+    task, g, be, fe = _task_guest_party(conn)
+    seed_viewer(conn, "host", "sbv_hosttok", task_id=None)
+    r = asyncio.run(_endpoint(dbfile, "/host/guest-link")(
+        _Req(token="sbv_hosttok", body={"task": task, "who": "Nobody"})))
+    assert r.status_code == 400
+
+
+def test_reissue_preserves_seat_and_resolves(conn):
+    # The admin core: same agents row (agent_id), a brand-new working viewer token.
+    task, g, be, fe = _task_guest_party(conn)
+    res = admin.reissue_guest_link(task, g["seat"])
+    assert res["seat"] == g["seat"]
+    ident = guest._guest_identity(conn, resolve_viewer_token(conn, res["viewer_token"]))
+    assert ident is not None and ident.task_id == task and ident.role == g["seat"]
