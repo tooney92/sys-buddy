@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.17.0](https://github.com/tooney92/sys-buddy/compare/v2.16.0...v2.17.0) (2026-08-20)
+
+
+### Added
+
+* manage invites and tokens from the dashboard, and add join-screen troubleshooting ([#108](https://github.com/tooney92/sys-buddy/issues/108)) ([ff4b918](https://github.com/tooney92/sys-buddy/commit/ff4b918819f1ca04465bed9623d078834efd449b))
+
 ## [2.16.0](https://github.com/tooney92/sys-buddy/compare/v2.15.0...v2.16.0) (2026-08-18)
 
 
