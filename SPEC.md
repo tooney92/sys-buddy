@@ -321,7 +321,7 @@ An unshared ngrok URL is **not** a security control. Ngrok URLs are brute-force 
 HOST
   $ sys-buddy task create signin --roles backend,frontend
   $ sys-buddy invite --task signin --role frontend
-  → Invite: signin-J7fK2mQx   (expires 15m, single use)
+  → Invite: signin-J7fK2mQx   (expires 30m, single use)
   → Share URL + code with your buddy over Slack/Signal
 
 BUDDY

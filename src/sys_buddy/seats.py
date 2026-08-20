@@ -575,15 +575,18 @@ def roster(conn: sqlite3.Connection, task_id: str) -> list[dict]:
         if r["handle"]
     }
     # An invite that exists and has NOT been redeemed is the difference between "we
-    # never asked them" and "we asked and they haven't shown up".
-    invited = {
-        r["role"]
-        for r in conn.execute(
-            "SELECT role FROM invites WHERE task_id = ? AND used_at IS NULL "
-            "AND expires_at > ?",
-            (task_id, time.time()),
-        ).fetchall()
-    }
+    # never asked them" and "we asked and they haven't shown up". Carry its `expires_at`
+    # (absolute epoch) so a renderer can count the invite down live and flip it to
+    # "expired" on its own — the dashboard reads this without a refetch. A seat with more
+    # than one live invite (a reissue before the first lapsed) keeps the LATEST expiry,
+    # which is the one the redeemer will actually still be able to use.
+    invited: dict[str, float] = {}
+    for r in conn.execute(
+        "SELECT role, expires_at FROM invites WHERE task_id = ? AND used_at IS NULL "
+        "AND expires_at > ? ORDER BY expires_at",
+        (task_id, time.time()),
+    ).fetchall():
+        invited[r["role"]] = r["expires_at"]
     now = time.time()
     order = list(handles) + [h for h in agents if h not in handles]
     out: list[dict] = []
@@ -607,6 +610,10 @@ def roster(conn: sqlite3.Connection, task_id: str) -> list[dict]:
                 "listening": service.is_listening(a["listening_until"], now) if a else False,
                 "listening_since": a["listening_since"] if a else None,
                 "invite_pending": a is None and handle in invited,
+                # The live invite's absolute expiry (epoch seconds), only for a seat that
+                # actually has one outstanding — None otherwise, so a renderer shows a
+                # countdown for exactly the seats where one is meaningful.
+                "invite_expires_at": invited.get(handle) if a is None else None,
             }
         )
     return out

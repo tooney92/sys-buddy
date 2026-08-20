@@ -200,10 +200,19 @@ def test_the_page_fetches_the_list_instead_of_carrying_one():
 
 def test_the_page_hand_types_no_command_list():
     """A second copy of the CLI in ui.html is the failure mode, not a style problem. The
-    page may name ONE command in context (the host's drop line, the staging-url fix) —
-    what it must not do is enumerate them."""
+    page may name a command in context (the host's drop line, the staging-url fix), and it
+    carries ONE sanctioned worked-example set — ``CLI_EXAMPLES``, a single copy-pasteable
+    example per command, keyed by the catalog's own ``cmd.name`` so a renamed command loses
+    its example rather than drifting, and ``test_every_command_the_page_does_name_is_real``
+    still catches any example that names a command which no longer exists. What the page must
+    NOT do is enumerate the CLI a SECOND time, in prose OUTSIDE that map."""
     ui = _ui()
-    literals = set(re.findall(r"sys-buddy ([a-z][a-z-]*(?: [a-z][a-z-]*)?)", ui))
+    # Excise the sanctioned example map before counting: its whole job is to name every
+    # command once, so it is the one place a full enumeration is intended. The guard below
+    # then holds the REST of the page to the old "name at most a few in context" rule.
+    body = re.sub(r"var CLI_EXAMPLES=\{.*?\};", "", ui, count=1, flags=re.S)
+    assert body != ui, "CLI_EXAMPLES map not found — the excision regex needs updating"
+    literals = set(re.findall(r"sys-buddy ([a-z][a-z-]*(?: [a-z][a-z-]*)?)", body))
     known = {c["name"] for c in catalog()["commands"]}
     # Strip the ones that are prose about the product, not a command line.
     literals = {lit for lit in literals if lit.split(" ")[0] in {c.split(" ")[0] for c in known}}
