@@ -298,6 +298,27 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 .pw-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:9px;border-top:1px solid var(--border)}
 .pw-body .hint{margin:0}
 .pw-body ol{margin:2px 0 0;padding-left:20px;font-size:.84rem;color:var(--text-2);line-height:1.6}
+/* "Tools not showing?" — the per-card troubleshooting ladder. Collapsed by default so
+   it never competes with the connect step, styled off .pw so the two collapsibles read
+   as one family. Each rung is a real failure: a stale same-named entry shadowing the
+   working one, an unapproved project server, or a session that started before the config
+   was written (MCP loads at session start). */
+.ts{margin-top:8px;border:1px solid var(--border-strong);border-radius:11px;background:var(--surface)}
+.ts > summary{
+  cursor:pointer;list-style:none;padding:10px 14px;
+  font-size:.86rem;font-weight:600;color:var(--text);
+  display:flex;align-items:center;gap:9px;
+}
+.ts > summary::-webkit-details-marker{display:none}
+.ts > summary::before{content:"▸";color:var(--text-3);font-size:.8rem;transition:transform .15s ease}
+.ts[open] > summary::before{transform:rotate(90deg)}
+.ts-body{padding:2px 14px 13px;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border)}
+.ts-body ol{margin:2px 0 0;padding-left:20px;font-size:.84rem;color:var(--text-2);line-height:1.6}
+.ts-body li{margin:5px 0}
+.ts-body li strong{color:var(--text)}
+.ts-cmd{margin-top:5px}
+.ts-cmd .code{margin:0}
+.ts-cmd .btn.copy{margin-top:5px}
 .privacy{
   display:flex;align-items:flex-start;gap:9px;margin-top:6px;
   padding:11px 13px;border-radius:11px;font-size:.85rem;line-height:1.5;
@@ -439,6 +460,62 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
           <strong>sys-buddy</strong>. Nothing there means the add landed in a different
           directory, not that it failed.
         </div>
+
+        <!-- Troubleshooting ladder — the three faults that hide the tools, in the order
+             they bite. Rung 3 is the incident that prompted this: a dead same-named
+             `sys-buddy` in local scope (~/.claude.json) shadowing the working project
+             entry. The two diagnostic commands follow the alias, same as the command
+             above. -->
+        <details class="ts">
+          <summary>Tools not showing?</summary>
+          <div class="ts-body">
+            <p class="hint">MCP servers connect at session start, so work down this ladder — most of the time it's the first rung.</p>
+            <ol>
+              <li><strong>New session.</strong> A <code>claude</code> you already had open won't pick up a config written after it launched — open a fresh <code>claude</code> in this folder.</li>
+              <li><strong>Approved?</strong> A project <code>.mcp.json</code> server needs a one-time “allow this server?” yes. If it shows as <strong>“Pending approval”</strong>, it isn't approved yet — reopen <code>claude</code> and accept the prompt.</li>
+              <li><strong>Shadowed?</strong> List your servers — if <strong>sys-buddy</strong> points anywhere other than this broker's URL, an older same-named entry in a higher-precedence scope (usually local) is winning. Remove it, then reopen.
+                <div class="ts-cmd">
+                  <pre class="code" id="ts-cli-list">claude mcp list</pre>
+                  <button type="button" class="btn copy" data-copy="ts-cli-list">Copy command</button>
+                </div>
+                <div class="ts-cmd">
+                  <pre class="code" id="ts-cli-remove">claude mcp remove sys-buddy -s local</pre>
+                  <button type="button" class="btn copy" data-copy="ts-cli-remove">Copy command</button>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </details>
+
+        <!-- Wrong-seat gotcha — DISTINCT from "Tools not showing?": here the tools DO
+             load, but you connect as a different seat/token than intended. Earned by a
+             real VS Code incident: the opened workspace folder plus scope precedence
+             silently picked a higher-precedence same-named `sys-buddy` (a local entry in
+             ~/.claude.json) carrying a different token. VS Code is called out by name
+             because that is where it was reported. Same `claude mcp` diagnostics, read
+             for identity not presence. -->
+        <details class="ts">
+          <summary>Connected as the wrong seat?</summary>
+          <div class="ts-body">
+            <p class="hint">Tools loaded fine, but a prompt says you're one seat while every call lands on another — or messages hit a different task. A Claude Code client — terminal CLI <strong>and</strong> the VS Code extension alike — reads its MCP config from the <strong>folder it has open</strong> plus scope precedence, so a same-named <strong>sys-buddy</strong> in a higher-precedence scope (a local-scope entry in <code>~/.claude.json</code>), or just a different open workspace folder, can win with a different token — a different seat. This bites hardest in VS Code, where the opened folder silently decides which config applies.</p>
+            <ol>
+              <li><strong>Check what resolved.</strong> List your servers and confirm the <strong>sys-buddy</strong> line points at the broker URL and token you expect. If it resolves to a different entry, that's your wrong seat.
+                <div class="ts-cmd">
+                  <pre class="code" id="ws-cli-list">claude mcp list</pre>
+                  <button type="button" class="btn copy" data-copy="ws-cli-list">Copy command</button>
+                </div>
+              </li>
+              <li><strong>Open the right folder, remove the offender.</strong> Open the correct project folder, then drop the shadowing entry.
+                <div class="ts-cmd">
+                  <pre class="code" id="ws-cli-remove">claude mcp remove sys-buddy -s local</pre>
+                  <button type="button" class="btn copy" data-copy="ws-cli-remove">Copy command</button>
+                </div>
+              </li>
+              <li><strong>Give this seat a unique server name</strong> so two seats' tokens can't collide, and in VS Code <strong>reload the window</strong> (Command Palette → “Developer: Reload Window”) or restart the session — MCP loads at startup.</li>
+            </ol>
+            <p class="hint"><strong>One seat = one token = one config; every client reads config by the folder it opened.</strong></p>
+          </div>
+        </details>
       </div>
 
       <!-- ---------- Claude · desktop app ----------
@@ -476,6 +553,35 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
           own broker.</span></div>
         <div class="note warn"><span class="ic" aria-hidden="true">⚠</span><span>This file holds
           your access token. Don't commit it.</span></div>
+
+        <!-- Troubleshooting ladder. Desktop has NO `claude` CLI on its PATH, so this
+             block never tells the user to run one — diagnosis is the app's own UI. -->
+        <details class="ts">
+          <summary>Tools not showing?</summary>
+          <div class="ts-body">
+            <ol>
+              <li><strong>Start a NEW conversation.</strong> The tools load when a conversation begins, so a chat already open won't see them. This is <em>not</em> a restart, and Desktop has no in-chat reconnect command — a new conversation is what reloads the config. The first time it loads you're asked to <strong>approve</strong> the server; that prompt is normal, not a failure.</li>
+              <li><strong>Right file.</strong> <code>.mcp.json</code> must be at the <strong>root of the project you have open</strong> in Desktop — not your home folder.</li>
+              <li><strong>Shadowed?</strong> If an older, same-named <strong>sys-buddy</strong> server is already in your config it can shadow this one — check your server list and remove the stale entry.</li>
+            </ol>
+          </div>
+        </details>
+
+        <!-- Wrong-seat gotcha — DISTINCT from "Tools not showing?". Desktop has NO
+             `claude` CLI, so this NEVER tells the user to run one — diagnosis is the
+             app's own MCP server list. Earned by the same VS Code wrong-seat incident:
+             a same-named entry resolving with a different token. -->
+        <details class="ts">
+          <summary>Connected as the wrong seat?</summary>
+          <div class="ts-body">
+            <p class="hint">Tools loaded fine, but a prompt says you're one seat while every call lands on another — or messages hit a different task. That means an older or other same-named <strong>sys-buddy</strong> entry is resolving instead of this one, connecting you with a different token — a different seat.</p>
+            <ol>
+              <li><strong>Check your server list.</strong> In Desktop's MCP server list, confirm which <strong>sys-buddy</strong> is active and remove the stale one.</li>
+              <li><strong>Give this one a unique name</strong> so two seats' tokens can't collide, then <strong>start a new conversation</strong> to reload.</li>
+            </ol>
+            <p class="hint"><strong>One seat = one token = one config; every client reads config by the folder it opened.</strong></p>
+          </div>
+        </details>
       </div>
 
       <!-- ---------- Cursor ----------
@@ -512,6 +618,33 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
           <code>~/.cursor/mcp.json</code>, it had no project open and wrote Cursor's
           <strong>global</strong> config instead — that works, but it registers this task for
           every project you open.</span></div>
+
+        <!-- Troubleshooting ladder. Cursor idiom: reload rather than a fresh terminal,
+             and the shadow is usually its own GLOBAL ~/.cursor file. -->
+        <details class="ts">
+          <summary>Tools not showing?</summary>
+          <div class="ts-body">
+            <ol>
+              <li><strong>Reload.</strong> Servers load at start — reload the Cursor window, or restart MCP servers in <strong>Settings → MCP</strong>.</li>
+              <li><strong>Enabled?</strong> A new server needs a one-time <strong>enable/trust</strong> in Settings → MCP; until then it won't load.</li>
+              <li><strong>Shadowed?</strong> An older same-named <strong>sys-buddy</strong> entry — for instance a global one in <code>~/.cursor/mcp.json</code> — can shadow this project's. Check your MCP server list and remove the stale one.</li>
+            </ol>
+          </div>
+        </details>
+
+        <!-- Wrong-seat gotcha — DISTINCT from "Tools not showing?". Cursor idiom: its
+             own global ~/.cursor/mcp.json, no `claude mcp` CLI. -->
+        <details class="ts">
+          <summary>Connected as the wrong seat?</summary>
+          <div class="ts-body">
+            <p class="hint">Tools loaded fine, but a prompt says you're one seat while every call lands on another — or messages hit a different task. That means an older or other same-named <strong>sys-buddy</strong> entry — often the global one in <code>~/.cursor/mcp.json</code> — is resolving instead of this project's, connecting you with a different token — a different seat.</p>
+            <ol>
+              <li><strong>Check your MCP server list</strong> and remove the stale <strong>sys-buddy</strong>, keeping the one that points at this broker.</li>
+              <li><strong>Give this one a unique name</strong> so two seats' tokens can't collide, then <strong>reload the Cursor window</strong>.</li>
+            </ol>
+            <p class="hint"><strong>One seat = one token = one config; every client reads config by the folder it opened.</strong></p>
+          </div>
+        </details>
       </div>
 
       <!-- ---------- Gemini CLI ----------
@@ -535,6 +668,33 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
         <div class="note info"><span class="ic" aria-hidden="true">ⓘ</span><span><code>gemini mcp
           list</code> prints <code>(sse)</code> next to the entry even though this is HTTP.
           Ignore the label — it's cosmetic, and the connection is fine.</span></div>
+
+        <!-- Troubleshooting ladder. Gemini idiom: its own CLI, so the shadow diagnostic
+             is `gemini mcp list` / `gemini mcp remove`, never `claude mcp`. -->
+        <details class="ts">
+          <summary>Tools not showing?</summary>
+          <div class="ts-body">
+            <ol>
+              <li><strong>Restart.</strong> Servers load at start — restart Gemini so it re-reads its config.</li>
+              <li><strong>Approved?</strong> Approve or trust the server if you're prompted the first time it connects.</li>
+              <li><strong>Shadowed?</strong> An older same-named <strong>sys-buddy</strong> entry can shadow this one. Check <code>gemini mcp list</code>; remove a stale entry with <code>gemini mcp remove sys-buddy</code>.</li>
+            </ol>
+          </div>
+        </details>
+
+        <!-- Wrong-seat gotcha — DISTINCT from "Tools not showing?". Gemini idiom:
+             `gemini mcp`, never `claude mcp`. -->
+        <details class="ts">
+          <summary>Connected as the wrong seat?</summary>
+          <div class="ts-body">
+            <p class="hint">Tools loaded fine, but a prompt says you're one seat while every call lands on another — or messages hit a different task. That means an older or other same-named <strong>sys-buddy</strong> entry is resolving instead of this one, connecting you with a different token — a different seat.</p>
+            <ol>
+              <li><strong>Check the resolved entry.</strong> Run <code>gemini mcp list</code> and confirm the <strong>sys-buddy</strong> line is this broker; remove the stale one with <code>gemini mcp remove sys-buddy</code>.</li>
+              <li><strong>Give this one a unique name</strong> so two seats' tokens can't collide, then <strong>restart Gemini</strong>.</li>
+            </ol>
+            <p class="hint"><strong>One seat = one token = one config; every client reads config by the folder it opened.</strong></p>
+          </div>
+        </details>
       </div>
 
       <!-- ---------- Other ----------
@@ -578,6 +738,34 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
         </div>
 
         <p class="hint">Got it working? Tell us which client and we'll add it to the list.</p>
+
+        <!-- Troubleshooting ladder — the applicable subset in generic terms, for a
+             client we cannot name. -->
+        <details class="ts">
+          <summary>Tools not showing?</summary>
+          <div class="ts-body">
+            <p class="hint">Whatever client you're on, the same three things catch most cases.</p>
+            <ol>
+              <li><strong>New session.</strong> MCP servers connect when the session or chat starts — reload or restart your client so it picks up the config you just added.</li>
+              <li><strong>Approved?</strong> Many clients need a one-time <strong>approval/trust</strong> before a new server loads.</li>
+              <li><strong>Shadowed?</strong> An older, same-named <strong>sys-buddy</strong> entry can shadow this one — check your client's MCP server list and remove the stale entry.</li>
+            </ol>
+          </div>
+        </details>
+
+        <!-- Wrong-seat gotcha — DISTINCT from "Tools not showing?". Generic terms for a
+             client we cannot name; no client-specific CLI. -->
+        <details class="ts">
+          <summary>Connected as the wrong seat?</summary>
+          <div class="ts-body">
+            <p class="hint">Tools loaded fine, but a prompt says you're one seat while every call lands on another — or messages hit a different task. That means an older or other same-named <strong>sys-buddy</strong> entry is resolving instead of this one, connecting you with a different token — a different seat.</p>
+            <ol>
+              <li><strong>Check your client's MCP server list</strong> and remove the stale <strong>sys-buddy</strong>, keeping the one that points at this broker.</li>
+              <li><strong>Give this one a unique name</strong> so two seats' tokens can't collide, then <strong>reload your client</strong>.</li>
+            </ol>
+            <p class="hint"><strong>One seat = one token = one config; every client reads config by the folder it opened.</strong></p>
+          </div>
+        </details>
       </div>
 
       <!-- Optional, collapsed by default; shown to every role (any role may consume). -->
@@ -1019,6 +1207,10 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
        (onboarding.assert_cli_binary), because this string is pasted into a shell. */
     var CLI_RE = /^[A-Za-z0-9._+-]{1,64}$/;
     var claudeCliCmd = field('claude-cli', 'command');
+    // The two troubleshooting diagnostics also lead with the binary, so they follow the
+    // alias the same line-anchored way the setup command does.
+    var tsListCmd   = field('claude-cli', 'diag_list_command')   || 'claude mcp list';
+    var tsRemoveCmd = field('claude-cli', 'diag_remove_command') || 'claude mcp remove sys-buddy -s local';
     var aliasOn   = document.getElementById('alias-on');
     var aliasRow  = document.getElementById('alias-row');
     var aliasName = document.getElementById('alias-name');
@@ -1042,6 +1234,16 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
                                              : claudeCliCmd.replace(/^claude\b/gm, use));
       var v = document.getElementById('verify-cmd');
       if (v) v.textContent = use + ' mcp list';
+      // Both the "Tools not showing?" and the "wrong seat?" diagnostics reuse the same
+      // two commands, so paint both pairs from the same alias-substituted strings.
+      var listCmd   = use === 'claude' ? tsListCmd   : tsListCmd.replace(/^claude\b/gm, use);
+      var removeCmd = use === 'claude' ? tsRemoveCmd : tsRemoveCmd.replace(/^claude\b/gm, use);
+      ['ts-cli-list', 'ws-cli-list'].forEach(function(id){
+        var el = document.getElementById(id); if (el) el.textContent = listCmd;
+      });
+      ['ts-cli-remove', 'ws-cli-remove'].forEach(function(id){
+        var el = document.getElementById(id); if (el) el.textContent = removeCmd;
+      });
     }
     aliasOn.onchange = function(){
       aliasRow.hidden = !aliasOn.checked;
@@ -1051,6 +1253,10 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     aliasName.oninput = paintCmd;
 
     put('cmd-claude-cli', claudeCliCmd);
+    put('ts-cli-list', tsListCmd);
+    put('ts-cli-remove', tsRemoveCmd);
+    put('ws-cli-list', tsListCmd);
+    put('ws-cli-remove', tsRemoveCmd);
     put('cmd-claude-app', field('claude-desktop', 'paste'));
     put('cmd-cursor',     field('cursor', 'paste'));
     put('cmd-gemini',     field('gemini-cli', 'command'));

@@ -182,6 +182,15 @@ def test_task_detail_missing_task_is_none(conn):
     assert api._task_detail(conn, "ghost") is None
 
 
+def test_task_detail_exposes_the_task_id_verbatim(conn):
+    """The dashboard's copyable id chip needs the REAL id (what every CLI command keys on),
+    not just the human title — a host who pasted `--task "<title>"` got `unknown task`. The
+    id must ride the detail payload verbatim so the chip can surface and copy it."""
+    seed_task(conn, "lightdey-technician-feature-f2c4", roles=("backend",))
+    detail = api._task_detail(conn, "lightdey-technician-feature-f2c4")
+    assert detail["id"] == "lightdey-technician-feature-f2c4"
+
+
 def test_empty_task_has_sensible_empty_states(conn):
     seed_task(conn, "signin")
     detail = api._task_detail(conn, "signin")

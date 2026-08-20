@@ -32,9 +32,11 @@ from .identity import new_invite_code, new_viewer_token, sha256_hex
 # releases. A single tuple the surfaces read from is what makes that unrepeatable.
 MODES = ("contract", "debug", "engagement")
 
-# Single-use invites live 15 minutes (SPEC §9). Short enough that a code lingering
-# in a Slack scrollback is dead by the time anyone scans for it.
-INVITE_TTL_SECONDS = 15 * 60
+# Single-use invites live 30 minutes (SPEC §9). Short enough that a code lingering
+# in a Slack scrollback is dead by the time anyone scans for it, but long enough that a
+# host who mints one, then goes to explain the join to a teammate on another channel,
+# comes back to a code that still works rather than one that lapsed mid-handoff.
+INVITE_TTL_SECONDS = 30 * 60
 
 # Cap on the slug part of an auto-derived id — keeps ids short enough to read and
 # type while still recognisably echoing the title.

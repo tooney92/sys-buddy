@@ -300,6 +300,7 @@ var IC={
   bell:svg(16,'<path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/>'),
   bellOff:svg(16,'<path d="M8.7 3.5A6 6 0 0118 8c0 4 1 6 2 7M6 8c0 7-3 9-3 9h13"/><path d="M13.7 21a2 2 0 01-3.4 0"/><path d="M2 2l20 20"/>'),
   link:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7l1.5-1.5"/></svg>',
+  copy:'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>',
   next:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg>',
   check:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6L9 17l-5-5"/></svg>',
   /* `>_` — the Commands reference. A prompt caret, NOT a run button: the panel it opens
@@ -858,19 +859,48 @@ function castChips(t, size, fs){
    real live signal, and the UNJOINED strings are the whole reason the roster lists seats
    nobody has filled. */
 function rosterPresence(row){
-  if(!row.joined) return row.invite_pending ? 'invite sent' : 'not invited yet';
+  if(!row.joined) return row.invite_pending ? 'invite sent' : 'not invited';
   if(row.listening) return listenLabel(row);
   return '';
+}
+/* ---------- live invite countdown ----------
+   An outstanding invite (unredeemed, unexpired) carries its absolute expiry epoch
+   (`invite_expires_at`, seconds) so the board can count the 30-minute window down
+   WITHOUT a refetch — the seconds are derived from the wall clock each tick. It flips to
+   a muted "expired" on its own the instant the window lapses, which is the honest signal:
+   the code is dead and the peer needs a fresh one. Kept as plain text (not a chip) so it
+   sits quietly in the roster's Presence column. */
+function inviteRemainSecs(epoch){
+  if(!epoch && epoch!==0) return null;
+  return Math.round(Number(epoch) - Date.now()/1000);
+}
+function inviteCountdownLabel(epoch){
+  var s=inviteRemainSecs(epoch);
+  if(s===null) return 'invite sent';
+  if(s<=0) return 'invite expired';
+  var m=Math.floor(s/60), ss=s%60;
+  return 'expires in '+m+':'+(ss<10?'0':'')+ss;
+}
+/* A live-ticking countdown element. `data-invite-countdown` carries the epoch so
+   patchVolatile() (which already runs every second) can re-label it in place — no full
+   re-render, so it never replays confetti or steals focus. */
+function inviteCountdownSpan(epoch){
+  var expired = (inviteRemainSecs(epoch)||0) <= 0;
+  return '<span data-invite-countdown="'+esc(String(epoch))+'" style="font-size:11.5px;'+
+    'white-space:nowrap;color:'+(expired?'var(--st-stuck-fg)':'var(--text-3)')+'">'+
+    esc(inviteCountdownLabel(epoch))+'</span>';
 }
 function rosterPanel(d){
   var r=d&&d.roster;
   if(!r||!r.rows||!r.rows.length) return '';   /* older API: render nothing, as before */
+  var isHost = !!(state.viewer && state.viewer.mode==='host');
   var allIn = r.joined===r.seats;
   var head='<div style="display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--border)">'+
     '<span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">Cast</span>'+
     '<div style="flex:1"></div>'+
+    hostExtendControlsHTML(isHost)+
     '<span style="font-size:11.5px;font-weight:700;padding:2px 9px;border-radius:999px;background:'+(allIn?'var(--st-verified-bg)':'var(--st-open-bg)')+';color:'+(allIn?'var(--st-verified-fg)':'var(--st-open-fg)')+'">'+
-      r.joined+' of '+r.seats+' joined</span></div>';
+      r.joined+' of '+r.seats+' joined</span></div>'+hostExtendResultHTML(isHost);
   var cols='grid-template-columns:minmax(104px,auto) minmax(72px,auto) minmax(72px,1fr) auto auto';
   var hdr='<div style="display:grid;'+cols+';gap:12px;padding:7px 16px;font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);border-bottom:1px solid var(--border)">'+
     '<span>Seat</span><span>Role</span><span>Who</span><span>Pre-flight</span><span>Presence</span></div>';
@@ -888,8 +918,42 @@ function rosterPanel(d){
     var seat='<span style="font-family:'+MONO+';font-size:11.5px;font-weight:600;color:'+(row.joined?'var(--text)':'var(--text-3)')+';border:1px solid var(--border-strong);border-radius:999px;padding:1px 8px;white-space:nowrap">@'+esc(row.address||row.seat)+'</span>';
     var pre = cfg ? '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:'+cfg.bg+';color:'+cfg.fg+';white-space:nowrap">'+cfg.lbl+'</span>'
                   : '<span style="font-size:11.5px;color:var(--text-3)">—</span>';
-    var pres = row.joined && row.listening ? listenPill(row)
-      : '<span style="font-size:11.5px;color:var(--text-3);white-space:nowrap">'+esc(rosterPresence(row))+'</span>';
+    /* A pending invite minted in THIS session keeps its join URL and expiry in memory (the
+       modal showed the link once; the raw code is never stored server-side). Fold that into
+       the row so it flips to the pending look IMMEDIATELY on mint — minting emits no SSE
+       event, so the server roster would otherwise not reflect it until the next fallback
+       poll. `inviteRemainSecs > 0` drops an in-memory invite that has since lapsed, using
+       the same wall-clock check the countdown itself ticks on. */
+    var inviteAddr = row.address||row.seat;
+    var inviteMem = (isHost && !row.joined && row.role!=='guest') ? (state.inviteResult||{})[inviteAddr] : null;
+    var memLive = inviteMem && inviteMem.expires_at && (inviteRemainSecs(inviteMem.expires_at) > 0);
+    /* The seat's live invite expiry — the server's if it has one, else the in-session mint's. */
+    var inviteExpiresAt = row.invite_expires_at || (memLive ? inviteMem.expires_at : null);
+    /* Presence, one plain state per row:
+         joined+listening → the listening pill (who is parked on a read right now);
+         invited, unredeemed, unexpired → the live "expires in MM:SS" countdown, which
+           flips to a muted "invite expired" on its own the instant the window lapses;
+         everything else → the plain word ("not invited", or a joined agent's blank). */
+    var invitePending = !row.joined && (row.invite_pending || memLive) && inviteExpiresAt;
+    var presInner = row.joined && row.listening ? listenPill(row)
+      : (invitePending
+          ? inviteCountdownSpan(inviteExpiresAt)
+          : '<span style="font-size:11.5px;color:var(--text-3);white-space:nowrap">'+esc(rosterPresence(row))+'</span>');
+    /* HOST only, and only for an UNFILLED non-guest seat: mint an invite for this one seat
+       straight from the roster — a NEVER-invited seat gets [Invite], a seat with a pending
+       invite gets [Reissue]. Guests keep their own door (the navbar guest-links modal), so
+       they are excluded here. POST /host/invite 403s anyone but the host anyway, and the
+       button never renders for a non-host, so the board stays read-only for everyone else. */
+    var inviteBtn = (isHost && !row.joined && row.role!=='guest')
+      ? '<button data-invite-seat="'+esc(inviteAddr)+'" title="'+(invitePending?'Reissue a single-use invite for this seat':'Mint a single-use invite link for this seat')+'" style="flex:none;padding:3px 9px;border:1px solid var(--border-strong);border-radius:999px;background:var(--surface-2);color:var(--text-2);font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">'+(invitePending?'Reissue':'Invite')+'</button>'
+      : '';
+    /* A one-click Copy of the seat's join URL, offered only when the minted link is still in
+       memory AND still live — a pending invite from a PRIOR session (or a lapsed one) has no
+       link to copy, so Copy is simply absent there and Reissue mints a fresh one. */
+    var copyBtn = (memLive && inviteMem.join_url)
+      ? '<button data-copy-invite="'+esc(inviteAddr)+'" title="Copy this seat’s join URL" style="flex:none;display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border:1px solid var(--border-strong);border-radius:999px;background:var(--surface-2);color:var(--text-2);font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">'+(state.inviteCopied===inviteAddr+':row'?('<span style="color:var(--st-verified-fg)">Copied ✓</span>'):('<span style="display:flex">'+IC.copy+'</span>Copy'))+'</button>'
+      : '';
+    var pres = '<span style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">'+presInner+inviteBtn+copyBtn+'</span>';
     return '<div style="display:grid;'+cols+';gap:12px;padding:8px 16px;align-items:center;border-bottom:1px solid var(--border);opacity:'+(row.joined?'1':'.72')+'">'+
       seat+
       '<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2);white-space:nowrap">'+
@@ -924,6 +988,30 @@ function readinessFailPanel(d){
     '<summary style="list-style:none;cursor:pointer;padding:11px 16px;font-size:12.5px;font-weight:700;color:var(--st-stuck-fg);display:flex;align-items:center;gap:8px;user-select:none">'+
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>Pre-flight failures — coach & retry</summary>'+
     '<div style="padding:4px 16px 14px"><p style="margin:0 0 12px;font-size:12px;color:var(--text-2)">Share the hint with the agent, then it re-runs <span style="font-family:'+MONO+'">submit_readiness</span>.</p>'+blocks+'</div></details>';
+}
+
+/* ---------- copyable task id chip ----------
+   The task header shows the human TITLE, but every CLI command keys on the task ID
+   (`sys-buddy … <id>`). A host who typed `--task "<title>"` got `unknown task`, because
+   the board only ever surfaced the title. This mono chip prints the real id (already in
+   the detail payload as `d.id`) and copies it on click — the same clipboard affordance
+   the invite modal uses. Shown even when the id and title read the same, because the id
+   is still the exact string that must be pasted. `state.taskIdCopied` toggles the ✓ and
+   is registered in sig() like the other transient copy flags. */
+function copyTaskId(id){
+  if(!id || !(navigator.clipboard && navigator.clipboard.writeText)) return;
+  navigator.clipboard.writeText(id).then(function(){
+    state.taskIdCopied=id; render();
+    setTimeout(function(){ if(state.taskIdCopied===id){ state.taskIdCopied=null; render(); } },2000);
+  }, function(){});
+}
+function taskIdChipHTML(id){
+  if(!id) return '';
+  var copied=state.taskIdCopied===id;
+  return '<button data-copy-taskid="'+esc(id)+'" title="Copy the task id — the value every command needs (sys-buddy … '+esc(id)+')" '+
+    'style="display:inline-flex;align-items:center;gap:6px;max-width:340px;padding:3px 9px;border:1px solid var(--border-strong);border-radius:999px;background:var(--surface-2);color:var(--text-2);cursor:pointer;flex:none">'+
+    '<span style="font-family:'+MONO+';font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(id)+'</span>'+
+    '<span style="flex:none;display:flex;color:'+(copied?'var(--st-verified-fg)':'var(--text-3)')+'">'+(copied?IC.check:IC.copy)+'</span></button>';
 }
 
 /* ---------- header ---------- */
@@ -1653,6 +1741,148 @@ function guestLinksModalHTML(){
         '<div style="font-size:11.5px;color:var(--text-3);margin-top:2px;line-height:1.45">Reissue a fresh link for a guest — same seat, new token. It’s built for the address you’re on now, and copies to your clipboard.</div></div>'+
         '<button data-hclose style="flex:none;width:28px;height:28px;border:none;background:var(--surface-2);border-radius:8px;cursor:pointer;color:var(--text-2);font-size:14px">✕</button>'+
       '</div>'+err+body+'</div></div>';
+}
+
+/* ---------- HOST: mint / reissue an invite for one seat ----------
+   The board equivalent of the host's invite command. A host who sees an unfilled seat (or a
+   buddy whose 30-minute invite lapsed) mints a fresh one here instead of dropping to a
+   terminal. POST /host/invite returns BOTH link forms — the join URL a human opens and
+   the sb1_ link an agent redeems — built for the origin the host is on (the tunnel), plus
+   the absolute expiry so the modal counts the 30-minute window down live. Host-only: the
+   button shows only for a host viewer, and the endpoint 403s anyone else regardless. */
+function openInvite(seat){
+  state.inviteSeat=seat; state.inviteErr=null;
+  render();
+  if(!(state.inviteResult||{})[seat]) reissueInvite(seat);
+}
+function closeInvite(){ state.inviteSeat=null; state.inviteErr=null; render(); }
+function reissueInvite(seat){
+  if(state.inviteBusy) return;
+  state.inviteBusy=seat; state.inviteErr=null; render();
+  fetch('/host/invite',{method:'POST',credentials:'same-origin',
+    headers:{'Content-Type':'application/json','Accept':'application/json'},
+    body:JSON.stringify({task:state.taskId, role:seat})})
+   .then(function(r){ return r.json().catch(function(){return {};}).then(function(j){
+     if(!r.ok) throw new Error(j.error||'Could not mint that invite.'); return j; }); })
+   .then(function(j){
+     state.inviteBusy=null;
+     state.inviteResult=state.inviteResult||{};
+     state.inviteResult[seat]={join_url:j.join_url, invite_link:j.invite_link, expires_at:j.expires_at};
+     /* Copy the join URL straight to the clipboard so the host can paste it immediately. */
+     if(navigator.clipboard && navigator.clipboard.writeText){
+       navigator.clipboard.writeText(j.join_url).then(function(){
+         state.inviteCopied=seat; render();
+         setTimeout(function(){ if(state.inviteCopied===seat){ state.inviteCopied=null; render(); } },2200);
+       }, function(){ render(); });
+     } else render();
+   })
+   .catch(function(e){ state.inviteBusy=null; state.inviteErr=(e&&e.message)||'Could not mint that invite.'; render(); });
+}
+/* Copy a pending seat's join URL straight from its roster row — no modal. Only wired for a
+   seat whose link is still in memory from a mint THIS session (see the row's copyBtn), so
+   `res.join_url` is always present when this runs. `inviteCopied` is keyed `<seat>:row` so
+   the row's ✓ and the modal's per-link ✓ never collide. */
+function copyRowInvite(seat){
+  var res=(state.inviteResult||{})[seat]; if(!res||!res.join_url) return;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(res.join_url).then(function(){
+      state.inviteCopied=seat+':row'; render();
+      setTimeout(function(){ if(state.inviteCopied===seat+':row'){ state.inviteCopied=null; render(); } },2200);
+    }, function(){});
+  }
+}
+function copyInvite(which){
+  var res=(state.inviteResult||{})[state.inviteSeat]; if(!res) return;
+  var val = which==='link' ? res.invite_link : res.join_url;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(val).then(function(){
+      state.inviteCopied=state.inviteSeat+':'+which; render();
+      setTimeout(function(){ if(state.inviteCopied===state.inviteSeat+':'+which){ state.inviteCopied=null; render(); } },2200);
+    }, function(){});
+  }
+}
+function inviteModalHTML(){
+  if(!state.inviteSeat) return '';
+  if(!(state.viewer && state.viewer.mode==='host')) return '';
+  var seat=state.inviteSeat, res=(state.inviteResult||{})[seat], busy=state.inviteBusy===seat;
+  var linkBlock=function(label,val,which){
+    var copied=state.inviteCopied===seat+':'+which;
+    return '<div style="margin-top:12px">'+
+      '<div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin-bottom:5px">'+esc(label)+'</div>'+
+      '<div style="display:flex;align-items:stretch;gap:8px">'+
+        '<code style="flex:1;min-width:0;font-family:'+MONO+';font-size:11px;color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;word-break:break-all;user-select:all">'+esc(val)+'</code>'+
+        '<button data-invite-copy="'+esc(which)+'" style="flex:none;padding:0 12px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface);color:var(--text-2);font-size:12px;font-weight:600;cursor:pointer">'+(copied?'Copied ✓':'Copy')+'</button>'+
+      '</div></div>';
+  };
+  var body;
+  if(busy && !res){
+    body='<div style="padding:18px;font-size:13px;color:var(--text-2)">Minting an invite…</div>';
+  } else if(res){
+    body='<div style="padding:14px 18px">'+
+      linkBlock('Join URL — the human opens this in a browser', res.join_url, 'join')+
+      linkBlock('Invite link — the agent redeems this to join', res.invite_link, 'link')+
+      '<div style="margin-top:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">'+
+        '<span style="font-size:11px;color:var(--text-3)">Single-use, </span>'+inviteCountdownSpan(res.expires_at)+
+        '<div style="flex:1"></div>'+
+        '<button data-invite-again="'+esc(seat)+'" '+(busy?'disabled ':'')+'style="padding:6px 12px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface);color:var(--text-2);font-size:12px;font-weight:600;cursor:'+(busy?'default':'pointer')+';opacity:'+(busy?'.6':'1')+'">'+(busy?'Reissuing…':'Reissue')+'</button>'+
+      '</div></div>';
+  } else {
+    body='<div style="padding:18px;font-size:13px;color:var(--text-2)">Preparing…</div>';
+  }
+  var err = state.inviteErr ? '<div style="padding:10px 18px;font-size:12px;color:var(--st-stuck-fg)">'+esc(state.inviteErr)+'</div>' : '';
+  return '<div data-invite-bg style="position:fixed;inset:0;background:rgba(0,0,0,.42);z-index:60;display:flex;align-items:flex-start;justify-content:center;padding:8vh 16px">'+
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);max-width:560px;width:100%;overflow:hidden">'+
+      '<div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;justify-content:space-between;gap:12px">'+
+        '<div><div style="font-weight:600;font-size:15px;color:var(--text)">Invite <span style="font-family:'+MONO+';color:var(--text-2)">@'+esc(seat)+'</span></div>'+
+        '<div style="font-size:11.5px;color:var(--text-3);margin-top:2px;line-height:1.45">A fresh single-use invite for this seat, built for the address you’re on now. The join URL is copied to your clipboard.</div></div>'+
+        '<button data-invite-close style="flex:none;width:28px;height:28px;border:none;background:var(--surface-2);border-radius:8px;cursor:pointer;color:var(--text-2);font-size:14px">✕</button>'+
+      '</div>'+err+body+'</div></div>';
+}
+
+/* ---------- HOST: extend agent tokens ----------
+   The recovery move for the 24h-TTL trap: an agent whose token lapsed can't rotate or
+   even escalate. Two one-click choices — +24h, or lift the expiry entirely — POST to
+   /host/extend-tokens, which touches every LIVE seat (a revoked one stays revoked). The
+   result reports exactly who moved, inline under the Cast header. Host-only; the endpoint
+   403s anyone else. */
+function hostExtendControlsHTML(isHost){
+  if(!isHost) return '';
+  var busy=!!state.extendBusy;
+  var btn=function(label,kind){
+    return '<button data-extend="'+kind+'" '+(busy?'disabled ':'')+'title="Push every live agent token on this task '+(kind==='never'?'to no expiry':'back by 24 hours')+'" style="flex:none;padding:5px 11px;border:1px solid var(--border-strong);border-radius:9px;background:var(--surface);color:var(--text-2);font-size:11.5px;font-weight:600;cursor:'+(busy?'default':'pointer')+';opacity:'+(busy?'.6':'1')+';white-space:nowrap">'+esc(label)+'</button>';
+  };
+  return btn(state.extendBusy==='24'?'Extending…':'Extend +24h','24')+btn(state.extendBusy==='never'?'Extending…':'Never expire','never');
+}
+function hostExtendResultHTML(isHost){
+  if(!isHost) return '';
+  if(state.extendErr) return '<div style="padding:8px 16px;font-size:12px;color:var(--st-stuck-fg);border-bottom:1px solid var(--border)">'+esc(state.extendErr)+'</div>';
+  var m=state.extendResult; if(!m) return '';
+  return '<div style="padding:8px 16px;font-size:12px;color:var(--st-verified-fg);background:var(--st-verified-bg);border-bottom:1px solid var(--border)">'+esc(m)+'</div>';
+}
+function extendTokens(kind){
+  if(state.extendBusy) return;
+  state.extendBusy=kind; state.extendErr=null; state.extendResult=null; render();
+  var body = kind==='never' ? {task:state.taskId, never:true} : {task:state.taskId, hours:24};
+  fetch('/host/extend-tokens',{method:'POST',credentials:'same-origin',
+    headers:{'Content-Type':'application/json','Accept':'application/json'},
+    body:JSON.stringify(body)})
+   .then(function(r){ return r.json().catch(function(){return {};}).then(function(j){
+     if(!r.ok) throw new Error(j.error||'Could not extend tokens.'); return j; }); })
+   .then(function(j){
+     state.extendBusy=null;
+     var n=j.count||0, who=(j.touched||[]).map(function(t){ return '@'+(t.seat||t.name); }).join(', ');
+     var when = j.never ? 'no expiry' : '+'+(j.hours||24)+'h';
+     state.extendResult = n
+       ? ('Extended '+n+' seat'+(n===1?'':'s')+' to '+when+(who?' — '+who:''))
+       : 'No live agent tokens to extend on this task yet.';
+     var shown=state.extendResult;
+     render();
+     /* Clear the banner after a few seconds — a confirmation, not standing state. Guard on
+        the SAME result we showed, so a newer banner from a second extend is not cleared
+        early by this timer. */
+     setTimeout(function(){ if(state.extendResult===shown && !state.extendBusy){ state.extendResult=null; render(); } },6000);
+   })
+   .catch(function(e){ state.extendBusy=null; state.extendErr=(e&&e.message)||'Could not extend tokens.'; render(); });
 }
 
 /* ---------- thread legend (the old "Tips" items, rehomed) ----------
@@ -3088,6 +3318,7 @@ function debugTaskHTML(d){
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px">'+
       '<button data-home="1" style="display:inline-flex;align-items:center;gap:6px;padding:6px 11px;background:var(--surface);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;color:var(--text-2)">'+IC.back+'Tasks</button>'+
       '<h1 style="font-size:20px;font-weight:700;margin:0;color:var(--text);letter-spacing:-.02em">'+esc(d.title)+'</h1>'+
+      taskIdChipHTML(d.id)+
       '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
     '</div>'+
     statusHeader+
@@ -3108,7 +3339,7 @@ function debugTaskHTML(d){
      does — its ISSUES open in it (with no contract column; see `todoModalHTML`) — and it
      needed it even before issues existed, because the thread can carry a ⟨#N⟩ chip and a
      chip that opens nothing is worse than no chip. Both render '' when closed. */
-  '</div>'+todoModalHTML(d)+lightboxHTML()+guestLinksModalHTML();
+  '</div>'+todoModalHTML(d)+lightboxHTML()+guestLinksModalHTML()+inviteModalHTML();
 }
 
 /* ---------- shorthand cheatsheet ---------- */
@@ -3510,6 +3741,48 @@ function workflowsPanelBody(d){
    Sits ABOVE Broker tools deliberately. The two sections a human acts on are the two at
    the top; the long-form tool list is what the AGENT calls and belongs last. Burying the
    CLI under it would reproduce the exact failure this section exists to fix. */
+/* AUTHORED copy-pasteable examples, layered on top of the abstract signatures that come
+   off `/api/cli`. These are NOT a second copy of the signatures (those still generate from
+   cli.py so they can't drift); they are one coherent worked scenario so a dev sees exactly
+   what to type instead of `<TASK>`. Keyed by command name (`cmd.name`, e.g. `task create`).
+   A command with no entry simply renders its signature with no example — nothing breaks.
+   The story: a task `checkout-api` with roles `backend-1` / `mobile`, a guest `Sam`, a
+   viewer labelled `laptop`, and a GENERIC tunnel placeholder (never a real broker URL). */
+var CLI_EXAMPLES={
+  'init':'sys-buddy init',
+  'local':'sys-buddy local --port 8787',
+  'serve':'sys-buddy serve --public-url https://your-broker.ngrok-free.dev',
+  'task create':'sys-buddy task create checkout-api --roles backend-1,mobile --title "Checkout API"',
+  'task add-seat':'sys-buddy task add-seat checkout-api --role mobile',
+  'task add-guest':'sys-buddy task add-guest checkout-api --name Sam --public-url https://your-broker.ngrok-free.dev',
+  'task guest-link':'sys-buddy task guest-link checkout-api Sam --public-url https://your-broker.ngrok-free.dev',
+  'task extend-tokens':'sys-buddy task extend-tokens checkout-api --hours 48',
+  'task roster':'sys-buddy task roster checkout-api',
+  'task staging-url':'sys-buddy task staging-url checkout-api https://staging.example.com --todo 1',
+  'task dev-url':'sys-buddy task dev-url checkout-api http://localhost:3000',
+  'tasks':'sys-buddy tasks',
+  'todo list':'sys-buddy todo list checkout-api',
+  'todo drop':'sys-buddy todo drop checkout-api 1 --reason "folded into #2"',
+  'todo drop-party':'sys-buddy todo drop-party checkout-api 1 --seat mobile --reason "reassigned"',
+  'invite':'sys-buddy invite --task checkout-api --role mobile --public-url https://your-broker.ngrok-free.dev',
+  'host-viewer':'sys-buddy host-viewer --label laptop',
+  'join':'sys-buddy join https://your-broker.ngrok-free.dev/pair ABC123 --name Sam',
+  'revoke-agent':'sys-buddy revoke-agent mobile --task checkout-api',
+  'revoke-viewer':'sys-buddy revoke-viewer laptop',
+  'close':'sys-buddy close checkout-api'
+};
+/* The example line: a subtle "example" eyebrow beside a mono chip carrying the literal
+   command. `user-select:all` makes a single click select the whole line for copying, and
+   `word-break:break-all` keeps a long line inside the panel instead of widening it. */
+function cliExampleHTML(name){
+  var ex=CLI_EXAMPLES[name];
+  if(!ex) return '';
+  return '<div style="display:flex;align-items:baseline;gap:8px;margin-top:5px">'+
+    '<span style="flex:none;font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)">example</span>'+
+    '<code style="min-width:0;font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text);background:var(--surface-2);border:1px solid var(--border-strong);border-radius:6px;padding:2px 7px;line-height:1.55;word-break:break-all;user-select:all">'+esc(ex)+'</code>'+
+  '</div>';
+}
+
 function hostCliHTML(){
   var c=state.cli;
   if(!c) return '<div style="font-size:12px;color:var(--text-3)">Loading…</div>';
@@ -3535,7 +3808,7 @@ function hostCliHTML(){
     rows+='<div style="padding:4px 0 5px">'+
       '<div style="font-family:'+MONO+';font-size:11px;font-weight:600;color:var(--text);word-break:break-word;line-height:1.5">'+esc(cmd.usage)+'</div>'+
       (cmd.help?'<div style="font-size:12px;color:var(--text-2);line-height:1.45;margin-top:1px">'+esc(cmd.help)+'</div>':'')+
-      args+'</div>';
+      args+cliExampleHTML(cmd.name)+'</div>';
   });
   var globals=(c.global_options||[]).filter(function(a){ return a.help; }).map(function(a){
     return '<div style="display:flex;gap:8px;align-items:baseline;padding:1px 0"><span style="flex:none;min-width:104px;font-family:'+MONO+';font-size:10.5px;font-weight:600;color:var(--text-2)">'+esc(a.name)+'</span>'+
@@ -3568,8 +3841,12 @@ function panelHTML(){
     ? 'What you type to <strong>your own</strong> agent. Reference only — this dashboard reads, it never acts.'
     : 'How work moves through sys-buddy. The broker enforces; nothing here advances on its own.';
   var body = cmd ? commandsPanelBody(state.detail) : workflowsPanelBody(state.detail);
-  return '<div data-panel-backdrop="1" style="position:fixed;inset:0;z-index:9990;background:rgba(20,15,10,.34)"></div>'+
-    '<aside role="dialog" aria-modal="false" aria-label="'+esc(title)+'" style="position:fixed;top:'+HEADER_H+'px;right:0;bottom:0;width:min(452px,94vw);max-width:100vw;z-index:9991;background:var(--bg);border-left:1px solid var(--border);box-shadow:-10px 0 34px rgba(20,15,10,.18);display:flex;flex-direction:column">'+
+  /* A centered modal, not a side drawer — the backdrop IS the centering container, so a
+     click that lands on it (never on the dialog inside) dismisses. Same modal language as
+     the todo modal above: rounded card, deep shadow, a max-height with the body scrolling
+     inside so wide content never pushes the page into a horizontal scroll. */
+  return '<div data-panel-backdrop="1" style="position:fixed;inset:0;z-index:9990;background:rgba(20,15,10,.6);display:flex;align-items:center;justify-content:center;padding:24px">'+
+    '<aside role="dialog" aria-modal="false" aria-label="'+esc(title)+'" style="width:min(760px,92vw);max-height:86vh;z-index:9991;background:var(--bg);border:1px solid var(--border);border-radius:18px;box-shadow:0 28px 70px -20px rgba(0,0,0,.7);display:flex;flex-direction:column;overflow:hidden">'+
       '<div style="flex:none;padding:15px 18px 13px;background:var(--surface);border-bottom:1px solid var(--border)">'+
         '<div style="display:flex;align-items:center;gap:10px">'+
           '<span style="display:flex;color:var(--accent);flex:none">'+(cmd?IC.term:IC.flow)+'</span>'+
@@ -3578,8 +3855,8 @@ function panelHTML(){
         '</div>'+
         '<p style="margin:7px 0 0;font-size:11.5px;color:var(--text-2);line-height:1.55">'+sub+'</p>'+
       '</div>'+
-      '<div style="flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;padding:16px 18px 42px">'+body+'</div>'+
-    '</aside>';
+      '<div style="flex:1;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden;padding:16px 18px 24px">'+body+'</div>'+
+    '</aside></div>';
 }
 
 /* ---------- readiness pre-flight (compact, collapsed-by-default) ---------- */
@@ -3782,6 +4059,7 @@ function taskHTML(){
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px">'+
       '<button data-home="1" style="display:inline-flex;align-items:center;gap:6px;padding:6px 11px;background:var(--surface);border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;color:var(--text-2)">'+IC.back+'Tasks</button>'+
       '<h1 style="font-size:20px;font-weight:700;margin:0;color:var(--text);letter-spacing:-.02em">'+esc(d.title)+'</h1>'+
+      taskIdChipHTML(d.id)+
       '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:'+chip.bg+';color:'+chip.fg+'"><span style="width:6px;height:6px;border-radius:50%;background:'+chip.dot+'"></span>'+esc(chip.label)+'</span>'+
       '<div style="flex:1"></div>'+eventBtn+'</div>'+
     /* ENGAGEMENT MODE sits directly under the stepper, above everything the team uses:
@@ -3803,7 +4081,7 @@ function taskHTML(){
   /* the overlays go LAST, outside the page container — the right column is
      position:sticky, and a modal nested inside a sticky, transformed ancestor is no
      longer positioned against the viewport. Both render '' when closed. */
-  '</div>'+todoModalHTML(d)+lightboxHTML()+guestLinksModalHTML();
+  '</div>'+todoModalHTML(d)+lightboxHTML()+guestLinksModalHTML()+inviteModalHTML();
 }
 
 /* ---------- render ---------- */
@@ -3820,6 +4098,17 @@ function sig(){
     guestLinksOpen:state.guestLinksOpen, guestLinkBusy:state.guestLinkBusy,
     guestLinkResult:state.guestLinkResult, guestLinkCopied:state.guestLinkCopied,
     guestLinkErr:state.guestLinkErr,
+    /* the host invite modal + the extend-tokens controls are overlays/actions like the
+       guest-links modal — without their state here, opening the modal, a mint landing, or
+       an extend result would change nothing sig() sees and never repaint. The live invite
+       countdowns tick via patchVolatile (no re-render), so the epoch itself is not hashed. */
+    inviteSeat:state.inviteSeat, inviteBusy:state.inviteBusy, inviteResult:state.inviteResult,
+    inviteCopied:state.inviteCopied, inviteErr:state.inviteErr,
+    /* the header task-id chip's transient "copied ✓" — a render-visible toggle, so it is
+       hashed here (the live invite countdowns are the only copy/action state deliberately
+       kept OUT of sig(), because they tick via patchVolatile). */
+    taskIdCopied:state.taskIdCopied,
+    extendBusy:state.extendBusy, extendResult:state.extendResult, extendErr:state.extendErr,
     /* only whether it has ARRIVED — the list itself is static for the life of the
        process, so hashing it every render would be pure work for a constant. */
     cli:state.cli?1:0,
@@ -3913,6 +4202,14 @@ function patchVolatile(){
     var el=document.querySelector('[data-last="'+cssEsc(t.id)+'"]');
     if(el) el.textContent=t.last||'';
   });
+  /* Tick every live invite countdown in place — derived from the wall clock, so it counts
+     down and flips to a muted "expired" on its own without any refetch or re-render. */
+  document.querySelectorAll('[data-invite-countdown]').forEach(function(el){
+    var epoch=parseFloat(el.getAttribute('data-invite-countdown'));
+    var expired=(inviteRemainSecs(epoch)||0)<=0;
+    el.textContent=inviteCountdownLabel(epoch);
+    el.style.color = expired ? 'var(--st-stuck-fg)' : 'var(--text-3)';
+  });
 }
 function cssEsc(s){ return String(s).replace(/["\\]/g,'\\$&'); }
 
@@ -3929,10 +4226,21 @@ function bind(){
   var nbt=app.querySelector('[data-notif-toggle]'); if(nbt) nbt.onclick=notifToggle;
   /* Host guest-links: the navbar opener, the modal's close (button + backdrop), and each
      guest's reissue button. Host-only UI; the endpoint is the real gate. */
+  /* Copyable task-id chip in the task header (host and buddy alike — it is READ-only). */
+  app.querySelectorAll('[data-copy-taskid]').forEach(function(el){ el.onclick=function(){ copyTaskId(el.getAttribute('data-copy-taskid')); }; });
   var glo=app.querySelector('[data-guest-links]'); if(glo) glo.onclick=openGuestLinks;
   var hcl=app.querySelector('[data-hclose]'); if(hcl) hcl.onclick=closeGuestLinks;
   var hbg=app.querySelector('[data-hclose-bg]'); if(hbg) hbg.onclick=function(e){ if(e.target===hbg) closeGuestLinks(); };
   app.querySelectorAll('[data-hlink]').forEach(function(el){ el.onclick=function(){ reissueGuestLink(el.getAttribute('data-hlink')); }; });
+  /* HOST invite: per-seat button on the roster, the modal's close/backdrop/copy/reissue. */
+  app.querySelectorAll('[data-invite-seat]').forEach(function(el){ el.onclick=function(){ openInvite(el.getAttribute('data-invite-seat')); }; });
+  app.querySelectorAll('[data-copy-invite]').forEach(function(el){ el.onclick=function(){ copyRowInvite(el.getAttribute('data-copy-invite')); }; });
+  var icl=app.querySelector('[data-invite-close]'); if(icl) icl.onclick=closeInvite;
+  var ibg=app.querySelector('[data-invite-bg]'); if(ibg) ibg.onclick=function(e){ if(e.target===ibg) closeInvite(); };
+  app.querySelectorAll('[data-invite-copy]').forEach(function(el){ el.onclick=function(){ copyInvite(el.getAttribute('data-invite-copy')); }; });
+  var iag=app.querySelector('[data-invite-again]'); if(iag) iag.onclick=function(){ reissueInvite(iag.getAttribute('data-invite-again')); };
+  /* HOST extend-tokens: the two Cast-header buttons. */
+  app.querySelectorAll('[data-extend]').forEach(function(el){ el.onclick=function(){ extendTokens(el.getAttribute('data-extend')); }; });
   var nt=app.querySelector('[data-newtask]'); if(nt) nt.onclick=function(){ try{ window.pywebview.api.new_task(); }catch(e){} };
   /* The GUEST message box (concierge mode). Wired here like everything else — the script
      is an IIFE, so `state`/`guestSend` are closures, not globals, and an inline on* would
@@ -3998,7 +4306,7 @@ function bind(){
     render();
   }; });
   app.querySelectorAll('[data-panel-close]').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); state.panel=null; render(); }; });
-  var pbd=app.querySelector('[data-panel-backdrop]'); if(pbd) pbd.onclick=function(){ state.panel=null; render(); };
+  var pbd=app.querySelector('[data-panel-backdrop]'); if(pbd) pbd.onclick=function(e){ if(e.target===pbd){ state.panel=null; render(); } };
   /* Workflows panel disclosure. Sections and nested entries toggle independently — an
      accordion that shut its siblings would hide the thing you were comparing against. */
   app.querySelectorAll('[data-wf-sec]').forEach(function(el){ el.onclick=function(){
@@ -4054,7 +4362,9 @@ function bind(){
    layer. */
 document.addEventListener('keydown', function(e){
   if(e.key!=='Escape') return;
-  if(state.lightbox!=null){ state.lightbox=null; render(); }
+  if(state.inviteSeat!=null){ closeInvite(); }
+  else if(state.guestLinksOpen){ closeGuestLinks(); }
+  else if(state.lightbox!=null){ state.lightbox=null; render(); }
   else if(state.todoModal!=null){ state.todoModal=null; render(); }
   else if(state.panel){ state.panel=null; render(); }
 });

@@ -481,6 +481,158 @@ def test_host_seat_carries_the_clients_too(conn):
 
 
 # --------------------------------------------------------------------------- #
+# "Tools not showing?" — the per-card troubleshooting ladder
+#
+# EARNED BY A REAL FAILURE: a buddy joined a remote broker and the sys-buddy tools never
+# appeared. Three faults, in the order they bite — a session that started before the
+# config was written (MCP loads at session start), an unapproved project server, and a
+# stale SAME-NAMED entry in a higher-precedence scope silently shadowing the working one.
+# Every card must walk a user down the applicable subset.
+# --------------------------------------------------------------------------- #
+def _troubleshoot(client_id: str) -> dict:
+    steps = _by_id(client_id)["steps"]
+    matches = [s for s in steps if s["title"] == onboarding.TROUBLESHOOT_TITLE]
+    assert len(matches) == 1, f"{client_id}: expected exactly one troubleshoot step"
+    return matches[0]
+
+
+def _troubleshoot_text(client_id: str) -> str:
+    s = _troubleshoot(client_id)
+    return (s["title"] + " " + s["body"]).lower()
+
+
+def test_every_client_has_a_tools_not_showing_step():
+    """A user who wired the config correctly and STILL sees no tools needs the ladder on
+    whichever card they're on — so every card carries one, verbatim titled."""
+    for c in _clients():
+        assert onboarding.TROUBLESHOOT_TITLE == "Tools not showing?"
+        _troubleshoot(c["id"])  # raises if missing or duplicated
+
+
+@pytest.mark.parametrize("client_id", list(onboarding.CLIENT_IDS))
+def test_every_troubleshoot_step_covers_session_approval_and_shadow(client_id):
+    """The three faults, in every client's own idiom: a fresh session (MCP loads at
+    session start), a one-time approval, and an older same-named entry shadowing this
+    one. Whichever card a user lands on must name all three."""
+    text = _troubleshoot_text(client_id)
+    assert re.search(r"session|conversation|reload|restart", text), client_id
+    assert re.search(r"approv|allow|trust|enable|pending", text), client_id
+    assert "shadow" in text and "same-named" in text, client_id
+
+
+def test_claude_cli_troubleshoot_carries_the_diagnostic_commands():
+    """The two commands that resolved the original incident: `claude mcp list` reveals a
+    shadow, `claude mcp remove sys-buddy -s local` kills the stale local-scope entry.
+    They ride the registry's `copy` affordance so the page renders copy buttons."""
+    step = _troubleshoot("claude-cli")
+    c = _by_id("claude-cli")
+    assert "claude mcp list" in step["body"]
+    assert "claude mcp remove sys-buddy -s local" in step["body"]
+    # The copy fields the step names must resolve to real, non-empty payloads.
+    assert step["copy"] == ["diag_list_command", "diag_remove_command"]
+    assert c["diag_list_command"] == "claude mcp list"
+    assert c["diag_remove_command"] == "claude mcp remove sys-buddy -s local"
+
+
+def test_claude_desktop_troubleshoot_never_says_run_the_claude_cli():
+    """The `claude` binary is NOT on the desktop app's PATH — telling a desktop user to
+    run `claude mcp ...` sends them down a dead end. Its ladder diagnoses through the
+    app's own UI instead."""
+    step = _troubleshoot("claude-desktop")
+    assert "claude mcp" not in step["body"].lower()
+    # And the whole desktop card stays clean of it, not just this step.
+    assert "claude mcp" not in json.dumps(_by_id("claude-desktop")).lower()
+
+
+def test_gemini_troubleshoot_uses_gemini_cli_not_claude():
+    """Each client's shadow diagnostic is in its OWN idiom. Gemini's is `gemini mcp`."""
+    step = _troubleshoot("gemini-cli")
+    assert "gemini mcp" in step["body"]
+    assert "claude mcp" not in step["body"].lower()
+
+
+def test_cursor_troubleshoot_names_the_global_file_that_shadows():
+    """Cursor's shadow is usually its own GLOBAL ~/.cursor/mcp.json winning over the
+    project file — naming it is what makes the rung actionable."""
+    assert "~/.cursor/mcp.json" in _troubleshoot("cursor")["body"]
+
+
+# --------------------------------------------------------------------------- #
+# "Connected as the wrong seat?" — the SECOND troubleshooting step per card
+#
+# DISTINCT from "Tools not showing?": here the tools DO load and the client connects,
+# but it authenticates as a DIFFERENT seat/token than intended — because a client resolves
+# its MCP config from the FOLDER it has open plus scope precedence, so a same-named
+# higher-precedence `sys-buddy` (or a different open workspace) wins with a different
+# token. Earned by a real VS Code incident. Every card must carry it, in its own idiom.
+# --------------------------------------------------------------------------- #
+def _wrong_seat(client_id: str) -> dict:
+    steps = _by_id(client_id)["steps"]
+    matches = [s for s in steps if s["title"] == onboarding.WRONG_SEAT_TITLE]
+    assert len(matches) == 1, f"{client_id}: expected exactly one wrong-seat step"
+    return matches[0]
+
+
+def test_every_client_has_a_wrong_seat_step():
+    """A user who connected fine but landed on the wrong seat needs this on whichever
+    card they're on — so every card carries one, verbatim titled and distinct from the
+    "Tools not showing?" ladder."""
+    for c in _clients():
+        assert onboarding.WRONG_SEAT_TITLE == "Connected as the wrong seat?"
+        step = _wrong_seat(c["id"])  # raises if missing or duplicated
+        assert step["title"] != onboarding.TROUBLESHOOT_TITLE
+
+
+@pytest.mark.parametrize("client_id", list(onboarding.CLIENT_IDS))
+def test_every_wrong_seat_step_conveys_root_cause_and_remedy(client_id):
+    """Whichever card a user lands on, the wrong-seat gotcha must convey the root cause
+    (a same-named entry / different token resolving to a different seat) and the remedy
+    (remove the stale entry, give this one a unique name)."""
+    step = _wrong_seat(client_id)
+    text = (step["title"] + " " + step["body"]).lower()
+    assert "wrong seat" in text, client_id
+    assert "same-named" in text, client_id
+    assert "different token" in text, client_id
+    assert "unique name" in text, client_id
+    # The unifying one-liner, stated once per card.
+    assert "one seat = one token = one config" in text, client_id
+
+
+def test_claude_cli_wrong_seat_names_vs_code_and_the_list_diagnostic():
+    """Reported in VS Code, so the CLI card calls VS Code out by name, hands over the
+    `claude mcp list` diagnostic to confirm which entry resolved, and points at a reload
+    (MCP loads at startup)."""
+    step = _wrong_seat("claude-cli")
+    body = step["body"]
+    low = body.lower()
+    assert "claude mcp list" in body
+    assert "vs code" in low
+    assert "reload" in low
+    # It reuses the same copy-paste diagnostics as the shadow rung.
+    assert step["copy"] == ["diag_list_command", "diag_remove_command"]
+
+
+def test_claude_desktop_wrong_seat_never_says_run_the_claude_cli():
+    """Desktop has no `claude` binary on PATH, so its wrong-seat guidance diagnoses
+    through the app's own server list — never a `claude mcp` command."""
+    step = _wrong_seat("claude-desktop")
+    assert "claude mcp" not in step["body"].lower()
+    assert step["copy"] == []
+
+
+def test_gemini_wrong_seat_uses_gemini_cli_not_claude():
+    """Gemini's diagnostic idiom is `gemini mcp`, never `claude mcp`."""
+    step = _wrong_seat("gemini-cli")
+    assert "gemini mcp" in step["body"]
+    assert "claude mcp" not in step["body"].lower()
+
+
+def test_cursor_wrong_seat_names_the_global_file():
+    """Cursor's wrong-seat shadow is usually its own GLOBAL ~/.cursor/mcp.json."""
+    assert "~/.cursor/mcp.json" in _wrong_seat("cursor")["body"]
+
+
+# --------------------------------------------------------------------------- #
 # the old Claude-specific names still work (gui.py and cli.py call them)
 # --------------------------------------------------------------------------- #
 def test_legacy_claude_helpers_agree_with_the_registry():

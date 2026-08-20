@@ -1080,6 +1080,42 @@ GUARD_SHOW = "Then show me the resulting file so I can confirm nothing was lost.
 
 _TOKEN_WARNING = "This file holds your access token. Don't commit it."
 
+# TROUBLESHOOTING — the "Tools not showing?" step under every connect card.
+# EARNED BY A REAL FAILURE: a buddy joined a remote broker and the sys-buddy tools
+# never appeared, even though the config file looked correct. The block below walks a
+# user down the exact ladder that diagnosed it, in the order the three faults bite:
+#   1. NEW SESSION. MCP servers connect at SESSION START, so a session that was already
+#      open when the config was written never picks it up — it takes a fresh session/chat.
+#   2. APPROVED? A project-scoped server (`.mcp.json` / `.cursor/mcp.json`) needs a
+#      one-time "allow this server?" yes. Unapproved it does not load and shows as
+#      "Pending approval".
+#   3. SHADOWED? A stale, SAME-NAMED entry in a HIGHER-PRECEDENCE scope wins silently.
+#      The one that started this: a dead `sys-buddy` in local scope (`~/.claude.json`)
+#      pointing at a dead `127.0.0.1:8787` shadowed the working project `.mcp.json` —
+#      ConnectionRefused, no tools. `claude mcp list` reveals it; `claude mcp remove
+#      sys-buddy -s local` kills it. Tailored per client because the idiom differs
+#      (Cursor's global file, Gemini's own CLI) — and Claude Desktop is pointedly NOT
+#      told to run any `claude mcp` command, because that binary is not on the desktop
+#      app's PATH (same reason the paste flow exists at all).
+TROUBLESHOOT_TITLE = "Tools not showing?"
+
+# WRONG SEAT — the SECOND troubleshooting step under every connect card, distinct from
+# "Tools not showing?". Here the tools DO load and the client connects fine — but it
+# authenticates as a DIFFERENT seat than intended: the prompt says "you are backend-1"
+# yet every call is attributed to `frontend`, or messages land on the wrong task.
+# EARNED BY A REAL FAILURE: a buddy running VS Code was connected, tools present, but
+# attributed to the wrong seat — because a Claude Code client resolves its MCP config
+# from the FOLDER it has open plus scope precedence, and a higher-precedence same-named
+# `sys-buddy` (a local-scope entry in `~/.claude.json`) was winning with a DIFFERENT
+# token. It bites hardest in VS Code, where the opened workspace folder silently decides
+# which config applies. The fix is the same shape as the shadow rung above but aimed at
+# identity, not presence: confirm `sys-buddy` resolves to the URL/token you expect, open
+# the RIGHT folder, remove the offending entry, and give this seat's server a UNIQUE name
+# so two seats' tokens can't collide. One seat = one token = one config; every client
+# reads config by the folder it opened. Same per-client idiom rule as above — Desktop is
+# never told to run `claude mcp`, Gemini uses `gemini mcp`, Cursor names its global file.
+WRONG_SEAT_TITLE = "Connected as the wrong seat?"
+
 
 # --- per-client renderers ---------------------------------------------------
 # One function per client, each owning its own literals.
@@ -1259,6 +1295,14 @@ def _claude_cli_client(mcp_url: str, token: str, name: str) -> dict:
         # (new tunnel URL and/or new token) work instead of colliding.
         "argv": [claude_remove_command(name), claude_add_command(mcp_url, token, name)],
         "command": claude_setup_command(mcp_url, token, name),
+        # The two diagnostics the "Tools not showing?" ladder hands over as copy-paste
+        # commands. Built from the binary/name so an alias and a custom server name reach
+        # them, and both LEAD with the binary so the join page's `/^claude\b/gm` alias
+        # substitution rewrites them the same way it rewrites `command`.
+        "diag_list_command": display_command([DEFAULT_CLI, "mcp", "list"]),
+        "diag_remove_command": display_command(
+            [DEFAULT_CLI, "mcp", "remove", name, "-s", "local"]
+        ),
         "steps": [
             {
                 "title": "Run this in your terminal",
@@ -1267,6 +1311,56 @@ def _claude_cli_client(mcp_url: str, token: str, name: str) -> dict:
                 "copy": ["command"],
             },
             {"title": "Verify", "body": _VERIFY, "copy": []},
+            # The failure ladder — see TROUBLESHOOT_TITLE. Full three rungs here because
+            # the CLI is where all three are diagnosable, and the last two carry the
+            # exact copy-paste commands that resolved the original incident.
+            {
+                "title": TROUBLESHOOT_TITLE,
+                "body": (
+                    "MCP servers connect at session start, so work down this ladder — "
+                    "most of the time it's the first rung.\n"
+                    "1. NEW SESSION. A `claude` you already had open won't pick up a "
+                    "config written after it launched — open a fresh `claude` in this "
+                    "folder.\n"
+                    "2. APPROVED? A project `.mcp.json` server needs a one-time \"allow "
+                    "this server?\" yes. If it shows as \"Pending approval\", it isn't "
+                    "approved yet — reopen `claude` and accept the prompt.\n"
+                    "3. SHADOWED? Run `claude mcp list`. If sys-buddy points anywhere "
+                    "other than this broker's URL, an older same-named entry in a "
+                    "higher-precedence scope (usually local) is winning — remove it with "
+                    "`claude mcp remove sys-buddy -s local`, then reopen."
+                ),
+                "copy": ["diag_list_command", "diag_remove_command"],
+            },
+            # The wrong-seat gotcha — see WRONG_SEAT_TITLE. This is where it was
+            # REPORTED (VS Code), so call VS Code out by name; the diagnosis is the same
+            # `claude mcp list` the shadow rung uses, but read for identity not presence.
+            {
+                "title": WRONG_SEAT_TITLE,
+                "body": (
+                    "Tools loaded but you're acting as the wrong seat — a prompt says "
+                    "you're one seat yet calls land on another, or messages hit a "
+                    "different task. A Claude Code client — terminal CLI AND the VS Code "
+                    "extension alike — reads its MCP config from the FOLDER it has open "
+                    "plus scope precedence, so a same-named sys-buddy in a "
+                    "higher-precedence scope (a local-scope entry in `~/.claude.json`), "
+                    "or just a different open workspace folder, can win with a different "
+                    "token — a different seat. This bites hardest in VS Code, where the "
+                    "opened folder silently decides which config applies.\n"
+                    "1. Run `claude mcp list` and check the sys-buddy line points at the "
+                    "broker URL and token you expect. If it resolves to a different "
+                    "entry, that's your wrong seat.\n"
+                    "2. Open the correct project folder, and remove the offending entry "
+                    "with `claude mcp remove sys-buddy -s local`.\n"
+                    "3. Give this seat's server a UNIQUE name so two seats' tokens can't "
+                    "collide, and in VS Code reload the window (Command Palette → "
+                    "\"Developer: Reload Window\") or restart the session — MCP loads at "
+                    "startup.\n"
+                    "One seat = one token = one config; every client reads config by the "
+                    "folder it opened."
+                ),
+                "copy": ["diag_list_command", "diag_remove_command"],
+            },
         ],
         "verify": _VERIFY,
         "notes": [
@@ -1302,6 +1396,44 @@ def _claude_desktop_client(mcp_url: str, token: str, name: str) -> dict:
              "body": "Not a restart; a new conversation is enough.",
              "copy": []},
             {"title": "Verify", "body": _VERIFY, "copy": []},
+            # The failure ladder — see TROUBLESHOOT_TITLE. DELIBERATELY carries no
+            # `claude mcp` command: the CLI binary is not on the desktop app's PATH, so
+            # telling a desktop user to run one sends them down a dead end (it is why the
+            # paste flow exists in the first place). Diagnosis here is the app's own UI.
+            {
+                "title": TROUBLESHOOT_TITLE,
+                "body": (
+                    "1. START A NEW CONVERSATION. The tools load when a conversation "
+                    "begins, so a chat already open won't see them — this is NOT a "
+                    "restart, and Desktop has no in-chat reconnect command; a new "
+                    "conversation is what reloads the config. The first time it loads "
+                    "you're asked to approve the server; that prompt is normal, not a "
+                    "failure.\n"
+                    "2. RIGHT FILE. `.mcp.json` must be at the ROOT of the project you "
+                    "have OPEN in Desktop — not your home folder.\n"
+                    "3. SHADOWED? If an older, same-named sys-buddy server is already in "
+                    "your config it can shadow this one — check your server list and "
+                    "remove the stale entry."
+                ),
+                "copy": [],
+            },
+            # The wrong-seat gotcha — see WRONG_SEAT_TITLE. NO `claude mcp` command here:
+            # Desktop has no such CLI. Diagnosis is the app's own MCP server list.
+            {
+                "title": WRONG_SEAT_TITLE,
+                "body": (
+                    "Tools loaded but you're acting as the wrong seat — a prompt says "
+                    "you're one seat yet calls land on another, or messages hit a "
+                    "different task. That means an older or other same-named sys-buddy "
+                    "entry is resolving instead of this one, connecting you with a "
+                    "different token — a different seat. Check your MCP server list, "
+                    "remove the stale sys-buddy entry (or give this one a UNIQUE name so "
+                    "two seats' tokens can't collide), then start a new conversation to "
+                    "reload. One seat = one token = one config; every client reads config "
+                    "by the folder it opened."
+                ),
+                "copy": [],
+            },
         ],
         "verify": _VERIFY,
         "notes": [
@@ -1343,6 +1475,38 @@ def _cursor_client(mcp_url: str, token: str, name: str) -> dict:
              "body": _VERIFY + " Or check Settings → Tools & MCPs, where a working server "
                      "shows a green dot and a tool count.",
              "copy": []},
+            # The failure ladder — see TROUBLESHOOT_TITLE. Cursor idiom: reload rather
+            # than a fresh terminal, and the shadow is usually its GLOBAL ~/.cursor file.
+            {
+                "title": TROUBLESHOOT_TITLE,
+                "body": (
+                    "1. RELOAD. Servers load at start — reload the Cursor window, or "
+                    "restart MCP servers in Settings → MCP.\n"
+                    "2. ENABLED? A new server needs a one-time enable/trust in Settings "
+                    "→ MCP; until then it won't load.\n"
+                    "3. SHADOWED? An older same-named sys-buddy entry — for instance a "
+                    "global one in `~/.cursor/mcp.json` — can shadow this project's. "
+                    "Check your MCP server list and remove the stale one."
+                ),
+                "copy": [],
+            },
+            # The wrong-seat gotcha — see WRONG_SEAT_TITLE. Cursor idiom: its own global
+            # `~/.cursor/mcp.json`, no `claude mcp` CLI.
+            {
+                "title": WRONG_SEAT_TITLE,
+                "body": (
+                    "Tools loaded but you're acting as the wrong seat — a prompt says "
+                    "you're one seat yet calls land on another, or messages hit a "
+                    "different task. That means an older or other same-named sys-buddy "
+                    "entry — often the global one in `~/.cursor/mcp.json` — is resolving "
+                    "instead of this project's, connecting you with a different token — a "
+                    "different seat. Check your MCP server list, remove the stale entry "
+                    "(or give this one a UNIQUE name so two seats' tokens can't collide), "
+                    "then reload the Cursor window. One seat = one token = one config; "
+                    "every client reads config by the folder it opened."
+                ),
+                "copy": [],
+            },
         ],
         "verify": _VERIFY,
         "notes": [
@@ -1374,6 +1538,39 @@ def _gemini_cli_client(mcp_url: str, token: str, name: str) -> dict:
             {"title": "Verify",
              "body": 'Check it with `gemini mcp list`; you want a green ✓ and "Connected".',
              "copy": []},
+            # The failure ladder — see TROUBLESHOOT_TITLE. Gemini idiom: its own CLI, so
+            # the shadow diagnostic is `gemini mcp list` / `gemini mcp remove`, never
+            # `claude mcp`.
+            {
+                "title": TROUBLESHOOT_TITLE,
+                "body": (
+                    "1. RESTART. Servers load at start — restart Gemini so it re-reads "
+                    "its config.\n"
+                    "2. APPROVED? Approve or trust the server if you're prompted the "
+                    "first time it connects.\n"
+                    "3. SHADOWED? An older same-named sys-buddy entry can shadow this "
+                    "one. Check `gemini mcp list`; remove a stale entry with `gemini mcp "
+                    "remove sys-buddy`."
+                ),
+                "copy": [],
+            },
+            # The wrong-seat gotcha — see WRONG_SEAT_TITLE. Gemini idiom: `gemini mcp`,
+            # never `claude mcp`.
+            {
+                "title": WRONG_SEAT_TITLE,
+                "body": (
+                    "Tools loaded but you're acting as the wrong seat — a prompt says "
+                    "you're one seat yet calls land on another, or messages hit a "
+                    "different task. That means an older or other same-named sys-buddy "
+                    "entry is resolving instead of this one, connecting you with a "
+                    "different token — a different seat. Run `gemini mcp list` and check "
+                    "the sys-buddy line; remove the stale entry with `gemini mcp remove "
+                    "sys-buddy` (or give this one a UNIQUE name so two seats' tokens "
+                    "can't collide), then restart Gemini. One seat = one token = one "
+                    "config; every client reads config by the folder it opened."
+                ),
+                "copy": [],
+            },
         ],
         "verify": 'Check it with `gemini mcp list`; you want a green ✓ and "Connected".',
         "notes": [
@@ -1423,6 +1620,40 @@ def _other_client(mcp_url: str, token: str, name: str) -> dict:
                      "If not, the config is in the wrong place, or the field names don't "
                      "match your client.",
              "copy": []},
+            # The failure ladder — see TROUBLESHOOT_TITLE. The applicable subset, in the
+            # generic terms that hold for any client we cannot name.
+            {
+                "title": TROUBLESHOOT_TITLE,
+                "body": (
+                    "Whatever client you're on, the same three things catch most cases:\n"
+                    "1. NEW SESSION. MCP servers connect when the session or chat starts "
+                    "— reload or restart your client so it picks up the config you just "
+                    "added.\n"
+                    "2. APPROVED? Many clients need a one-time approval/trust before a "
+                    "new server loads.\n"
+                    "3. SHADOWED? An older, same-named sys-buddy entry can shadow this "
+                    "one — check your client's MCP server list and remove the stale "
+                    "entry."
+                ),
+                "copy": [],
+            },
+            # The wrong-seat gotcha — see WRONG_SEAT_TITLE. Generic terms for a client we
+            # cannot name; no client-specific CLI.
+            {
+                "title": WRONG_SEAT_TITLE,
+                "body": (
+                    "Tools loaded but you're acting as the wrong seat — a prompt says "
+                    "you're one seat yet calls land on another, or messages hit a "
+                    "different task. That means an older or other same-named sys-buddy "
+                    "entry is resolving instead of this one, connecting you with a "
+                    "different token — a different seat. Check your client's MCP server "
+                    "list, remove the stale entry (or give this one a UNIQUE name so two "
+                    "seats' tokens can't collide), then reload your client. One seat = "
+                    "one token = one config; every client reads config by the folder it "
+                    "opened."
+                ),
+                "copy": [],
+            },
         ],
         "verify": _VERIFY,
         "notes": [
