@@ -10,6 +10,14 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.18.0](https://github.com/tooney92/sys-buddy/compare/v2.17.0...v2.18.0) (2026-09-10)
+
+
+### Added
+
+* resume a session — health check, targeted fixes, and a way back to the board ([#113](https://github.com/tooney92/sys-buddy/issues/113)) ([7a442dd](https://github.com/tooney92/sys-buddy/commit/7a442dd5166675d83f963efe1edf206b380d5eb4))
+* the broker tells an agent which seat it resolved them as ([#111](https://github.com/tooney92/sys-buddy/issues/111)) ([8c2e70b](https://github.com/tooney92/sys-buddy/commit/8c2e70b9a60a59e178cad96333438665a425fcc6))
+
 ## [2.17.0](https://github.com/tooney92/sys-buddy/compare/v2.16.0...v2.17.0) (2026-08-20)
 
 
