@@ -547,6 +547,131 @@ def reissue_guest_link(task: str, who: str) -> dict:
     return {"task": task, "seat": row["handle"], "name": row["name"], "viewer_token": token}
 
 
+LAST_PUBLIC_URL = "last_public_url"
+
+
+def get_setting(key: str) -> str | None:
+    """Read a broker-wide setting, or None. Never raises on a fresh db."""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row is not None else None
+    finally:
+        conn.close()
+
+
+def set_setting(key: str, value: str | None) -> None:
+    """Write a broker-wide setting (upsert)."""
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def remember_public_url(url: str | None) -> str | None:
+    """Record the origin the broker is reachable through, returning what it was BEFORE.
+
+    The previous value is the whole point: knowing the current tunnel is not useful, but
+    knowing it MOVED is — that is the fact that tells a host every peer's config just went
+    stale, which is otherwise invisible until someone fails to connect.
+    """
+    if not url:
+        return None
+    previous = get_setting(LAST_PUBLIC_URL)
+    if previous != url:
+        set_setting(LAST_PUBLIC_URL, url)
+    return previous
+
+
+def live_buddies(task: str) -> list[dict]:
+    """The live NON-guest seats on a task — ``[{seat, name}]``.
+
+    The counterpart to :func:`list_guests`, and only used to make the "no such seat"
+    error name the seats that DO exist rather than leaving a host guessing.
+    """
+    conn = connect()
+    try:
+        return [
+            {"seat": r["handle"] or r["role"], "name": r["name"]}
+            for r in conn.execute(
+                "SELECT handle, role, name FROM agents WHERE task_id=? AND role<>? "
+                "AND revoked_at IS NULL ORDER BY id",
+                (task, seats.GUEST_ROLE),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def reissue_viewer_link(task: str, who: str) -> dict:
+    """Mint a FRESH read-only dashboard link for an existing BUDDY seat.
+
+    THE GAP THIS FILLS. A guest who loses her link gets a new one in a click
+    (:func:`reissue_guest_link`); a BUDDY who loses his had no path at all — viewer tokens
+    are stored only hashed, so the original cannot be read back, and the only recovery was
+    to REVOKE a perfectly healthy seat and re-pair it. That costs the buddy his agent token,
+    his MCP config and his pre-flight, to recover one URL he simply mislaid. A dashboard
+    link is the most losable thing we hand out, because the host never holds a copy: pairing
+    gives it to the BUDDY at redeem time and nowhere else.
+
+    Same seat, new credential — his acceptances, signatures and message history stay his,
+    exactly as the guest path preserves hers.
+
+    CRUCIALLY the new viewer is READ-ONLY: ``agent_id`` is NULL. A non-NULL ``agent_id`` is
+    what opens the narrow ``/guest/*`` write surface, and it belongs to guest seats alone.
+    Reissuing a buddy's link must never quietly promote him to a seat that can write from
+    the browser, so a guest is REFUSED here and sent to :func:`reissue_guest_link`.
+
+    ``who`` matches by seat HANDLE or display NAME. HOST action — the ``/host/*`` surface
+    and the CLI reach it; no agent tool does. Returns ``{task, seat, name, viewer_token}``;
+    the caller builds the ``/ui?v=`` link, because only the caller knows the public origin.
+    """
+    who = (who or "").strip()
+    if not who:
+        raise ValueError("name the seat to reissue for (seat handle or display name)")
+    conn = connect()
+    try:
+        _assert_task(conn, task)
+        row = conn.execute(
+            "SELECT id, name, role, COALESCE(handle, role) AS seat FROM agents "
+            "WHERE task_id=? AND revoked_at IS NULL AND (handle=? OR name=? OR role=?)",
+            (task, who, who, who),
+        ).fetchone()
+        if row is None:
+            have = ", ".join(
+                f"{b['name'] or '(unjoined)'} (@{b['seat']})" for b in live_buddies(task)
+            ) or "none"
+            raise ValueError(f"no live seat '{who}' on task '{task}'. Seats: {have}")
+        if row["role"] == seats.GUEST_ROLE:
+            raise ValueError(
+                f"'{who}' is a guest seat — use guest-link, which reissues the write-capable "
+                f"link a guest needs"
+            )
+        token = new_viewer_token()
+        conn.execute(
+            # agent_id NULL == read-only. See the docstring: this is the line that keeps a
+            # reissued buddy link from becoming a guest write surface.
+            "INSERT INTO viewers (task_id, label, token_hash, created_at, agent_id) "
+            "VALUES (?,?,?,?,NULL)",
+            (task, row["name"] or row["seat"], sha256_hex(token), time.time()),
+        )
+        _write_event(
+            conn, task, "token",
+            {"text": f"Reissued a dashboard link for {row['name'] or row['seat']} (@{row['seat']})"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    audit.event("viewer_link_reissued", task=task, role=row["seat"])
+    return {"task": task, "seat": row["seat"], "name": row["name"], "viewer_token": token}
+
+
 def get_dev_url(task: str) -> str | None:
     """Read-only: the task's local dev URL, or None."""
     conn = connect()

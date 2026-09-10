@@ -313,6 +313,153 @@ class GuiApi:
         result = slack.notify("sys-buddy is connected to this channel. 👋")
         return {"ok": result.startswith("Human notified"), "detail": result}
 
+    def dashboard_link(self) -> dict:
+        """The host's own dashboard URL — the front door that did not exist.
+
+        Resuming a collaboration used to start with "where do I even open my board?", and
+        the honest answer was a CLI command and a token you had to keep. The dashboard
+        needs an all-tasks HOST viewer token, and viewer tokens are stored only HASHED, so
+        a previous one can never be read back — it has to be minted.
+
+        Minted ONCE per app run and held in memory for the rest of it: minting per click
+        would pile up viewer rows, and writing the raw token to disk is the one thing
+        "sys-buddy stores no credentials" forbids. Quitting the app forgets it; the row
+        stays revocable with ``revoke-viewer``.
+
+        The origin comes from the live ngrok tunnel when there is one, so the link works
+        off this machine, and falls back to loopback when there is not.
+        """
+        try:
+            _ensure_broker()
+            from . import admin, tunnels
+
+            if not getattr(self, "_host_viewer", None):
+                self._host_viewer = admin.issue_host_viewer("desktop-app")
+            t = tunnels.ngrok_for_port(BROKER_PORT)
+            origin = (t or {}).get("public_url") or BASE_URL
+            return {"ok": True, "url": f"{origin}/ui?v={self._host_viewer}",
+                    "origin": origin, "tunnelled": bool(t)}
+        except Exception as exc:  # noqa: BLE001 — never break the bridge
+            return {"error": str(exc)}
+
+    def apply_fix(self, action: str, args: dict | None = None) -> dict:
+        """Run ONE health-row fix. The panel dispatches on ``action``; nothing runs by itself.
+
+        Returns ``{ok, message}`` and, where the useful outcome is something to hand a
+        person, ``copy`` — text the panel puts on the clipboard. A link or a re-point
+        message is only worth producing if it ends up somewhere the peer can read it.
+
+        Deliberately ABSENT: revoke-and-re-invite. It burns a peer's working credential,
+        and a destructive move does not belong on a panel you glance at — it stays behind a
+        confirm elsewhere.
+
+        Never raises: this crosses a pywebview bridge, where an exception reads to the user
+        as the button simply not working.
+        """
+        args = args or {}
+        try:
+            _ensure_broker()
+            from . import admin, onboarding, seats, tunnels
+
+            if action == "start_broker":
+                return {"ok": True, "message": "Broker is up."}
+
+            if action == "extend_tokens":
+                touched = admin.extend_agent_tokens(args["task"], never=True)
+                who = ", ".join("@" + t["seat"] for t in touched) or "no live seats"
+                return {"ok": True,
+                        "message": f"Extended {len(touched)} seat(s) to no expiry — {who}"}
+
+            if action == "set_staging":
+                url = (args.get("url") or "").strip()
+                if not url:
+                    return {"error": "Paste the new staging URL first."}
+                res = admin.set_staging_url(args["task"], url)
+                return {"ok": True,
+                        "message": f"Deployment target set — {res['effective']}. "
+                                   f"No contract or signature changed."}
+
+            if action == "viewer_link":
+                task, who = args["task"], args["who"]
+                # A guest's link is the write-capable one and has its own path; picking the
+                # wrong one would silently take her message box away.
+                is_guest = any(
+                    g["name"] == who or g["seat"] == who for g in admin.list_guests(task)
+                )
+                res = (admin.reissue_guest_link(task, who) if is_guest
+                       else admin.reissue_viewer_link(task, who))
+                link = f"{self._origin()}/ui?v={res['viewer_token']}"
+                return {"ok": True, "copy": link,
+                        "message": f"Fresh dashboard link for {res['name'] or res['seat']} "
+                                   f"copied. Same seat — their history is untouched."}
+
+            if action == "invite":
+                task, role = args["task"], args["role"]
+                code, expires = admin.mint_invite(task, role)
+                join = onboarding.make_join_url(self._origin(), code)
+                return {"ok": True, "copy": join,
+                        "message": f"Invite for @{admin.seat_for(task, role)} copied — "
+                                   f"single use, expires {expires}."}
+
+            if action == "repoint":
+                url = args.get("url") or self._origin()
+                return {"ok": True, "copy": onboarding.repoint_message(url),
+                        "message": "Re-point message copied — send it to your peers. "
+                                   "They keep their token; only the address changes."}
+
+            if action == "repair_seat":
+                # The ONE destructive move on this surface, so it refuses to run on a bare
+                # call: the UI confirms, and the bridge insists on seeing that it did. A
+                # button that revokes a working credential must not be reachable by
+                # accident from a panel people click through quickly.
+                if not args.get("confirm"):
+                    return {"error": "re-pairing needs an explicit confirm"}
+                task, who, role = args["task"], args["who"], args["role"]
+                if any(g["name"] == who or g["seat"] == who for g in admin.list_guests(task)):
+                    return {"error": "that seat is a guest — she has no agent token to "
+                                     "lose; reissue her guest link instead"}
+                admin.revoke_agent(who, task=task)
+                code, expires = admin.mint_invite(task, role)
+                join = onboarding.make_join_url(self._origin(), code)
+                return {"ok": True, "copy": join,
+                        "message": f"@{role} re-paired — old token revoked, fresh invite "
+                                   f"copied (single use, expires {expires}). Their "
+                                   f"signatures and history are untouched."}
+
+            return {"error": f"unknown fix '{action}'"}
+        except Exception as exc:  # noqa: BLE001 — never break the bridge
+            return {"error": str(exc)}
+
+    def _origin(self) -> str:
+        """The address a peer must actually use — the live tunnel if there is one."""
+        from . import tunnels
+
+        t = tunnels.ngrok_for_port(BROKER_PORT)
+        return (t or {}).get("public_url") or BASE_URL
+
+    def resume_report(self, task_id: str) -> dict:
+        """Health-check one task before picking it back up. Probes; changes nothing."""
+        try:
+            _ensure_broker()
+            from . import admin, health
+
+            return health.session_report(
+                task_id, port=BROKER_PORT,
+                known_public_url=admin.get_setting(admin.LAST_PUBLIC_URL),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+
+    def resume_tasks(self) -> list | dict:
+        """Open tasks, newest first, for the Resume picker."""
+        try:
+            _ensure_broker()
+            from . import admin
+
+            return [t for t in admin.list_tasks() if not t["closed"]]
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+
     def open_dashboard(self, url: str) -> dict:
         """Open the live read-only dashboard in its own native window (a separate
         top-level window, so the broker's frame-ancestors CSP doesn't block it).

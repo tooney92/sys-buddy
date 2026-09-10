@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from fastmcp import FastMCP
 
-from . import api, files, guest, host, pairing
+from . import admin, api, files, guest, host, pairing
 from .config import Config, set_config
 from .db import init_db
 from .middleware import AuthMiddleware
@@ -30,6 +30,14 @@ from .tools import register_tools
 def build_server(cfg: Config) -> FastMCP:
     set_config(cfg)
     init_db(cfg.db_path)  # idempotent; makes a fresh db just work on boot
+
+    # Remember the origin we are reachable through, so a later health check can say the
+    # tunnel MOVED rather than just naming the current one. A rotated free-tier URL is the
+    # normal case, and it silently invalidates every peer's MCP config.
+    try:
+        admin.remember_public_url(cfg.public_url)
+    except Exception:  # noqa: BLE001 — bookkeeping must never keep the broker from booting
+        pass
 
     mcp = FastMCP("sys-buddy")
     mcp.add_middleware(AuthMiddleware())  # remote: token→identity; local: no-op

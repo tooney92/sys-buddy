@@ -102,9 +102,10 @@ body{
 .cards{
   margin-top:clamp(28px,5vh,44px);
   display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr));
+  grid-template-columns:repeat(3,minmax(0,1fr));
   gap:18px;
 }
+@media (max-width:980px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){.cards{grid-template-columns:1fr}}
 .card{
   appearance:none;
@@ -126,6 +127,49 @@ body{
 .card .role-dot{width:12px;height:12px;border-radius:50%}
 .card.host .role-dot{background:var(--accent)}
 .card.buddy .role-dot{background:var(--role-frontend)}
+.card.resume .role-dot{background:var(--role-mobile,var(--teal,#0e9384))}
+/* Resume: one row per task, one row per health fact. Status is carried by a colour bar
+   AND a word — never colour alone, since "is that amber or green" is exactly the question
+   a tired host should not have to answer. */
+.resume-list{display:flex;flex-direction:column;gap:8px}
+.rtask{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border);
+  border-radius:12px;background:var(--surface);cursor:pointer;text-align:left;font-family:inherit;color:var(--text)}
+.rtask:hover{background:var(--surface-2);border-color:var(--border-strong)}
+.rtask .rt-title{font-weight:600;font-size:.95rem}
+.rtask .rt-id{font-family:var(--font-mono,monospace);font-size:.74rem;color:var(--text-3)}
+.rtask .rt-go{margin-left:auto;font-size:.8rem;color:var(--text-3)}
+.resume-report{display:flex;flex-direction:column;gap:8px}
+.hrow{display:flex;gap:12px;align-items:flex-start;padding:11px 13px;border:1px solid var(--border);
+  border-radius:12px;background:var(--surface)}
+.hrow .hbar{width:4px;align-self:stretch;border-radius:3px;flex:none}
+.hrow.ok   .hbar{background:var(--ok,#1c9b57)}
+.hrow.warn .hbar{background:var(--warn,#c98a1e)}
+.hrow.dead .hbar{background:var(--bad,#d24b4a)}
+.hrow.info .hbar{background:var(--border-strong)}
+.hrow .hbody{min-width:0;flex:1}
+.hrow .hlabel{font-weight:600;font-size:.86rem;display:flex;gap:8px;align-items:center}
+.hrow .hstate{font-size:.64rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);font-weight:700}
+.hrow .hdetail{font-size:.82rem;color:var(--text-2);margin-top:2px;overflow-wrap:anywhere}
+.hrow .hcli{font-family:var(--font-mono,monospace);font-size:.74rem;color:var(--text-3);margin-top:5px;
+  background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:5px 8px;overflow-wrap:anywhere}
+.hfix{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.hfix .btn{padding:6px 11px;font-size:.78rem}
+.hfix input{flex:1;min-width:180px;padding:6px 9px;border:1px solid var(--border-strong);
+  border-radius:8px;background:var(--surface-2);color:var(--text);font-family:inherit;font-size:.78rem}
+.hmsg{margin-top:6px;font-size:.78rem}
+.hmsg.good{color:var(--ok,#1c9b57)}
+.hmsg.bad{color:var(--bad,#d24b4a)}
+/* The one destructive action here. Quiet by default — it is not what you came to press —
+   and it states the cost before it will run. */
+.hdanger{margin-top:6px}
+.hdanger .link{background:none;border:none;padding:0;cursor:pointer;font-family:inherit;
+  font-size:.75rem;color:var(--text-3);text-decoration:underline;text-underline-offset:3px}
+.hdanger .link:hover{color:var(--bad,#d24b4a)}
+.hconfirm{margin-top:8px;padding:10px 12px;border:1px solid var(--bad,#d24b4a);border-radius:10px;
+  background:color-mix(in srgb,var(--bad,#d24b4a) 8%,transparent)}
+.hconfirm p{margin:0 0 8px;font-size:.78rem;color:var(--text-2);white-space:pre-line}
+.hconfirm .row{display:flex;gap:8px}
+.hconfirm .btn{padding:6px 11px;font-size:.78rem}
 .card .top{display:flex;align-items:center;gap:10px}
 .card .kicker{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);font-weight:600}
 .card h2{margin:0;font-size:1.28rem;font-weight:600;letter-spacing:-.01em}
@@ -641,6 +685,44 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
           <p>Paste an invite link, pair your agent, and wire it up to the broker.</p>
           <span class="go" aria-hidden="true">Join with a link →</span>
         </button>
+
+        <!-- The front door that was missing. Resuming a collaboration used to begin with
+             "where do I even open my board?" — answerable only by a CLI command and a
+             token you had to have kept. -->
+        <button type="button" class="card resume" id="card-resume">
+          <span class="top"><span class="role-dot"></span><span class="kicker">Come back to it</span></span>
+          <h2>Resume a session</h2>
+          <p>Open your dashboard, or check what needs fixing before you pick a task back up.</p>
+          <span class="go" aria-hidden="true">Open dashboard →</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ RESUME ============ -->
+  <!-- A DIAGNOSIS, not a button. Resuming a day-old session commonly breaks in several
+       unrelated ways at once, and only one of them ever wants a revoke — so every row here
+       carries its own targeted fix, and revoke stays a last resort behind a confirm. -->
+  <section class="view" id="view-resume" aria-label="Resume a session">
+    <button type="button" class="back" data-nav="home">← Back</button>
+    <h2 class="vh">Resume a session</h2>
+    <p class="hint" id="resume-intro">Open the board, or pick a task to see what needs fixing first.
+      Nothing here changes anything until you press a fix.</p>
+
+    <div class="form">
+      <div class="field">
+        <button type="button" class="btn primary" id="btn-open-dash">Open my dashboard</button>
+        <p class="hint" id="dash-note"></p>
+      </div>
+
+      <div class="field">
+        <span class="label-txt">Your open tasks</span>
+        <div id="resume-list" class="resume-list"></div>
+      </div>
+
+      <div class="field" id="resume-report-wrap" hidden>
+        <span class="label-txt" id="resume-report-title">Health check</span>
+        <div id="resume-report" class="resume-report"></div>
       </div>
     </div>
   </section>
@@ -1137,6 +1219,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   // ---- tiny router -----------------------------------------------------
   var views = {
     home:    document.getElementById('view-home'),
+    resume:  document.getElementById('view-resume'),
     host:    document.getElementById('view-host'),
     loading: document.getElementById('view-loading'),
     hostrun: document.getElementById('view-hostrun'),
@@ -1155,9 +1238,184 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     if (focusable) { try { focusable.focus(); } catch(e){} }
   }
 
+  // ---------- Resume ----------
+  // Everything here READS. The health report probes and reports; the only thing that acts
+  // is a fix the host presses, and revoke-and-re-invite is deliberately not one of them
+  // yet — it belongs behind a confirm, as a last resort, not on a panel you glance at.
+  var HSTATE = { ok:'OK', warn:'NEEDS ATTENTION', dead:'BROKEN', info:'—' };
+  var currentTaskId = null, currentTaskTitle = null;
+
+  function esc(t){ return String(t == null ? '' : t).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+  function loadResumeTasks(){
+    var list = document.getElementById('resume-list');
+    list.innerHTML = '<p class="hint">Loading…</p>';
+    document.getElementById('resume-report-wrap').hidden = true;
+    var b = bridge();
+    if (!b) { list.innerHTML = '<p class="hint">Bridge not ready — reopen the app.</p>'; return; }
+    b.resume_tasks().then(function(res){
+      if (!res || res.error) { list.innerHTML = '<p class="hint">' + esc((res && res.error) || 'Could not load tasks.') + '</p>'; return; }
+      if (!res.length) { list.innerHTML = '<p class="hint">No open tasks yet.</p>'; return; }
+      list.innerHTML = '';
+      res.forEach(function(t){
+        var b = document.createElement('button');
+        b.type = 'button'; b.className = 'rtask';
+        b.innerHTML = '<span><span class="rt-title">' + esc(t.title || t.id) + '</span><br>' +
+                      '<span class="rt-id">' + esc(t.id) + ' · ' + esc(t.state) + '</span></span>' +
+                      '<span class="rt-go">Check &amp; resume →</span>';
+        b.addEventListener('click', function(){ loadResumeReport(t.id, t.title || t.id); });
+        list.appendChild(b);
+      });
+    });
+  }
+
+  function loadResumeReport(taskId, title){
+    currentTaskId = taskId; currentTaskTitle = title;
+    var wrap = document.getElementById('resume-report-wrap');
+    var out  = document.getElementById('resume-report');
+    document.getElementById('resume-report-title').textContent = 'Health check — ' + title;
+    wrap.hidden = false;
+    out.innerHTML = '<p class="hint">Probing…</p>';
+    var b = bridge();
+    if (!b) { out.innerHTML = '<p class="hint">Bridge not ready — reopen the app.</p>'; return; }
+    b.resume_report(taskId).then(function(rep){
+      if (!rep || rep.error) { out.innerHTML = '<p class="hint">' + esc((rep && rep.error) || 'Could not check.') + '</p>'; return; }
+      out.innerHTML = '';
+      (rep.rows || []).forEach(function(r){
+        var d = document.createElement('div');
+        d.className = 'hrow ' + esc(r.status);
+        var html = '<span class="hbar" aria-hidden="true"></span><div class="hbody">' +
+          '<div class="hlabel">' + esc(r.label) +
+          '<span class="hstate">' + esc(HSTATE[r.status] || r.status) + '</span></div>' +
+          '<div class="hdetail">' + esc(r.detail) + '</div>';
+        // The CLI is shown for anything not already fine — a host who can see the command
+        // can run it when the app is not in front of them.
+        if (r.status !== 'ok' && r.cli) html += '<div class="hcli">' + esc(r.cli) + '</div>';
+        html += '<div class="hfix"></div><div class="hmsg" hidden></div></div>';
+        d.innerHTML = html;
+        // One button per row, and ONLY where there is something to press. The staging fix
+        // is the one that needs a value from the host, so it grows an input beside it.
+        if (r.action && r.fix) {
+          var fixWrap = d.querySelector('.hfix');
+          var needsUrl = r.args && r.args.needs === 'url';
+          var input = null;
+          if (needsUrl) {
+            input = document.createElement('input');
+            input.type = 'text';
+            input.placeholder = 'https://your-new-tunnel…';
+            input.spellcheck = false;
+            fixWrap.appendChild(input);
+          }
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'btn' + (r.status === 'ok' ? ' ghost' : ' primary');
+          btn.textContent = r.fix;
+          btn.addEventListener('click', function(){
+            var msg = d.querySelector('.hmsg');
+            var payload = {};
+            Object.keys(r.args || {}).forEach(function(k){ payload[k] = r.args[k]; });
+            if (needsUrl) payload.url = input.value;
+            btn.disabled = true; btn.textContent = 'Working…';
+            var b2 = bridge();
+            if (!b2) { btn.disabled = false; btn.textContent = r.fix; return; }
+            b2.apply_fix(r.action, payload).then(function(res){
+              btn.disabled = false; btn.textContent = r.fix;
+              msg.hidden = false;
+              if (!res || res.error) {
+                msg.className = 'hmsg bad';
+                msg.textContent = (res && res.error) || 'That did not work.';
+                return;
+              }
+              msg.className = 'hmsg good';
+              msg.textContent = res.message || 'Done.';
+              // A link or a message is only useful once it is somewhere the peer can read it.
+              if (res.copy) {
+                try {
+                  navigator.clipboard.writeText(res.copy);
+                  msg.textContent += '  (copied)';
+                } catch (e) {}
+              }
+              // Re-probe so the row reflects what is now true, rather than what was.
+              setTimeout(function(){ loadResumeReport(currentTaskId, currentTaskTitle); }, 700);
+            });
+          });
+          fixWrap.appendChild(btn);
+        }
+        // Secondary: the destructive one. Rendered as a quiet link, and it will not act
+        // until the host has read what it costs and pressed again.
+        if (r.secondary) {
+          var sec = document.createElement('div');
+          sec.className = 'hdanger';
+          var link = document.createElement('button');
+          link.type = 'button'; link.className = 'link';
+          link.textContent = r.secondary.fix;
+          sec.appendChild(link);
+          link.addEventListener('click', function(){
+            if (sec.querySelector('.hconfirm')) return;
+            var box = document.createElement('div');
+            box.className = 'hconfirm';
+            var p = document.createElement('p');
+            p.textContent = r.secondary.confirm || 'This cannot be undone.';
+            var row = document.createElement('div'); row.className = 'row';
+            var yes = document.createElement('button');
+            yes.type = 'button'; yes.className = 'btn primary';
+            yes.textContent = 'Yes, re-pair them';
+            var no = document.createElement('button');
+            no.type = 'button'; no.className = 'btn ghost'; no.textContent = 'Cancel';
+            no.addEventListener('click', function(){ box.remove(); });
+            yes.addEventListener('click', function(){
+              var msg = d.querySelector('.hmsg');
+              yes.disabled = true; yes.textContent = 'Working…';
+              var b3 = bridge(); if (!b3) { yes.disabled = false; return; }
+              var payload = {};
+              Object.keys(r.secondary.args || {}).forEach(function(k){ payload[k] = r.secondary.args[k]; });
+              payload.confirm = true;   // the bridge refuses without this
+              b3.apply_fix(r.secondary.action, payload).then(function(res){
+                box.remove();
+                msg.hidden = false;
+                if (!res || res.error) {
+                  msg.className = 'hmsg bad';
+                  msg.textContent = (res && res.error) || 'That did not work.';
+                  return;
+                }
+                msg.className = 'hmsg good';
+                msg.textContent = res.message || 'Done.';
+                if (res.copy) {
+                  try { navigator.clipboard.writeText(res.copy); msg.textContent += '  (copied)'; } catch(e){}
+                }
+                setTimeout(function(){ loadResumeReport(currentTaskId, currentTaskTitle); }, 900);
+              });
+            });
+            row.appendChild(yes); row.appendChild(no);
+            box.appendChild(p); box.appendChild(row);
+            sec.appendChild(box);
+          });
+          d.querySelector('.hbody').appendChild(sec);
+        }
+        out.appendChild(d);
+      });
+    });
+  }
+
+  document.getElementById('btn-open-dash').addEventListener('click', function(){
+    var note = document.getElementById('dash-note');
+    note.textContent = 'Opening…';
+    var b = bridge();
+    if (!b) { note.textContent = 'Bridge not ready — reopen the app.'; return; }
+    b.dashboard_link().then(function(res){
+      if (!res || res.error || !res.url) { note.textContent = (res && res.error) || 'Could not build a dashboard link.'; return; }
+      note.textContent = res.tunnelled
+        ? 'Opened on your public tunnel — this link works off this machine too.'
+        : 'Opened on loopback. Start a tunnel if a peer needs to reach it.';
+      b.open_dashboard(res.url);
+    });
+  });
+
   // card + back-link + nav wiring
   document.getElementById('card-host').addEventListener('click', function(){ showView('host'); });
   document.getElementById('card-buddy').addEventListener('click', function(){ showView('buddy'); });
+  document.getElementById('card-resume').addEventListener('click', function(){ showView('resume'); loadResumeTasks(); });
   Array.prototype.forEach.call(document.querySelectorAll('[data-nav]'), function(el){
     el.addEventListener('click', function(){ showView(el.getAttribute('data-nav')); });
   });
