@@ -313,6 +313,58 @@ class GuiApi:
         result = slack.notify("sys-buddy is connected to this channel. 👋")
         return {"ok": result.startswith("Human notified"), "detail": result}
 
+    def dashboard_link(self) -> dict:
+        """The host's own dashboard URL — the front door that did not exist.
+
+        Resuming a collaboration used to start with "where do I even open my board?", and
+        the honest answer was a CLI command and a token you had to keep. The dashboard
+        needs an all-tasks HOST viewer token, and viewer tokens are stored only HASHED, so
+        a previous one can never be read back — it has to be minted.
+
+        Minted ONCE per app run and held in memory for the rest of it: minting per click
+        would pile up viewer rows, and writing the raw token to disk is the one thing
+        "sys-buddy stores no credentials" forbids. Quitting the app forgets it; the row
+        stays revocable with ``revoke-viewer``.
+
+        The origin comes from the live ngrok tunnel when there is one, so the link works
+        off this machine, and falls back to loopback when there is not.
+        """
+        try:
+            _ensure_broker()
+            from . import admin, tunnels
+
+            if not getattr(self, "_host_viewer", None):
+                self._host_viewer = admin.issue_host_viewer("desktop-app")
+            t = tunnels.ngrok_for_port(BROKER_PORT)
+            origin = (t or {}).get("public_url") or BASE_URL
+            return {"ok": True, "url": f"{origin}/ui?v={self._host_viewer}",
+                    "origin": origin, "tunnelled": bool(t)}
+        except Exception as exc:  # noqa: BLE001 — never break the bridge
+            return {"error": str(exc)}
+
+    def resume_report(self, task_id: str) -> dict:
+        """Health-check one task before picking it back up. Probes; changes nothing."""
+        try:
+            _ensure_broker()
+            from . import admin, health
+
+            return health.session_report(
+                task_id, port=BROKER_PORT,
+                known_public_url=admin.get_setting(admin.LAST_PUBLIC_URL),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+
+    def resume_tasks(self) -> list | dict:
+        """Open tasks, newest first, for the Resume picker."""
+        try:
+            _ensure_broker()
+            from . import admin
+
+            return [t for t in admin.list_tasks() if not t["closed"]]
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+
     def open_dashboard(self, url: str) -> dict:
         """Open the live read-only dashboard in its own native window (a separate
         top-level window, so the broker's frame-ancestors CSP doesn't block it).
