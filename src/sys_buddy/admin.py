@@ -547,6 +547,48 @@ def reissue_guest_link(task: str, who: str) -> dict:
     return {"task": task, "seat": row["handle"], "name": row["name"], "viewer_token": token}
 
 
+LAST_PUBLIC_URL = "last_public_url"
+
+
+def get_setting(key: str) -> str | None:
+    """Read a broker-wide setting, or None. Never raises on a fresh db."""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row is not None else None
+    finally:
+        conn.close()
+
+
+def set_setting(key: str, value: str | None) -> None:
+    """Write a broker-wide setting (upsert)."""
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def remember_public_url(url: str | None) -> str | None:
+    """Record the origin the broker is reachable through, returning what it was BEFORE.
+
+    The previous value is the whole point: knowing the current tunnel is not useful, but
+    knowing it MOVED is — that is the fact that tells a host every peer's config just went
+    stale, which is otherwise invisible until someone fails to connect.
+    """
+    if not url:
+        return None
+    previous = get_setting(LAST_PUBLIC_URL)
+    if previous != url:
+        set_setting(LAST_PUBLIC_URL, url)
+    return previous
+
+
 def live_buddies(task: str) -> list[dict]:
     """The live NON-guest seats on a task — ``[{seat, name}]``.
 

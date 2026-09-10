@@ -228,6 +228,36 @@ def cmd_task_viewer_link(args: argparse.Namespace) -> int:
     return 0
 
 
+_HEALTH_MARK = {"ok": "OK  ", "warn": "WARN", "dead": "DEAD", "info": "--  "}
+
+
+def cmd_task_resume(args: argparse.Namespace) -> int:
+    """What is actually wrong before you pick this collaboration back up.
+
+    A diagnosis, not an action: every row is PROBED, and each carries the ONE targeted fix
+    for that row. Resuming a day-old session commonly breaks in several unrelated ways at
+    once, and only one of them ever wants a revoke — so nothing here does anything on its
+    own."""
+    from . import admin, health
+
+    _cfg_from_args(args)
+    try:
+        rep = health.session_report(
+            args.task, port=args.port, known_public_url=admin.get_setting(admin.LAST_PUBLIC_URL)
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"Resume '{rep['title']}'  ·  {rep['task']}  ·  state: {rep['state']}")
+    print(f"Overall: {rep['overall'].upper()}\n")
+    for r in rep["rows"]:
+        print(f"  [{_HEALTH_MARK.get(r['status'], '?')}] {r['label']:<18} {r['detail']}")
+        if r["status"] != "ok" and r.get("cli"):
+            print(f"         └ {r['cli']}")
+    print("\nNothing above was changed — run the command under any row to fix it.")
+    return 0
+
+
 def cmd_task_roster(args: argparse.Namespace) -> int:
     """The cast, from the SAME source the dashboard panel and the agents' `roster` tool
     read. Unjoined seats are listed: that is the state that silently stalls a task."""
@@ -800,6 +830,17 @@ def build_parser() -> argparse.ArgumentParser:
              "Ignored when --public-url is set.",
     )
     tvl.set_defaults(func=cmd_task_viewer_link)
+
+    trs = tsub.add_parser(
+        "resume",
+        help="Health-check a task before picking it back up (probes; changes nothing)",
+    )
+    trs.add_argument("task")
+    trs.add_argument(
+        "--port", type=int, default=DEFAULT_PORT,
+        help=f"Port your broker is on (default: {DEFAULT_PORT}).",
+    )
+    trs.set_defaults(func=cmd_task_resume)
 
     te = tsub.add_parser(
         "extend-tokens",

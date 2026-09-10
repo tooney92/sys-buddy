@@ -593,6 +593,16 @@ CREATE TABLE IF NOT EXISTS verification_runs (
 -- only the latest would be simpler and kinder to devs, and wrong: "you said it was
 -- done and it wasn't, twice" is exactly the evidence an owner needs in a dispute.
 -- Complete log, current dashboard, history one click away.
+CREATE TABLE IF NOT EXISTS settings (
+    -- Broker-wide key/value, for the handful of facts that belong to the INSTALL rather
+    -- than to any one task. First occupant: the public origin the broker was last reached
+    -- through, so a rotated tunnel can be reported as "CHANGED since last session" instead
+    -- of silently handing every peer a dead address.
+    key         TEXT PRIMARY KEY,
+    value       TEXT,
+    updated_at  REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS verification_results (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id         INTEGER NOT NULL REFERENCES verification_runs(id),
