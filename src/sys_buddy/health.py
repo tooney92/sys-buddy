@@ -25,7 +25,8 @@ from .db import connect
 OK, WARN, DEAD, INFO = "ok", "warn", "dead", "info"
 
 
-def _row(key, label, status, detail, fix=None, cli=None, action=None, args=None):
+def _row(key, label, status, detail, fix=None, cli=None, action=None, args=None,
+         secondary=None):
     """One probed fact.
 
     ``fix`` is what the button SAYS, ``cli`` the same move at a terminal, and ``action``
@@ -34,7 +35,8 @@ def _row(key, label, status, detail, fix=None, cli=None, action=None, args=None)
     supply before the fix can run (only the staging target does).
     """
     return {"key": key, "label": label, "status": status, "detail": detail,
-            "fix": fix, "cli": cli, "action": action, "args": args or {}}
+            "fix": fix, "cli": cli, "action": action, "args": args or {},
+            "secondary": secondary}
 
 
 def session_report(task: str, *, port: int = 8787, known_public_url: str | None = None) -> dict:
@@ -174,8 +176,25 @@ def _seat_rows(task: str, roster: list[dict]) -> list[dict]:
         who = r.get("name") or seat
         is_guest = r.get("role") == seats.GUEST_ROLE
         verb = "guest-link" if is_guest else "viewer-link"
+        # A guest has no agent token to lose — she joins by link — so re-pairing is not a
+        # thing that can happen to her, and offering it would only be a way to break her.
+        secondary = None if is_guest else {
+            "fix": "Lost their agent token? Re-pair",
+            "cli": (f"sys-buddy revoke-agent {who} --task {task} && "
+                    f"sys-buddy invite --task {task} --role {seat}"),
+            "action": "repair_seat",
+            "args": {"task": task, "who": who, "role": seat},
+            # The cost, stated where the host is about to pay it. Everything else on this
+            # panel is recoverable; this one is not, which is why it asks first.
+            "confirm": (f"Re-pairing @{seat} REVOKES their current agent token. "
+                        f"They lose their MCP config and their pre-flight, and must join "
+                        f"again from scratch. Their signatures and history are kept.\n\n"
+                        f"Only do this if they have lost the token itself — if they only "
+                        f"lost the dashboard link, use “Copy their dashboard link” instead."),
+        }
         out.append(_row(f"seat:{seat}", f"@{seat}", OK, f"joined · {who}",
                         fix="Copy their dashboard link",
                         cli=f"sys-buddy task {verb} {task} {who}",
-                        action="viewer_link", args={"task": task, "who": who}))
+                        action="viewer_link", args={"task": task, "who": who},
+                        secondary=secondary))
     return out

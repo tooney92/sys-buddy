@@ -213,3 +213,82 @@ def test_apply_fix_cannot_revoke(conn):
         "SELECT COUNT(*) c FROM agents WHERE task_id=? AND revoked_at IS NULL", (t,)
     ).fetchone()["c"]
     assert live == 2, "both seats still live"
+
+
+# --------------------------------------------------------------------------- #
+# repair_seat — the ONE destructive move, and the guard that keeps it deliberate
+# --------------------------------------------------------------------------- #
+def test_repair_seat_refuses_without_an_explicit_confirm(conn):
+    """The panel is something people click through quickly. A move that revokes a working
+    credential must not be reachable by accident, so the bridge insists on seeing that the
+    UI actually asked."""
+    t = _seeded(conn)
+    res = _api().apply_fix("repair_seat", {"task": t, "who": "Peter", "role": "frontend"})
+    assert "error" in res and "confirm" in res["error"]
+    live = conn.execute(
+        "SELECT COUNT(*) c FROM agents WHERE task_id=? AND revoked_at IS NULL", (t,)
+    ).fetchone()["c"]
+    assert live == 2, "nothing was revoked"
+
+
+def test_repair_seat_with_confirm_revokes_and_mints_a_fresh_invite(conn, monkeypatch):
+    t = _seeded(conn)
+    _no_tunnel(monkeypatch)
+    res = _api().apply_fix(
+        "repair_seat", {"task": t, "who": "Peter", "role": "frontend", "confirm": True})
+    assert res["ok"] is True
+    assert "/join#c=" in res["copy"], "the fresh invite is what gets copied"
+    row = conn.execute(
+        "SELECT revoked_at FROM agents WHERE task_id=? AND handle='frontend'", (t,)).fetchone()
+    assert row["revoked_at"] is not None, "the old token is dead"
+
+
+def test_repair_seat_keeps_signatures_and_history(conn, monkeypatch):
+    """The reason re-pairing is survivable at all: the seat's record is not erased."""
+    t = _seeded(conn)
+    _no_tunnel(monkeypatch)
+    sigs = conn.execute("SELECT COUNT(*) c FROM contract_signatures").fetchone()["c"]
+    msgs = conn.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"]
+    _api().apply_fix("repair_seat",
+                     {"task": t, "who": "Peter", "role": "frontend", "confirm": True})
+    assert conn.execute("SELECT COUNT(*) c FROM contract_signatures").fetchone()["c"] == sigs
+    assert conn.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"] == msgs
+
+
+def test_repair_seat_refuses_a_guest(conn, monkeypatch):
+    """A guest has no agent token to lose — she joins by link. Offering to re-pair her
+    would only be a way to break her."""
+    t = _seeded(conn)
+    _no_tunnel(monkeypatch)
+    admin.add_guest(t, "Ada")
+    res = _api().apply_fix(
+        "repair_seat", {"task": t, "who": "Ada", "role": "guest", "confirm": True})
+    assert "error" in res and "guest" in res["error"]
+
+
+def test_a_joined_seat_offers_repair_as_a_SECONDARY_action(conn, monkeypatch):
+    """It must never be the primary button — the primary is the non-destructive one."""
+    t = _seeded(conn)
+    monkeypatch.setattr(tunnels, "probe",
+                        lambda url, timeout=8.0: {"url": url, "alive": True, "status": 200,
+                                                  "detail": "answered"})
+    monkeypatch.setattr(tunnels, "ngrok_for_port", lambda *a, **k: None)
+    monkeypatch.setattr(tunnels, "discover_ngrok", lambda *a, **k: [])
+    rep = health.session_report(t)
+    row = next(r for r in rep["rows"] if r["key"] == "seat:frontend")
+    assert row["action"] == "viewer_link", "the PRIMARY move is the harmless one"
+    assert row["secondary"]["action"] == "repair_seat"
+    assert "REVOKES" in row["secondary"]["confirm"], "state the cost before it is paid"
+
+
+def test_a_guest_row_offers_no_repair_at_all(conn, monkeypatch):
+    t = _seeded(conn)
+    admin.add_guest(t, "Ada")
+    monkeypatch.setattr(tunnels, "probe",
+                        lambda url, timeout=8.0: {"url": url, "alive": True, "status": 200,
+                                                  "detail": "answered"})
+    monkeypatch.setattr(tunnels, "ngrok_for_port", lambda *a, **k: None)
+    monkeypatch.setattr(tunnels, "discover_ngrok", lambda *a, **k: [])
+    rep = health.session_report(t)
+    row = next(r for r in rep["rows"] if r["key"] == "seat:guest")
+    assert row["secondary"] is None

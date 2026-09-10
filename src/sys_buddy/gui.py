@@ -407,6 +407,25 @@ class GuiApi:
                         "message": "Re-point message copied — send it to your peers. "
                                    "They keep their token; only the address changes."}
 
+            if action == "repair_seat":
+                # The ONE destructive move on this surface, so it refuses to run on a bare
+                # call: the UI confirms, and the bridge insists on seeing that it did. A
+                # button that revokes a working credential must not be reachable by
+                # accident from a panel people click through quickly.
+                if not args.get("confirm"):
+                    return {"error": "re-pairing needs an explicit confirm"}
+                task, who, role = args["task"], args["who"], args["role"]
+                if any(g["name"] == who or g["seat"] == who for g in admin.list_guests(task)):
+                    return {"error": "that seat is a guest — she has no agent token to "
+                                     "lose; reissue her guest link instead"}
+                admin.revoke_agent(who, task=task)
+                code, expires = admin.mint_invite(task, role)
+                join = onboarding.make_join_url(self._origin(), code)
+                return {"ok": True, "copy": join,
+                        "message": f"@{role} re-paired — old token revoked, fresh invite "
+                                   f"copied (single use, expires {expires}). Their "
+                                   f"signatures and history are untouched."}
+
             return {"error": f"unknown fix '{action}'"}
         except Exception as exc:  # noqa: BLE001 — never break the bridge
             return {"error": str(exc)}

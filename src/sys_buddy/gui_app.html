@@ -159,6 +159,17 @@ body{
 .hmsg{margin-top:6px;font-size:.78rem}
 .hmsg.good{color:var(--ok,#1c9b57)}
 .hmsg.bad{color:var(--bad,#d24b4a)}
+/* The one destructive action here. Quiet by default — it is not what you came to press —
+   and it states the cost before it will run. */
+.hdanger{margin-top:6px}
+.hdanger .link{background:none;border:none;padding:0;cursor:pointer;font-family:inherit;
+  font-size:.75rem;color:var(--text-3);text-decoration:underline;text-underline-offset:3px}
+.hdanger .link:hover{color:var(--bad,#d24b4a)}
+.hconfirm{margin-top:8px;padding:10px 12px;border:1px solid var(--bad,#d24b4a);border-radius:10px;
+  background:color-mix(in srgb,var(--bad,#d24b4a) 8%,transparent)}
+.hconfirm p{margin:0 0 8px;font-size:.78rem;color:var(--text-2);white-space:pre-line}
+.hconfirm .row{display:flex;gap:8px}
+.hconfirm .btn{padding:6px 11px;font-size:.78rem}
 .card .top{display:flex;align-items:center;gap:10px}
 .card .kicker{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);font-weight:600}
 .card h2{margin:0;font-size:1.28rem;font-weight:600;letter-spacing:-.01em}
@@ -1330,6 +1341,57 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
             });
           });
           fixWrap.appendChild(btn);
+        }
+        // Secondary: the destructive one. Rendered as a quiet link, and it will not act
+        // until the host has read what it costs and pressed again.
+        if (r.secondary) {
+          var sec = document.createElement('div');
+          sec.className = 'hdanger';
+          var link = document.createElement('button');
+          link.type = 'button'; link.className = 'link';
+          link.textContent = r.secondary.fix;
+          sec.appendChild(link);
+          link.addEventListener('click', function(){
+            if (sec.querySelector('.hconfirm')) return;
+            var box = document.createElement('div');
+            box.className = 'hconfirm';
+            var p = document.createElement('p');
+            p.textContent = r.secondary.confirm || 'This cannot be undone.';
+            var row = document.createElement('div'); row.className = 'row';
+            var yes = document.createElement('button');
+            yes.type = 'button'; yes.className = 'btn primary';
+            yes.textContent = 'Yes, re-pair them';
+            var no = document.createElement('button');
+            no.type = 'button'; no.className = 'btn ghost'; no.textContent = 'Cancel';
+            no.addEventListener('click', function(){ box.remove(); });
+            yes.addEventListener('click', function(){
+              var msg = d.querySelector('.hmsg');
+              yes.disabled = true; yes.textContent = 'Working…';
+              var b3 = bridge(); if (!b3) { yes.disabled = false; return; }
+              var payload = {};
+              Object.keys(r.secondary.args || {}).forEach(function(k){ payload[k] = r.secondary.args[k]; });
+              payload.confirm = true;   // the bridge refuses without this
+              b3.apply_fix(r.secondary.action, payload).then(function(res){
+                box.remove();
+                msg.hidden = false;
+                if (!res || res.error) {
+                  msg.className = 'hmsg bad';
+                  msg.textContent = (res && res.error) || 'That did not work.';
+                  return;
+                }
+                msg.className = 'hmsg good';
+                msg.textContent = res.message || 'Done.';
+                if (res.copy) {
+                  try { navigator.clipboard.writeText(res.copy); msg.textContent += '  (copied)'; } catch(e){}
+                }
+                setTimeout(function(){ loadResumeReport(currentTaskId, currentTaskTitle); }, 900);
+              });
+            });
+            row.appendChild(yes); row.appendChild(no);
+            box.appendChild(p); box.appendChild(row);
+            sec.appendChild(box);
+          });
+          d.querySelector('.hbody').appendChild(sec);
         }
         out.appendChild(d);
       });
