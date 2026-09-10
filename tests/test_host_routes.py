@@ -289,3 +289,82 @@ def test_host_extend_tokens_requires_a_task(conn):
     seed_viewer(conn, "host", "sbv_hosttok", task_id=None)
     resp = _call(dbfile, "/host/extend-tokens", _Req(token="sbv_hosttok", body={}))
     assert resp.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# POST /host/viewer-link — reissue a BUDDY's read-only dashboard link
+#
+# The recovery that used to cost a revoke-and-re-pair. The host never held a copy of a
+# buddy's dashboard link (pairing hands it to the buddy at redeem time and nowhere else),
+# and viewer tokens are stored only hashed — so a mislaid link had no path back.
+# --------------------------------------------------------------------------- #
+def _task_with_buddy(conn, task="checkout-api"):
+    seed_task(conn, task, roles=("backend", "frontend"))
+    seed_agent(conn, task, "frontend", "Peter", f"sbk_{task}_fe")
+    conn.commit()
+    return task
+
+
+def test_host_viewer_link_reissues_for_a_buddy(conn):
+    dbfile = get_config().db_path
+    t = _task_with_buddy(conn)
+    seed_viewer(conn, "host", "sbv_hosttok", task_id=None)
+
+    resp = _call(dbfile, "/host/viewer-link",
+                 _Req(token="sbv_hosttok", body={"task": t, "who": "frontend"}))
+    assert resp.status_code == 201
+    j = _body(resp)
+    assert j["ok"] is True and j["seat"] == "frontend" and j["name"] == "Peter"
+    # Built for the request's own origin (the tunnel), like every other /host link.
+    assert j["link"].startswith("http://127.0.0.1:9292/ui?v=sbv_")
+
+
+def test_host_viewer_link_mints_a_READ_ONLY_viewer(conn):
+    """The guard the feature rests on: a non-NULL agent_id is the guest WRITE surface.
+    Reissuing a buddy's link must never quietly promote him to writing from a browser."""
+    dbfile = get_config().db_path
+    t = _task_with_buddy(conn)
+    seed_viewer(conn, "host", "sbv_hosttok", task_id=None)
+
+    _call(dbfile, "/host/viewer-link",
+          _Req(token="sbv_hosttok", body={"task": t, "who": "frontend"}))
+    row = conn.execute(
+        "SELECT agent_id, task_id FROM viewers WHERE label='Peter' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["agent_id"] is None, "read-only"
+    assert row["task_id"] == t, "scoped to this task, never all-tasks"
+
+
+def test_host_viewer_link_403s_everyone_but_the_host(conn):
+    dbfile = get_config().db_path
+    t = _task_with_buddy(conn)
+    seed_viewer(conn, "host", "sbv_hosttok", task_id=None)
+    seed_viewer(conn, "a-buddy", "sbv_buddytok", task_id=t)
+    for tok in ("sbv_buddytok", "sbv_nosuchtoken", None):
+        resp = _call(dbfile, "/host/viewer-link",
+                     _Req(token=tok, body={"task": t, "who": "frontend"}))
+        assert resp.status_code == 403, f"token {tok!r} should be forbidden"
+        assert _body(resp) == {"error": "forbidden"}, "one opaque refusal, no detail"
+
+
+def test_host_viewer_link_refuses_a_guest_seat(conn):
+    """A guest's link is the write-capable one and has its own route; minting her a
+    read-only one here would silently take her message box away."""
+    dbfile = get_config().db_path
+    t = _task_with_buddy(conn)
+    admin.add_guest(t, "Ada")
+    seed_viewer(conn, "host", "sbv_hosttok", task_id=None)
+
+    resp = _call(dbfile, "/host/viewer-link",
+                 _Req(token="sbv_hosttok", body={"task": t, "who": "Ada"}))
+    assert resp.status_code == 400
+    assert "guest" in _body(resp)["error"]
+
+
+def test_host_viewer_link_requires_task_and_who(conn):
+    dbfile = get_config().db_path
+    t = _task_with_buddy(conn)
+    seed_viewer(conn, "host", "sbv_hosttok", task_id=None)
+    for body in ({"task": t}, {"who": "frontend"}, {}):
+        resp = _call(dbfile, "/host/viewer-link", _Req(token="sbv_hosttok", body=body))
+        assert resp.status_code == 400

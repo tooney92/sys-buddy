@@ -5,7 +5,9 @@ surface. The HOST — whoever holds the all-tasks viewer token (``viewers.task_i
 i.e. :attr:`ViewerIdentity.is_host`) — gets ``/host/*`` for the few things only the person
 running the broker should be able to do from the board:
 
-* ``POST /host/guest-link`` — reissue a guest's dashboard link (same seat, new token);
+* ``POST /host/guest-link`` — reissue a GUEST's write-capable dashboard link;
+* ``POST /host/viewer-link`` — reissue a BUDDY's read-only dashboard link, the one
+  recovery that used to cost a revoke-and-re-pair;
 * ``POST /host/invite`` — mint/reissue a single-use invite for one seat, returning both
   the join URL and the paste-able ``sb1_`` invite link;
 * ``POST /host/extend-tokens`` — push back (or lift) the expiry on a task's live agent
@@ -94,6 +96,46 @@ def register_host_routes(mcp, cfg) -> None:
             )
         finally:
             conn.close()
+
+    @mcp.custom_route("/host/viewer-link", methods=["POST"])
+    async def host_viewer_link(request):
+        """Reissue a BUDDY's read-only dashboard link — same seat, a fresh token.
+
+        The counterpart to ``/host/guest-link``, and the route that keeps "my peer lost
+        their dashboard link" from costing a revoke-and-re-pair. A viewer token is stored
+        only HASHED and the HOST never held a copy of a buddy's — pairing hands it to the
+        buddy at redeem time and nowhere else — so recovery has to be a fresh mint.
+
+        The reissued viewer is READ-ONLY (``agent_id`` NULL); a guest is refused and sent to
+        ``/host/guest-link``, because her link is the write-capable one. HOST viewer token
+        ONLY; a buddy, guest or unknown token gets one opaque 403. Body is
+        ``{"task": ..., "who": <seat handle or display name>}``."""
+        conn = connect()
+        try:
+            if _host(conn, request) is None:
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+        finally:
+            conn.close()
+        payload = await _json(request)
+        task = str(payload.get("task", "") or "").strip()
+        who = str(payload.get("who", "") or "").strip()
+        if not task or not who:
+            return JSONResponse(
+                {"error": "a task and a seat (who) are required"}, status_code=400
+            )
+        try:
+            res = admin.reissue_viewer_link(task, who)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse(
+            {
+                "ok": True,
+                "link": f"{_origin(request)}/ui?v={res['viewer_token']}",
+                "seat": res["seat"],
+                "name": res["name"],
+            },
+            status_code=201,
+        )
 
     @mcp.custom_route("/host/invite", methods=["POST"])
     async def host_invite(request):

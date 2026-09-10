@@ -204,6 +204,30 @@ def cmd_task_guest_link(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_task_viewer_link(args: argparse.Namespace) -> int:
+    """Reissue a BUDDY's read-only dashboard link — same seat, a fresh token.
+
+    The counterpart to `guest-link`. A buddy's link is the most losable thing the broker
+    hands out, because the host never holds a copy: pairing gives it to the buddy at redeem
+    time and nowhere else. Without this the only recovery was revoking a healthy seat and
+    re-pairing it, which also costs him his agent token and pre-flight."""
+    from . import admin
+    from .config import get_config
+
+    _cfg_from_args(args)
+    res = admin.reissue_viewer_link(args.task, args.who)
+    origin = get_config().base_url
+    print(
+        f"Reissued a dashboard link for {res['name'] or res['seat']} "
+        f"(seat '{res['seat']}') on '{res['task']}'"
+    )
+    print("\nSend them this fresh link — it works alongside any they still had:")
+    print(f"  {origin}/ui?v={res['viewer_token']}")
+    print("\nRead-only: it shows the board and cannot act. The seat, its signatures and")
+    print("its history are untouched — only the credential is new.")
+    return 0
+
+
 def cmd_task_roster(args: argparse.Namespace) -> int:
     """The cast, from the SAME source the dashboard panel and the agents' `roster` tool
     read. Unjoined seats are listed: that is the state that silently stalls a task."""
@@ -758,6 +782,24 @@ def build_parser() -> argparse.ArgumentParser:
              "Ignored when --public-url is set.",
     )
     tgl.set_defaults(func=cmd_task_guest_link)
+
+    tvl = tsub.add_parser(
+        "viewer-link",
+        help="Reissue a BUDDY's read-only dashboard link (same seat, fresh token)",
+    )
+    tvl.add_argument("task")
+    tvl.add_argument("who", help="The seat handle or display name, e.g. frontend or Peter")
+    tvl.add_argument(
+        "--public-url",
+        help="Tunnel origin for the link (e.g. https://abc123.ngrok.app). "
+        "Defaults to $SYS_BUDDY_PUBLIC_URL, else loopback.",
+    )
+    tvl.add_argument(
+        "--port", type=int, default=DEFAULT_PORT,
+        help=f"Port your broker is on, for the loopback link (default: {DEFAULT_PORT}). "
+             "Ignored when --public-url is set.",
+    )
+    tvl.set_defaults(func=cmd_task_viewer_link)
 
     te = tsub.add_parser(
         "extend-tokens",
