@@ -25,9 +25,16 @@ from .db import connect
 OK, WARN, DEAD, INFO = "ok", "warn", "dead", "info"
 
 
-def _row(key, label, status, detail, fix=None, cli=None):
+def _row(key, label, status, detail, fix=None, cli=None, action=None, args=None):
+    """One probed fact.
+
+    ``fix`` is what the button SAYS, ``cli`` the same move at a terminal, and ``action``
+    the machine key a surface dispatches on — kept separate from ``key`` so the UI never
+    has to infer intent by string-matching a row id. ``needs`` names a value the host must
+    supply before the fix can run (only the staging target does).
+    """
     return {"key": key, "label": label, "status": status, "detail": detail,
-            "fix": fix, "cli": cli}
+            "fix": fix, "cli": cli, "action": action, "args": args or {}}
 
 
 def session_report(task: str, *, port: int = 8787, known_public_url: str | None = None) -> dict:
@@ -72,7 +79,7 @@ def _broker_row(port: int) -> dict:
     if p["alive"]:
         return _row("broker", "Broker", OK, f"up on 127.0.0.1:{port}")
     return _row("broker", "Broker", DEAD, f"nothing answering on 127.0.0.1:{port}",
-                fix="Start the broker", cli="sys-buddy serve")
+                fix="Start the broker", cli="sys-buddy serve", action="start_broker")
 
 
 def _public_url_row(port: int, known: str | None) -> dict:
@@ -100,7 +107,8 @@ def _public_url_row(port: int, known: str | None) -> dict:
         return _row("public_url", "Public URL", WARN,
                     f"CHANGED since last session — now {live} (was {known}). "
                     f"Every peer's MCP config still points at the old one.",
-                    fix="Send peers the re-point message", cli=None)
+                    fix="Copy the re-point message for peers", cli=None,
+                    action="repoint", args={"url": live})
     return _row("public_url", "Public URL", OK, live)
 
 
@@ -108,7 +116,8 @@ def _staging_row(task: str, staging: str | None) -> dict:
     if not staging:
         return _row("staging", "Staging target", INFO, "not set",
                     fix="Set the deployment target",
-                    cli=f"sys-buddy task staging-url {task} <url>")
+                    cli=f"sys-buddy task staging-url {task} <url>",
+                    action="set_staging", args={"task": task, "needs": "url"})
     p = tunnels.probe(staging, timeout=10.0)
     if p["alive"]:
         # Any HTTP answer means something is listening. A 404 at / is a healthy API.
@@ -116,7 +125,8 @@ def _staging_row(task: str, staging: str | None) -> dict:
     return _row("staging", "Staging target", DEAD,
                 f"{staging} is {p['detail']} — the one URL your agents may fetch",
                 fix="Set the new tunnel URL",
-                cli=f"sys-buddy task staging-url {task} <new-url>")
+                cli=f"sys-buddy task staging-url {task} <new-url>",
+                action="set_staging", args={"task": task, "needs": "url"})
 
 
 def _tokens_row(task: str, agents) -> dict:
@@ -133,11 +143,13 @@ def _tokens_row(task: str, agents) -> dict:
     hours = (soonest - now) / 3600.0
     if hours <= 0:
         return _row("tokens", "Agent tokens", DEAD, "EXPIRED — agents are locked out",
-                    fix="Extend them", cli=f"sys-buddy task extend-tokens {task} --never")
+                    fix="Extend them", cli=f"sys-buddy task extend-tokens {task} --never",
+                    action="extend_tokens", args={"task": task})
     if hours < 8:
         return _row("tokens", "Agent tokens", WARN,
                     f"soonest expires in {hours:.1f}h",
-                    fix="Extend them", cli=f"sys-buddy task extend-tokens {task} --hours 24")
+                    fix="Extend them", cli=f"sys-buddy task extend-tokens {task} --hours 24",
+                    action="extend_tokens", args={"task": task})
     return _row("tokens", "Agent tokens", OK, f"soonest expires in {hours:.0f}h")
 
 
@@ -151,16 +163,19 @@ def _seat_rows(task: str, roster: list[dict]) -> list[dict]:
             if r.get("invite_pending"):
                 out.append(_row(f"seat:{seat}", f"@{seat}", WARN, "invited, not joined yet",
                                 fix="Reissue the invite",
-                                cli=f"sys-buddy invite --task {task} --role {seat}"))
+                                cli=f"sys-buddy invite --task {task} --role {seat}",
+                                action="invite", args={"task": task, "role": seat}))
             else:
                 out.append(_row(f"seat:{seat}", f"@{seat}", INFO, "seat unfilled",
                                 fix="Invite someone",
-                                cli=f"sys-buddy invite --task {task} --role {seat}"))
+                                cli=f"sys-buddy invite --task {task} --role {seat}",
+                                action="invite", args={"task": task, "role": seat}))
             continue
         who = r.get("name") or seat
         is_guest = r.get("role") == seats.GUEST_ROLE
         verb = "guest-link" if is_guest else "viewer-link"
         out.append(_row(f"seat:{seat}", f"@{seat}", OK, f"joined · {who}",
                         fix="Copy their dashboard link",
-                        cli=f"sys-buddy task {verb} {task} {who}"))
+                        cli=f"sys-buddy task {verb} {task} {who}",
+                        action="viewer_link", args={"task": task, "who": who}))
     return out

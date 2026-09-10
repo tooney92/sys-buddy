@@ -12,6 +12,8 @@ while requests go to the real one.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from sys_buddy import admin, gui, health, tunnels
@@ -101,3 +103,113 @@ def test_the_report_changes_nothing(conn, monkeypatch):
     before = conn.execute("SELECT COUNT(*) c FROM viewers").fetchone()["c"]
     _api().resume_report("signin")
     assert conn.execute("SELECT COUNT(*) c FROM viewers").fetchone()["c"] == before
+
+
+# --------------------------------------------------------------------------- #
+# apply_fix — one row, one targeted move
+# --------------------------------------------------------------------------- #
+def _seeded(conn, task="signin"):
+    seed_task(conn, task, roles=("backend", "frontend"))
+    seed_agent(conn, task, "backend", "Tony", f"sbk_{task}_be")
+    seed_agent(conn, task, "frontend", "Peter", f"sbk_{task}_fe")
+    conn.commit()
+    return task
+
+
+def _no_tunnel(monkeypatch):
+    monkeypatch.setattr(tunnels, "ngrok_for_port", lambda *a, **k: None)
+
+
+def test_extend_tokens_lifts_the_expiry_and_says_who(conn, monkeypatch):
+    t = _seeded(conn)
+    conn.execute("UPDATE agents SET expires_at=? WHERE task_id=?", (1.0, t))
+    conn.commit()
+    res = _api().apply_fix("extend_tokens", {"task": t})
+    assert res["ok"] is True
+    assert "@backend" in res["message"] and "@frontend" in res["message"], "name the seats"
+    rows = conn.execute("SELECT expires_at FROM agents WHERE task_id=?", (t,)).fetchall()
+    assert all(r["expires_at"] is None for r in rows)
+
+
+def test_set_staging_updates_the_target_without_touching_contracts(conn, monkeypatch):
+    """The whole reason the target lives outside the signed contract."""
+    t = _seeded(conn)
+    sigs = conn.execute("SELECT COUNT(*) c FROM contract_signatures").fetchone()["c"]
+    res = _api().apply_fix("set_staging", {"task": t, "url": "https://new.example.com"})
+    assert res["ok"] is True
+    assert "No contract or signature changed" in res["message"]
+    assert conn.execute("SELECT staging_url FROM tasks WHERE id=?", (t,)).fetchone()[0] \
+        == "https://new.example.com"
+    assert conn.execute("SELECT COUNT(*) c FROM contract_signatures").fetchone()["c"] == sigs
+
+
+def test_set_staging_refuses_an_empty_url(conn):
+    t = _seeded(conn)
+    assert "error" in _api().apply_fix("set_staging", {"task": t, "url": "  "})
+
+
+def test_viewer_link_copies_a_link_and_leaves_the_seat_alone(conn, monkeypatch):
+    """The fix that replaces revoke-and-re-pair."""
+    t = _seeded(conn)
+    _no_tunnel(monkeypatch)
+    before = conn.execute(
+        "SELECT id FROM agents WHERE task_id=? AND handle='frontend'", (t,)).fetchone()["id"]
+    res = _api().apply_fix("viewer_link", {"task": t, "who": "Peter"})
+    assert res["ok"] is True
+    assert "/ui?v=sbv_" in res["copy"], "the link is what gets copied"
+    after = conn.execute(
+        "SELECT id, revoked_at FROM agents WHERE task_id=? AND handle='frontend'", (t,)).fetchone()
+    assert after["id"] == before and after["revoked_at"] is None, "seat untouched"
+
+
+def test_viewer_link_uses_the_GUEST_path_for_a_guest(conn, monkeypatch):
+    """A guest's link is write-capable; handing her a read-only one silently removes her
+    message box."""
+    t = _seeded(conn)
+    _no_tunnel(monkeypatch)
+    admin.add_guest(t, "Ada")
+    res = _api().apply_fix("viewer_link", {"task": t, "who": "Ada"})
+    assert res["ok"] is True
+    row = conn.execute(
+        "SELECT agent_id FROM viewers WHERE label='Ada' ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["agent_id"] is not None, "a guest keeps her write-capable link"
+
+
+def test_invite_copies_a_join_url_for_an_unfilled_seat(conn, monkeypatch):
+    t = _seeded(conn, "fresh")
+    _no_tunnel(monkeypatch)
+    res = _api().apply_fix("invite", {"task": t, "role": "frontend"})
+    assert res["ok"] is True
+    assert "/join#c=" in res["copy"]
+    assert "expires" in res["message"]
+
+
+def test_repoint_copies_a_message_with_a_token_PLACEHOLDER(conn, monkeypatch):
+    """The host does not have the peer's token — it is stored hashed — so the message
+    cannot contain it, and must not pretend to."""
+    from sys_buddy import onboarding
+    _seeded(conn)
+    _no_tunnel(monkeypatch)
+    res = _api().apply_fix("repoint", {"url": "https://new.ngrok-free.app"})
+    assert res["ok"] is True
+    assert onboarding.TOKEN_PLACEHOLDER in res["copy"]
+    # No REAL token — the prose may say "Bearer sbk_..." as a hint, so match the shape of
+    # an actual credential rather than the bare prefix.
+    assert not re.search(r"sbk_[A-Za-z0-9_-]{20,}", res["copy"]), "never a real token"
+    assert "https://new.ngrok-free.app/mcp" in res["copy"]
+
+
+def test_an_unknown_fix_is_an_error_not_a_crash(conn):
+    assert "error" in _api().apply_fix("drop_everything", {})
+
+
+def test_apply_fix_cannot_revoke(conn):
+    """Deliberately absent. Revoking burns a peer's working credential, and a destructive
+    move does not belong on a panel you glance at."""
+    t = _seeded(conn)
+    for action in ("revoke", "revoke_agent", "reinvite", "close"):
+        assert "error" in _api().apply_fix(action, {"task": t, "who": "Peter"})
+    live = conn.execute(
+        "SELECT COUNT(*) c FROM agents WHERE task_id=? AND revoked_at IS NULL", (t,)
+    ).fetchone()["c"]
+    assert live == 2, "both seats still live"

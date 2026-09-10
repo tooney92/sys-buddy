@@ -152,6 +152,13 @@ body{
 .hrow .hdetail{font-size:.82rem;color:var(--text-2);margin-top:2px;overflow-wrap:anywhere}
 .hrow .hcli{font-family:var(--font-mono,monospace);font-size:.74rem;color:var(--text-3);margin-top:5px;
   background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:5px 8px;overflow-wrap:anywhere}
+.hfix{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.hfix .btn{padding:6px 11px;font-size:.78rem}
+.hfix input{flex:1;min-width:180px;padding:6px 9px;border:1px solid var(--border-strong);
+  border-radius:8px;background:var(--surface-2);color:var(--text);font-family:inherit;font-size:.78rem}
+.hmsg{margin-top:6px;font-size:.78rem}
+.hmsg.good{color:var(--ok,#1c9b57)}
+.hmsg.bad{color:var(--bad,#d24b4a)}
 .card .top{display:flex;align-items:center;gap:10px}
 .card .kicker{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);font-weight:600}
 .card h2{margin:0;font-size:1.28rem;font-weight:600;letter-spacing:-.01em}
@@ -1225,6 +1232,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   // is a fix the host presses, and revoke-and-re-invite is deliberately not one of them
   // yet — it belongs behind a confirm, as a last resort, not on a panel you glance at.
   var HSTATE = { ok:'OK', warn:'NEEDS ATTENTION', dead:'BROKEN', info:'—' };
+  var currentTaskId = null, currentTaskTitle = null;
 
   function esc(t){ return String(t == null ? '' : t).replace(/[&<>"']/g, function(c){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
@@ -1252,6 +1260,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   }
 
   function loadResumeReport(taskId, title){
+    currentTaskId = taskId; currentTaskTitle = title;
     var wrap = document.getElementById('resume-report-wrap');
     var out  = document.getElementById('resume-report');
     document.getElementById('resume-report-title').textContent = 'Health check — ' + title;
@@ -1272,8 +1281,56 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
         // The CLI is shown for anything not already fine — a host who can see the command
         // can run it when the app is not in front of them.
         if (r.status !== 'ok' && r.cli) html += '<div class="hcli">' + esc(r.cli) + '</div>';
-        html += '</div>';
+        html += '<div class="hfix"></div><div class="hmsg" hidden></div></div>';
         d.innerHTML = html;
+        // One button per row, and ONLY where there is something to press. The staging fix
+        // is the one that needs a value from the host, so it grows an input beside it.
+        if (r.action && r.fix) {
+          var fixWrap = d.querySelector('.hfix');
+          var needsUrl = r.args && r.args.needs === 'url';
+          var input = null;
+          if (needsUrl) {
+            input = document.createElement('input');
+            input.type = 'text';
+            input.placeholder = 'https://your-new-tunnel…';
+            input.spellcheck = false;
+            fixWrap.appendChild(input);
+          }
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'btn' + (r.status === 'ok' ? ' ghost' : ' primary');
+          btn.textContent = r.fix;
+          btn.addEventListener('click', function(){
+            var msg = d.querySelector('.hmsg');
+            var payload = {};
+            Object.keys(r.args || {}).forEach(function(k){ payload[k] = r.args[k]; });
+            if (needsUrl) payload.url = input.value;
+            btn.disabled = true; btn.textContent = 'Working…';
+            var b2 = bridge();
+            if (!b2) { btn.disabled = false; btn.textContent = r.fix; return; }
+            b2.apply_fix(r.action, payload).then(function(res){
+              btn.disabled = false; btn.textContent = r.fix;
+              msg.hidden = false;
+              if (!res || res.error) {
+                msg.className = 'hmsg bad';
+                msg.textContent = (res && res.error) || 'That did not work.';
+                return;
+              }
+              msg.className = 'hmsg good';
+              msg.textContent = res.message || 'Done.';
+              // A link or a message is only useful once it is somewhere the peer can read it.
+              if (res.copy) {
+                try {
+                  navigator.clipboard.writeText(res.copy);
+                  msg.textContent += '  (copied)';
+                } catch (e) {}
+              }
+              // Re-probe so the row reflects what is now true, rather than what was.
+              setTimeout(function(){ loadResumeReport(currentTaskId, currentTaskTitle); }, 700);
+            });
+          });
+          fixWrap.appendChild(btn);
+        }
         out.appendChild(d);
       });
     });

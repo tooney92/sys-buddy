@@ -342,6 +342,82 @@ class GuiApi:
         except Exception as exc:  # noqa: BLE001 — never break the bridge
             return {"error": str(exc)}
 
+    def apply_fix(self, action: str, args: dict | None = None) -> dict:
+        """Run ONE health-row fix. The panel dispatches on ``action``; nothing runs by itself.
+
+        Returns ``{ok, message}`` and, where the useful outcome is something to hand a
+        person, ``copy`` — text the panel puts on the clipboard. A link or a re-point
+        message is only worth producing if it ends up somewhere the peer can read it.
+
+        Deliberately ABSENT: revoke-and-re-invite. It burns a peer's working credential,
+        and a destructive move does not belong on a panel you glance at — it stays behind a
+        confirm elsewhere.
+
+        Never raises: this crosses a pywebview bridge, where an exception reads to the user
+        as the button simply not working.
+        """
+        args = args or {}
+        try:
+            _ensure_broker()
+            from . import admin, onboarding, seats, tunnels
+
+            if action == "start_broker":
+                return {"ok": True, "message": "Broker is up."}
+
+            if action == "extend_tokens":
+                touched = admin.extend_agent_tokens(args["task"], never=True)
+                who = ", ".join("@" + t["seat"] for t in touched) or "no live seats"
+                return {"ok": True,
+                        "message": f"Extended {len(touched)} seat(s) to no expiry — {who}"}
+
+            if action == "set_staging":
+                url = (args.get("url") or "").strip()
+                if not url:
+                    return {"error": "Paste the new staging URL first."}
+                res = admin.set_staging_url(args["task"], url)
+                return {"ok": True,
+                        "message": f"Deployment target set — {res['effective']}. "
+                                   f"No contract or signature changed."}
+
+            if action == "viewer_link":
+                task, who = args["task"], args["who"]
+                # A guest's link is the write-capable one and has its own path; picking the
+                # wrong one would silently take her message box away.
+                is_guest = any(
+                    g["name"] == who or g["seat"] == who for g in admin.list_guests(task)
+                )
+                res = (admin.reissue_guest_link(task, who) if is_guest
+                       else admin.reissue_viewer_link(task, who))
+                link = f"{self._origin()}/ui?v={res['viewer_token']}"
+                return {"ok": True, "copy": link,
+                        "message": f"Fresh dashboard link for {res['name'] or res['seat']} "
+                                   f"copied. Same seat — their history is untouched."}
+
+            if action == "invite":
+                task, role = args["task"], args["role"]
+                code, expires = admin.mint_invite(task, role)
+                join = onboarding.make_join_url(self._origin(), code)
+                return {"ok": True, "copy": join,
+                        "message": f"Invite for @{admin.seat_for(task, role)} copied — "
+                                   f"single use, expires {expires}."}
+
+            if action == "repoint":
+                url = args.get("url") or self._origin()
+                return {"ok": True, "copy": onboarding.repoint_message(url),
+                        "message": "Re-point message copied — send it to your peers. "
+                                   "They keep their token; only the address changes."}
+
+            return {"error": f"unknown fix '{action}'"}
+        except Exception as exc:  # noqa: BLE001 — never break the bridge
+            return {"error": str(exc)}
+
+    def _origin(self) -> str:
+        """The address a peer must actually use — the live tunnel if there is one."""
+        from . import tunnels
+
+        t = tunnels.ngrok_for_port(BROKER_PORT)
+        return (t or {}).get("public_url") or BASE_URL
+
     def resume_report(self, task_id: str) -> dict:
         """Health-check one task before picking it back up. Probes; changes nothing."""
         try:

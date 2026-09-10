@@ -987,6 +987,40 @@ def claude_setup_command(
     )
 
 
+TOKEN_PLACEHOLDER = "<YOUR_EXISTING_sbk_TOKEN>"
+
+
+def repoint_message(public_url: str, name: str = "sys-buddy") -> str:
+    """The message a host sends a peer when the BROKER's address has moved.
+
+    A free-tier tunnel hands out a fresh hostname on every restart, which silently
+    invalidates every peer's MCP config: their agent keeps pointing at an address that no
+    longer answers. The peer does NOT need a new credential for this — only a new address —
+    so the fix is to swap the host and keep the token, which costs them nothing.
+
+    The host cannot write the command out in full, and that is not an oversight: agent
+    tokens are stored only HASHED, so the host does not have the peer's token and could not
+    put it here even if it were wise to. The peer fills it from their own config, which is
+    the one place it still exists — hence the placeholder.
+
+    Re-pairing is the alternative and a far worse one: it burns the peer's agent token,
+    their MCP config and their pre-flight, to fix an address.
+    """
+    setup = claude_setup_command(f"{public_url.rstrip('/')}/mcp", TOKEN_PLACEHOLDER, name)
+    return (
+        f"The broker moved to a new address — {public_url}\n"
+        "Nothing else changed. Your token is still valid; you only need to re-point at the "
+        "new host.\n\n"
+        "1) Find your existing token in your MCP config (the `Authorization: Bearer sbk_...` "
+        "value) and run this IN YOUR PROJECT FOLDER, pasting it in place of the "
+        f"placeholder:\n\n{setup}\n\n"
+        "2) Restart your session — MCP servers load at startup.\n\n"
+        "If your tools come back but you are on the WRONG seat, a stale same-named entry in "
+        "a higher-precedence scope is winning: `claude mcp list` to spot it, "
+        f"`claude mcp remove {name} -s local` to drop it. One seat = one token = one config."
+    )
+
+
 def configure_claude(mcp_url: str, token: str, name: str = "sys-buddy") -> dict:
     """Run the ``claude mcp`` setup for the operator; never raise.
 
