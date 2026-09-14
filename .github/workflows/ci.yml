@@ -22,6 +22,32 @@ jobs:
       - name: Run the suite
         run: uv run pytest -q
 
+  fresh-install:
+    name: installs and imports without the lockfile
+    # `uv sync --frozen` above only ever proves the LOCKED versions work, and users never
+    # get those: `uv tool install sys-buddy` and `pip install` resolve the newest releases
+    # pyproject allows and ignore uv.lock entirely. v2.16-2.18 passed the suite above and
+    # still crashed on every fresh install the day mcp 2.0 renamed McpError. So build the
+    # wheel, install it the way a user would, and import the modules that actually run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Build the wheel
+        run: uv build --wheel
+      - name: Install it fresh, ignoring uv.lock
+        run: |
+          uv venv /tmp/fresh
+          VIRTUAL_ENV=/tmp/fresh uv pip install dist/*.whl
+      - name: Import what actually runs
+        # Not sys_buddy.gui: pywebview wants a display toolkit a headless runner lacks. The
+        # break this exists to catch lives in server/middleware, which ARE imported here.
+        run: |
+          /tmp/fresh/bin/python -c "import sys_buddy.server, sys_buddy.middleware, sys_buddy.tools; print('imports OK')"
+          /tmp/fresh/bin/sys-buddy --version
+
   version-guard:
     name: version not hand-edited
     # Only on PRs, and skip release-please's own release PR — that one legitimately

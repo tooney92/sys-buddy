@@ -5,7 +5,11 @@ description = "An authenticated, contract-enforcing message broker that lets two
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=2.0",
+    # Upper-bounded on purpose. `uv tool install` ignores uv.lock and resolves the newest
+    # release, so an unbounded dep ships untested majors to every fresh install:
+    # fastmcp 4 / mcp 2 did exactly that (mcp 2 renamed McpError), breaking v2.16-2.18.
+    "fastmcp>=2.0,<4",
+    "mcp>=1.0,<2",
     "pywebview>=5.0",
 ]
 
