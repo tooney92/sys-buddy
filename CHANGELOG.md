@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.18.1](https://github.com/tooney92/sys-buddy/compare/v2.18.0...v2.18.1) (2026-09-14)
+
+
+### Fixed
+
+* bound fastmcp and mcp below their breaking majors ([#115](https://github.com/tooney92/sys-buddy/issues/115)) ([3a31c9f](https://github.com/tooney92/sys-buddy/commit/3a31c9fbac10cd9bc6e7a66a4029e9c3851c751a))
+
 ## [2.18.0](https://github.com/tooney92/sys-buddy/compare/v2.17.0...v2.18.0) (2026-09-10)
 
 
