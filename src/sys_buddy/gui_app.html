@@ -711,7 +711,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
 
     <div class="form">
       <div class="field">
-        <button type="button" class="btn primary" id="btn-open-dash">Open my dashboard</button>
+        <button type="button" class="btn primary" id="btn-resume-dash">Open my dashboard</button>
         <p class="hint" id="dash-note"></p>
       </div>
 
@@ -1398,7 +1398,7 @@ textarea.prompt:focus-visible{outline:2px solid var(--accent);outline-offset:1px
     });
   }
 
-  document.getElementById('btn-open-dash').addEventListener('click', function(){
+  document.getElementById('btn-resume-dash').addEventListener('click', function(){
     var note = document.getElementById('dash-note');
     note.textContent = 'Opening…';
     var b = bridge();
