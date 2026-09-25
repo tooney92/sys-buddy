@@ -10,6 +10,13 @@ All notable changes to **sys-buddy** are recorded here. The format follows
 
 Each release is also git-tagged `vX.Y.Z` and has a fuller note in `releases/vX.Y.Z.md`.
 
+## [2.18.2](https://github.com/tooney92/sys-buddy/compare/v2.18.1...v2.18.2) (2026-09-25)
+
+
+### Fixed
+
+* the host screen's "Open dashboard" button did nothing ([#118](https://github.com/tooney92/sys-buddy/issues/118)) ([fd587d4](https://github.com/tooney92/sys-buddy/commit/fd587d4c27f226fb709860071e8b6e3787492d08))
+
 ## [2.18.1](https://github.com/tooney92/sys-buddy/compare/v2.18.0...v2.18.1) (2026-09-14)
 
 
